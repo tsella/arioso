@@ -211,7 +211,7 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
 
     for chunk in chunk_text(text, 300) {
         let mut symbols: Vec<&str> = Vec::new();
-        for word in chunk.split_whitespace() {
+        for word in chunk.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')) {
             let cleaned: String = word
                 .chars()
                 .filter(|c| c.is_alphanumeric() || *c == '\'')
