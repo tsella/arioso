@@ -78,9 +78,10 @@ These are known and not fixed. They are listed so nobody assumes they were.
 - **No connection cap.** `server.limits.max_connections` parses and does nothing; the accept
   loop belongs to `axum-server`. The header timeout and the rate limiter are the controls
   that exist.
-- **Model files are trusted.** A manifest `name` containing `..` would join outside the
-  models directory. The manifest ships with the binary, so this needs local write access to
-  exploit, but the join should be checked.
+**A manifest name cannot leave the models directory.** A `name` of `../../etc/passwd`, an
+absolute path, or a name with a separator in it is refused at parse time, so a corrupted
+manifest cannot become an arbitrary file write. The manifest ships with the binary, so this
+needed local access to exploit; the check costs nothing and removes the class.
 
 ## Fuzzing
 

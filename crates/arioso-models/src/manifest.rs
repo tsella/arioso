@@ -137,6 +137,22 @@ impl Manifest {
                 });
             }
             for file in &model.files {
+                // The name is joined onto the models directory. A name that climbs out of
+                // it writes wherever the process can reach, which turns a corrupted
+                // manifest into an arbitrary file write. The manifest ships with the
+                // binary, so this needs local access to exploit, but the join is checked
+                // here rather than trusted.
+                if file.name.is_empty()
+                    || file.name.contains('/')
+                    || file.name.contains('\\')
+                    || file.name.contains("..")
+                    || std::path::Path::new(&file.name).is_absolute()
+                {
+                    return Err(ManifestError::Invalid {
+                        path: format!("models[{}].files[{}].name", model.id, file.name),
+                        message: "must be a plain file name, with no directory part".into(),
+                    });
+                }
                 if !is_sha256(&file.sha256) {
                     return Err(ManifestError::Invalid {
                         path: format!("models[{}].files[{}].sha256", model.id, file.name),
@@ -322,6 +338,28 @@ mod tests {
     fn missing_release_key_is_named() {
         let err = verify_manifest(b"x", "00", RELEASE_PUBKEY_HEX).unwrap_err();
         assert!(err.to_string().contains("no release public key"), "{err}");
+    }
+
+    #[test]
+    fn a_file_name_that_climbs_out_of_the_directory_is_refused() {
+        let hash = "0".repeat(64);
+        for name in ["../../etc/passwd", "/etc/passwd", "sub/dir.bin", ".."] {
+            let document = format!(
+                r#"{{"schema_version":1,"models":[{{"id":"m","kind":"stt","engine":"sherpa","version":"1","license":"MIT","files":[{{"name":"{name}","url":"https://example.invalid/f","sha256":"{hash}","size":1}}]}}]}}"#
+            );
+            let error = Manifest::parse(document.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("plain file name"),
+                "{name} was accepted: {error}"
+            );
+        }
+        // A plain name still parses, so the check rejects only what it should.
+        let document = format!(
+            r#"{{"schema_version":1,"models":[{{"id":"m","kind":"stt","engine":"sherpa","version":"1","license":"MIT","files":[{{"name":"model.onnx","url":"https://example.invalid/f","sha256":"{hash}","size":1}}]}}]}}"#
+        );
+        assert!(Manifest::parse(document.as_bytes()).is_ok());
     }
 
     #[test]
