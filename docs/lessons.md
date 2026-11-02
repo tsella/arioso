@@ -161,3 +161,19 @@ returned nothing while the catalog said `en-GB`: the voice ids use an underscore
 manifest a hyphen, so a prefix match on the raw string failed for every real client
 query. The unit tests passed because they asked for `en`. Write the example output by
 running the command, then read the answer.
+
+## A build that caches by directory existence
+
+**`is_dir()` is not `has files`.** The sherpa-onnx build script extracts its native
+libraries into `target/sherpa-onnx-prebuilt/<stem>/lib` and returns early when that
+directory exists, never checking whether anything is inside. `rust-cache` prunes large
+directories, so a restored cache left the directory present and empty: the script skipped
+its download, printed a link search path, and the linker reported "could not find native
+static library". Deleting the build output and the fingerprint changed nothing, because
+those decide whether the script runs, not what it finds when it does.
+
+Two failed attempts before the right one. The first removed only `target/debug/build`,
+which broke the platforms that had been passing, because it forced a re-run that found the
+same empty directory. The second added the fingerprint, with the same result. The rule:
+when a third-party build script fails to link, read the script before changing the cache.
+The answer was four lines into its download function.
