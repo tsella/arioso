@@ -30,6 +30,13 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**Two models in one directory produce a pair that loads and then fails.** Adding whisper
+base beside whisper tiny left both sets of files flat in the models directory. The loader
+searched for an encoder and a decoder separately, so it took tiny's encoder and base's
+decoder; the graph then failed with a cache-dimension error that reads like a corrupt
+model. Rule: when a directory can hold more than one version of a thing, select the files
+by a shared name or by the manifest, and refuse a set that does not agree.
+
 **A fallback path that returns early is invisible in testing.** The partial-transcript
 path used `try_lock` and returned `None` when the engine was not yet loaded, so the first
 session after a restart produced no partials at all and later sessions worked. It looked

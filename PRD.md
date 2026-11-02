@@ -724,19 +724,24 @@ are pronounced with CMUdict and the F15 rules, and a phoneme edit distance withi
 the form's length counts as the same words. The closest match wins its span, and the
 longer span wins a tie.
 
-Re-measured after the change, same recordings:
+Re-measured after the change, same recordings, with whisper base as the default model:
 
 | Spoken form | Whisper wrote | Corrected to |
 | --- | --- | --- |
 | `tom seller` | `Tonseller` | `Tom Sella` |
 | `koober netties` | `Cooper Netis` | `Kubernetes` |
 | `sell a` | `cell a` | `Sella` |
-| `ah ree oh so` | `REO so` | still `REO so` |
+| `ah ree oh so` | `a Rio so` | `arioso` |
 
-The last row is the limit of the method: a three-letter string is pronounced by the F15
-rules as letters sound inside a word, not as the letters are named, so "REO" and "ah ree
-oh so" do not come close enough. Spelling out initialisms before comparison would fix it
-and is not built.
+The full sentence now round-trips: "Tom Sella built arioso for his own machine." comes
+back exactly.
+
+Two limits, measured rather than assumed. A form of several words must be pronounced
+word by word; the first version smashed them into one string, sent it to the spelling
+rules, and never matched. And the model matters more than the matcher: tiny wrote
+"Tonseller built REO so", the matcher then matched three words against a four-word form
+and swallowed "built", and base does not have the problem. That is why base is the
+default despite being 57 MiB larger.
 
 Known risk, accepted: a spoken form made of ordinary English words rewrites those words
 wherever they appear. An entry that says `sell a` will turn "we sell a car" into "we Sella

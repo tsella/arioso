@@ -318,18 +318,19 @@ sherpa-whisper-tiny-en             stt     98.8 MiB  MIT        installed
 
 ### The dictionary on the way back
 
-The reverse map needs the transcript to match the spoken form letter for letter, and it
-usually does not. Measured, both directions synthesized by Arioso:
+The reverse map compares sounds, not letters, because the engine never reproduces a
+respelling exactly. Measured, both directions synthesized by Arioso, with a dictionary
+entry for the name:
 
 ```console
 $ arioso say "Tom Sella built arioso for his own machine." --out dict.wav
 $ arioso transcribe dict.wav
-Tonseller built REO so for his own machine.
+Tom Sella built arioso for his own machine.
 ```
 
-"Tonseller" is not "tom seller", so the entry does not fire. The same happened with
-"koober netties", which came back as "Cooper Netis". The fix is recorded in the PRD: match
-on phonemes, not letters.
+The engine heard "Tom Sella built a Rio so" and the entry put "arioso" back. The same
+recording through whisper tiny, which is not the default, gives "Tonseller built REO so"
+and the matcher then swallows the word "built": that is why the default is base.
 
 ## 12. Comparing voices
 

@@ -151,7 +151,9 @@ the fastest and the smallest file, at 16 kHz.
 ## Speech to text
 
 `arioso transcribe` takes a WAV file, mono, 16-bit PCM or 32-bit float, at any rate. The
-audio is resampled to 16 kHz and read by Whisper.
+audio is resampled to 16 kHz and read by Whisper base, the catalog default at 153 MiB.
+Whisper tiny is in the catalog too, at 99 MiB, and it is not as accurate: on the same
+recording it wrote "Tonseller built REO so" where base wrote "Tom Sella built a Rio so".
 
 ```console
 $ arioso transcribe hello.wav
