@@ -164,14 +164,90 @@ impl Whisper {
             &resampled
         };
 
-        let stream = self.recognizer.create_stream();
-        stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), samples);
-        self.recognizer.decode(&stream);
-        let result = stream.get_result().ok_or(SttError::NoResult)?;
-        Ok(Transcript {
-            text: result.text.trim().to_owned(),
-        })
+        // The engine decodes one window of at most thirty seconds and discards whatever
+        // follows, without an error. Handing it an hour of audio returns the first half
+        // minute and a success code, so the audio is cut here and the pieces joined.
+        let mut text = String::new();
+        for window in windows(samples, ENGINE_RATE) {
+            let stream = self.recognizer.create_stream();
+            stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), window);
+            self.recognizer.decode(&stream);
+            let Some(result) = stream.get_result() else {
+                continue;
+            };
+            let piece = result.text.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(piece);
+        }
+        if text.is_empty() {
+            return Err(SttError::NoResult);
+        }
+        Ok(Transcript { text })
     }
+}
+
+/// Longest audio one decode may take, in seconds.
+///
+/// The engine accepts "less than 30 seconds" and silently keeps only the first thirty of
+/// anything longer, so a window of exactly thirty lands on the wrong side of its own test.
+/// One second of margin costs a decode per half hour and removes the ambiguity.
+const WINDOW_S: usize = 29;
+
+/// How far back from a window edge to look for a quiet place to cut, in seconds.
+///
+/// A cut inside a word costs accuracy on both sides of it. A pause costs nothing, and
+/// speech has one every few seconds.
+const TAIL_S: usize = 3;
+
+/// Split audio into pieces the engine will decode whole.
+///
+/// Each piece ends at the quietest point in the last few seconds of a window, so a cut
+/// lands in a pause where it can. The pieces cover the input exactly: nothing is dropped,
+/// and nothing is decoded twice.
+fn windows(samples: &[f32], rate: u32) -> Vec<&[f32]> {
+    let window = WINDOW_S * rate as usize;
+    let tail = TAIL_S * rate as usize;
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < samples.len() {
+        let remaining = samples.len() - start;
+        if remaining <= window {
+            pieces.push(&samples[start..]);
+            break;
+        }
+        let edge = start + window;
+        // Search the last few seconds, but never cut before the halfway mark: a quiet
+        // stretch early in the window would otherwise make a tiny piece and waste a decode.
+        let floor = start + window / 2;
+        let from = edge.saturating_sub(tail).max(floor);
+        let cut = quietest(&samples[from..edge]).map_or(edge, |offset| from + offset);
+        pieces.push(&samples[start..cut]);
+        start = cut;
+    }
+    pieces
+}
+
+/// Where to cut, as an offset into `slice`: the middle of the quietest 20 ms frame.
+fn quietest(slice: &[f32]) -> Option<usize> {
+    let frame = (ENGINE_RATE / 50) as usize;
+    if slice.len() < frame * 2 {
+        return None;
+    }
+    let mut best = None;
+    let mut best_energy = f32::MAX;
+    for offset in (0..=slice.len() - frame).step_by(frame / 2) {
+        let energy: f32 = slice[offset..offset + frame].iter().map(|s| s * s).sum();
+        if energy < best_energy {
+            best_energy = energy;
+            best = Some(offset + frame / 2);
+        }
+    }
+    best
 }
 
 fn not_a_model(dir: &Path, missing: &str) -> SttError {
@@ -310,5 +386,64 @@ mod tests {
                 Err(SttError::EmptyAudio)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// Speech-shaped noise: loud everywhere except the given pause.
+    fn audio(seconds: usize, pause: Option<(usize, usize)>) -> Vec<f32> {
+        let rate = ENGINE_RATE as usize;
+        let mut samples: Vec<f32> = (0..seconds * rate)
+            .map(|i| ((i as f32) * 0.01).sin() * 0.5)
+            .collect();
+        if let Some((from, to)) = pause {
+            for sample in &mut samples[from * rate..to * rate] {
+                *sample = 0.0;
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn audio_inside_one_window_is_not_cut() {
+        let samples = audio(20, None);
+        let pieces = windows(&samples, ENGINE_RATE);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].len(), samples.len());
+    }
+
+    #[test]
+    fn long_audio_is_cut_into_whole_windows_and_nothing_is_lost() {
+        let samples = audio(65, None);
+        let pieces = windows(&samples, ENGINE_RATE);
+        assert!(pieces.len() >= 3, "65 s needs at least three windows");
+        for piece in &pieces {
+            assert!(
+                piece.len() <= WINDOW_S * ENGINE_RATE as usize,
+                "a window is too long"
+            );
+        }
+        let total: usize = pieces.iter().map(|p| p.len()).sum();
+        assert_eq!(
+            total,
+            samples.len(),
+            "the pieces must cover the input exactly"
+        );
+    }
+
+    #[test]
+    fn a_cut_lands_in_a_pause_when_there_is_one() {
+        // A pause from 27 s to 29 s: the first window ends at 30 s, so the cut should land
+        // inside the pause rather than at the edge.
+        let samples = audio(65, Some((27, 29)));
+        let pieces = windows(&samples, ENGINE_RATE);
+        let first = pieces[0].len() / ENGINE_RATE as usize;
+        assert!(
+            (27..=30).contains(&first),
+            "the first piece ended at {first} s, not in the pause"
+        );
     }
 }
