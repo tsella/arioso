@@ -674,6 +674,40 @@ Assumptions taken without asking, all reversible:
   to the engine when M2 lands.
 - Matching covers phrases as well as words, longest first, case-insensitive by default.
 
+### F15. Letter to sound for words outside the dictionary
+
+The CMU dictionary holds 126,052 words. Names, brands, and jargon are not in it. Today
+those words are skipped and named, which leaves a hole in the sentence.
+
+- F15.1 Order. A word is looked up in the user dictionary, then normalized, then looked up
+  in CMUdict, and only then pronounced by rule. The rules never override a known word.
+- F15.2 Rules. Grapheme patterns of up to four letters, longest match first, applied left
+  to right. A rule may require the start or the end of the word, or a following letter
+  class.
+- F15.3 Consonants with a following letter that changes them: `c` before `e`, `i`, `y` is
+  `s`; `g` before `e`, `i`, `y` is `j`; `s` between vowels or after a voiced sound is `z`.
+  Digraphs `ch`, `sh`, `th`, `ph`, `wh`, `ck`, `ng`, `qu` are handled as units.
+- F15.4 Vowels. Short by default. A final silent `e` is dropped, and it lengthens the
+  vowel before it across one consonant (`name`, `time`, `hope`). Digraphs are handled as
+  units (`ee`, `ea`, `oo`, `ou`, `ow`, `ai`, `ay`, `au`, `aw`, `oi`, `oy`, `oa`, `ie`).
+  `er`, `ir`, `ur` are `er`; `ar` and `or` keep the vowel and add `r`. A final `y` is a
+  long `e`.
+- F15.5 Stress. One primary stress, on the first vowel of the word. This is crude and
+  accepted: a guessed stress is better than a skipped word, and the dictionary is the
+  place to correct it.
+- F15.6 Output goes through the same ARPAbet to IPA table as a dictionary entry, so the
+  check against the voice's symbol inventory is identical for both.
+- F15.7 A guessed word is reported, never silent. The render report carries `guessed`, and
+  `arioso say` prints the words it pronounced by rule.
+- F15.8 `arioso doctor` counts a dictionary entry as sayable when the rules can pronounce
+  it, so an entry is not reported as unusable when it will in fact be spoken.
+- F15.9 Quality bar. The rules are a fallback, not a phonemizer. They must not change the
+  pronunciation of any word the dictionary knows, and a wrong guess must be fixable with
+  one dictionary entry.
+
+Acceptance: `arioso say "zorbansky"` produces audio, and reports the word as pronounced by
+rule. Before this section the same command wrote a 44-byte WAV and warned.
+
 ## 9. Non-functional requirements
 
 | Area | Target |
