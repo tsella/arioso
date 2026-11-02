@@ -1146,10 +1146,13 @@ async fn list_voices(
     // Resolve the way the loader does: the config may name the voice by its bare name,
     // so comparing the raw string to a catalog id marks nothing active.
     let active = state.voice_spec().ok().map(|spec| spec.id.clone());
+    // Voice ids write en_GB and the catalog writes en-GB, so the separator must not
+    // decide whether a client finds its language.
+    let normalise = |language: &str| language.to_lowercase().replace('_', "-");
     let wanted = query
         .language
         .as_deref()
-        .map(str::to_lowercase)
+        .map(normalise)
         .filter(|language| !language.is_empty());
 
     let voices = state
@@ -1162,7 +1165,7 @@ async fn list_voices(
             if let Some(wanted) = &wanted {
                 let speaks = languages
                     .iter()
-                    .any(|language| language.to_lowercase().starts_with(wanted.as_str()));
+                    .any(|language| normalise(language).starts_with(wanted.as_str()));
                 if !speaks {
                     return None;
                 }
@@ -1558,6 +1561,28 @@ mod tests {
                 .iter()
                 .any(|l| l.as_str().unwrap().starts_with("en"))
         }));
+    }
+
+    #[tokio::test]
+    async fn a_language_is_found_whichever_separator_it_uses() {
+        let (state, _dir) = state();
+        for query in ["en_GB", "en-GB", "en_gb"] {
+            let (status, body) = call(
+                router(state.clone()),
+                Request::builder()
+                    .uri(format!("/v1/voices?language={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let voices = body["voices"].as_array().unwrap();
+            assert!(
+                !voices.is_empty(),
+                "a voice id writes en_GB and the catalog writes en-GB: {query} found nothing"
+            );
+        }
     }
 
     #[tokio::test]
