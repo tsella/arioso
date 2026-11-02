@@ -5,6 +5,8 @@
 Speech out of text, and text out of speech, on your own machine. No account, no API key,
 no audio leaving the box.
 
+Named for the musical term: a melodious, singing style of delivery.
+
 arioso is a Rust library and a single binary. It speaks with Piper voices and listens with
 Whisper, streams both ways over WebSocket, and gives you a place to correct the
 pronunciation of your own names in both directions.
@@ -315,8 +317,6 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 | `arioso-tts-piper` | Piper VITS inference through ONNX Runtime; the one text to audio path |
 | `arioso-server` | axum router: `/healthz`, `/readyz`, `/v1/models`, `POST /v1/tts`, `GET /v1/tts/ws` |
 | `arioso-cli` | The `arioso` binary |
-
-Named for the musical term: a melodious, singing style of delivery.
 
 More worked examples, with the real output of each, are in [examples.md](examples.md). The
 product requirements are in [PRD.md](PRD.md). The execution plan is in
