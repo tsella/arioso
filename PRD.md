@@ -646,11 +646,24 @@ Order of operations, both directions:
 - F14.12 Validation: duplicate terms rejected, empty `spoken` forms rejected, phrases
   capped in length, and every error names the offending entry.
 
-- F14.13 Times are spoken on a 12-hour clock with no marker, decided deliberately.
-  `19:45` and `07:45` both read as "seven forty five". A listener cannot tell them
-  apart, and that is accepted. There is no workaround today: a dictionary entry
-  cannot match across the colon, because a phrase may not straddle punctuation.
-  Changing this is a product decision, not a bug fix.
+- F14.13 Times are spoken on a 12-hour clock, and the part of the day follows.
+  `tts.time_of_day` is on by default; `ARIOSO_TTS_TIME_OF_DAY` overrides it.
+  With the option on:
+
+  | Source hour | Spoken |
+  | --- | --- |
+  | 00–11 | "seven forty five in the morning" |
+  | 12–17 | "twelve thirty in the afternoon" |
+  | 18–23 | "seven forty five in the evening" |
+
+  The table applies to the hour as written, so an unmarked `7:45` is morning and
+  `19:45` is evening. A written marker wins over the table and is consumed:
+  `7:45 pm` speaks as "seven forty five in the evening", `12:30 am` as "twelve
+  thirty in the morning". With the option off, the hour is 12-hour with no
+  marker, and `19:45` and `07:45` both read as "seven forty five".
+
+  A dictionary entry still cannot override a time, because a phrase may not match
+  across the colon. That limit is unchanged by this option.
 
 Assumptions taken without asking, all reversible:
 
