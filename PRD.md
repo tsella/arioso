@@ -1,0 +1,734 @@
+# Arioso: Product Requirements Document
+
+Version 0.2 (draft for review) · 1 November 2026 · Owner: Tom Sella
+
+---
+
+## 1. Summary
+
+Arioso is a Rust library and standalone server that gives any application local
+text to speech and speech to text, on macOS, Linux, Windows, iOS, and Android,
+with no cloud dependency.
+
+One binary, one config file, one HTTP and WebSocket API. Models download on first
+run, and the caller can show download progress and readiness. Everything else,
+including which engines are on, which voice speaks, where the audio goes, and how
+the VAD behaves, is set through the API or the config file.
+
+## 2. Problem
+
+Local speech today is a pile of half-integrated pieces. Piper runs in Python,
+Kokoro needs its own G2P, recognition needs a C++ build per platform, and VAD is a
+separate model. Every app that wants speech ends up writing the same glue: download a model,
+check a hash, load an ONNX session, resample audio, detect silence, chunk text,
+stream partial results, handle failures.
+
+There is no single artifact that an application can depend on to get all of this
+on every platform it ships to.
+
+## 3. Users
+
+| User | What they need |
+|---|---|
+| App developer embedding the library | One dependency, model download handled, progress events, no network at runtime |
+| Service developer using the server | Stable HTTP and WS API, OpenAPI spec, predictable latency, no cloud keys |
+| Desktop tool author | Local playback with device selection, low latency, small binary |
+| Mobile developer | Static library, small footprint, works offline after first download |
+| Self-hoster | Single binary, config file, Docker image, logs they can read |
+
+## 4. Goals
+
+1. One Rust library that runs on all five platforms, with C ABI for embedding and
+   uniffi bindings in a later release.
+2. A standalone binary that exposes the library over HTTP and WebSocket with an
+   OpenAPI 3.1 spec and Swagger UI.
+3. Model lifecycle handled end to end: resolve, download, verify, load, report
+   progress, unload.
+4. Streaming in both directions: audio out for TTS, partial transcripts in for STT.
+5. Everything configurable at runtime through the API, with a JSON file as the
+   starting point.
+6. Plain, structured logs through `tracing`.
+
+## 5. Non-goals for v1
+
+- Model training or fine-tuning.
+- Voice cloning.
+- Speaker diarization.
+- Cloud providers (OpenAI, ElevenLabs, Azure). The design leaves room for a
+  `CloudTts` engine, but v1 ships local only.
+- Multi-tenant auth, quotas, or billing.
+- GUI. The sample app is a config file and a CLI.
+
+## 6. Decisions already made
+
+| Topic | Decision |
+|---|---|
+| TTS engines | Pluggable trait. Piper and Kokoro ship in v1 |
+| STT engine | Pluggable trait. sherpa-onnx anchors v1: batch Whisper or SenseVoice, streaming Zipformer transducer |
+| Bindings | Rust crate plus C ABI in v1. uniffi Swift and Kotlin in v1.1 |
+| Audio output | Both: PCM or WAV over the API, plus optional local playback with device selection |
+| API exposure | Binds 127.0.0.1 by default, no auth. Bearer token is opt-in for LAN exposure |
+| Phonemizer licensing | Permissive default (CMUdict plus letter-to-sound rules). espeak-ng behind an opt-in `gpl-espeak` Cargo feature, desktop only |
+| Logging | `tracing` plus `tracing-subscriber` |
+| Windows dual capture | Mic plus system loopback, separate per-source transcripts by default |
+
+## 7. Architecture
+
+### 8.1 Workspace layout
+
+```
+arioso/
+  crates/
+    arioso-core/        traits, types, errors, session lifecycle, readiness
+    arioso-config/      config model, precedence, validation, JSON schema
+    arioso-models/      manifest, downloader, cache, hash verification, progress
+    arioso-audio/       PCM types, resampling, WAV/Opus encode, cpal playback
+    arioso-vad/         VAD trait, Silero backend, energy backend
+    arioso-capture-win/ WASAPI mic plus loopback capture, drift-compensated mixer
+    arioso-g2p/         permissive English G2P, optional espeak bridge
+    arioso-tts-piper/   Piper engine (ort)
+    arioso-tts-kokoro/  Kokoro engine (ort)
+    arioso-stt-sherpa/  sherpa-onnx engine, batch and streaming models
+    arioso-server/      axum HTTP + WS, utoipa OpenAPI, Swagger UI
+    arioso-ffi/         C ABI, cbindgen header
+    arioso-cli/         `arioso` binary
+  apps/
+    sample/              JSON config + README showing library use
+```
+
+`arioso-cli` is a thin wrapper: parse flags, load config, start `arioso-server`,
+or run one-shot commands (`arioso say`, `arioso transcribe file.wav`).
+
+### 8.2 Core traits
+
+```rust
+pub trait TtsEngine: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn capabilities(&self) -> TtsCaps;
+    async fn load(&mut self, model: &ModelHandle) -> Result<()>;
+    async fn unload(&mut self) -> Result<()>;
+    async fn voices(&self) -> Result<Vec<Voice>>;
+    async fn synthesize(&self, req: SynthRequest) -> Result<AudioStream>;
+}
+
+pub trait SttEngine: Send + Sync {
+    fn id(&self) -> &'static str;
+    async fn load(&mut self, model: &ModelHandle) -> Result<()>;
+    async fn transcribe(&self, audio: AudioSource, opts: SttOptions) -> Result<Transcript>;
+    fn open_stream(&self, opts: SttOptions) -> Result<Box<dyn SttSession>>;
+}
+
+pub trait SttSession: Send {
+    fn push(&mut self, pcm: &[u8]) -> Result<()>;
+    fn finish(&mut self) -> Result<()>;
+    fn next_event(&mut self) -> Option<SttEvent>;
+}
+
+pub trait Vad: Send + Sync {
+    fn push(&mut self, frame: &[f32]) -> VadState;
+    fn reset(&mut self);
+}
+```
+
+`AudioStream` is `Stream<Item = Result<AudioChunk>>`. Each chunk carries PCM, its
+sample rate, and the text span it covers, so a caller can do word highlighting
+without a second request.
+
+### 8.3 Audio I/O backends
+
+Playback uses `cpal`, which covers macOS, Linux, Windows, iOS, and Android with one
+API. Capture differs per platform, so it lives behind the capture trait:
+
+- Windows: the `wasapi` crate (MIT, 0.26) for both the microphone and loopback. It
+  exposes `AUDCLNT_STREAMFLAGS_LOOPBACK` directly, and `cpal` does not offer
+  loopback on Windows.
+- macOS, Linux, iOS, Android: `cpal` input only in v1.
+
+### 8.4 Pipeline
+
+TTS: text → normalize → G2P → phoneme IDs → engine inference → PCM chunks →
+resample → API sink or device sink.
+
+STT: PCM frames → resampler to 16 kHz mono → VAD → segmenter → engine → partial
+and final events → API sink.
+
+Both pipelines are push based and cancellable. Dropping the stream stops inference
+at the next chunk boundary.
+
+## 8. Functional requirements
+
+### F1. Model management
+
+The library ships no model weights. A manifest describes every supported model.
+
+```json
+{
+  "id": "piper-en_US-lessac-medium",
+  "kind": "tts",
+  "engine": "piper",
+  "version": "1.0.0",
+  "license": "Blizzard-2013",
+  "files": [
+    {
+      "name": "en_US-lessac-medium.onnx",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+      "sha256": "<pinned>",
+      "size": 63201294
+    }
+  ],
+  "meta": { "sample_rate": 22050, "num_speakers": 1, "languages": ["en-US"] }
+}
+```
+
+A streaming STT model looks different, because sherpa-onnx models are directories:
+
+```json
+{
+  "id": "sherpa-zipformer-en",
+  "kind": "stt",
+  "engine": "sherpa",
+  "mode": "streaming",
+  "version": "2023-11-22",
+  "license": "Apache-2.0",
+  "files": [
+    { "name": "encoder-epoch-99-avg-1.onnx", "sha256": "<pinned>", "size": 0 },
+    { "name": "decoder-epoch-99-avg-1.onnx", "sha256": "<pinned>", "size": 0 },
+    { "name": "joiner-epoch-99-avg-1.onnx", "sha256": "<pinned>", "size": 0 },
+    { "name": "tokens.txt", "sha256": "<pinned>", "size": 0 }
+  ],
+  "meta": { "sample_rate": 16000, "languages": ["en"], "chunk_ms": 320 }
+}
+```
+
+Requirements:
+
+- F1.1 Downloads resume after interruption. Partial files use a `.part` suffix and
+  are verified before an atomic rename.
+- F1.2 Every file is checked against a pinned SHA-256. A mismatch deletes the file
+  and reports `IntegrityFailure`.
+- F1.3 Progress is observable: bytes downloaded, total bytes, percent, and an ETA.
+  Progress is available both as an API event stream and as a callback in the
+  library and C ABI.
+- F1.4 Cache directory is platform correct: `~/Library/Application Support/arioso`,
+  `~/.local/share/arioso`, `%LOCALAPPDATA%\arioso`, and the app sandbox on mobile.
+  Configurable.
+- F1.5 A mirror base URL can replace the default host. Useful behind a proxy.
+- F1.6 Models can be pre-seeded by dropping files into the cache. A manifest
+  checksum file is written on first successful download.
+- F1.7 `auto_download` in config lists model IDs to fetch at startup. Empty means
+  the server starts with no models and reports `not_installed`.
+- F1.8 Disk space is checked before download. Failure is reported before any bytes
+  move.
+- F1.9 Concurrent downloads are serialized per model and capped globally (default 2).
+- F1.10 The manifest itself is signed. One detached signature over the manifest,
+  verified against a public key compiled into the binary. Per file SHA-256 stops
+  corruption; the signature stops a hostile mirror.
+- F1.11 Model upgrades do not interrupt service. A new version downloads alongside
+  the old one, both appear in `GET /v1/models`, and the switch happens on the next
+  load or restart. The old version is deleted only after a successful load of the
+  new one.
+- F1.12 `models.pinned` freezes a model ID to a version. Without a pin, the newest
+  verified version wins.
+- F1.13 `POST /v1/models/{id}/warm` loads a model without a request, so the first
+  real call does not pay load latency.
+
+### F2. Readiness
+
+Each model moves through `not_installed → downloading → verifying → loading →
+ready`, or `failed { reason }`.
+
+- F2.1 `GET /readyz` returns 200 only when every enabled engine has its model
+  loaded and warm.
+- F2.2 `GET /v1/models` reports state and progress for every known model.
+- F2.3 The library exposes the same state as a `watch` channel, so an app can draw
+  a progress bar and enable its UI at the right moment.
+- F2.4 A failed model does not take down the server. The affected engine reports
+  `unavailable` with a reason, the rest keeps working.
+
+### F3. Text to speech
+
+- F3.1 Engines: `piper` and `kokoro` in v1. Selection is per request and by default
+  from config.
+- F3.2 Piper: 178 voices across 53 languages, 22.05 kHz for medium and high tiers,
+  16 kHz for low. Voice IDs are the upstream names (`en_US-lessac-medium`).
+- F3.3 Kokoro: 54 voices, 24 kHz, English plus seven other languages. Voice IDs are
+  the upstream names (`af_heart`, `am_michael`).
+- F3.4 Controls: voice, speed (0.5 to 2.0), and format (`pcm`, `wav`, `mp3`, `opus`).
+- F3.5 Long text is split at sentence boundaries and synthesized incrementally, so
+  first audio arrives before the last sentence is computed.
+- F3.6 Streaming: chunked HTTP for progressive download, and a WebSocket that
+  accepts text fragments and returns audio frames plus a timing event.
+- F3.7 Output is deterministic for a fixed voice, speed, and engine version.
+- F3.8 Unsupported voice or language returns 422 with the list of valid values.
+
+### F4. Speech to text
+
+The engine is sherpa-onnx (Apache-2.0). It gives one dependency for both paths,
+because it runs batch models and natively streaming models behind the same C API.
+
+- F4.1 Two model families, selected per model, not per request:
+  - Batch: Whisper (multilingual, best accuracy) and SenseVoice (fast, Chinese
+    and English) for uploaded files.
+  - Streaming: Zipformer transducer models, which emit partials as audio arrives.
+    This is the model family the WebSocket path uses.
+- F4.2 Batch endpoint accepts `audio/wav`, `audio/mpeg`, `audio/ogg`, and raw PCM.
+  Files are transcoded to 16 kHz mono in process.
+- F4.3 Response includes the full text, segment list with start and end times, and
+  detected language.
+- F4.4 Streaming endpoint accepts PCM frames over WebSocket. Partials arrive at a
+  configurable interval (default 300 ms) and finals land on VAD endpoints.
+- F4.5 Partials are provisional. Every partial carries `"provisional": true` and
+  replaces the previous one. Clients must not append partials, they must replace.
+  A stability window (default 200 ms) delays emission so text does not rewrite
+  itself on every frame.
+- F4.6 If the configured model cannot stream, the streaming endpoint falls back to
+  utterance segmentation: one final per VAD segment, no partials. The response
+  says which mode ran.
+- F4.7 Optional word timestamps. Off by default because they cost CPU. Zipformer
+  models give them cheaply, Whisper does not.
+- F4.8 Language can be forced or left as `auto`. Streaming transducer models are
+  language specific; the registry records which languages each model covers.
+- F4.9 Translation to English is available for Whisper models and off by default.
+- F4.10 On Windows the input can be two sources at once, mic plus what the machine
+  is playing. See F13. Every other platform captures the microphone only in v1.
+
+### F5. Voice activity detection
+
+- F5.1 Backends: `silero` (default, the ONNX model sherpa-onnx ships) and `energy`
+  (RMS threshold, no model). The Silero path reuses the sherpa-onnx runtime rather
+  than loading a second ONNX session.
+- F5.2 Configurable: `threshold`, `min_speech_ms`, `min_silence_ms`, `padding_ms`,
+  `max_segment_ms`, and `frame_ms`.
+- F5.3 VAD gates the streaming STT pipeline. Audio before speech confirmation is
+  held in a ring buffer and prepended, so the first phoneme is not clipped.
+- F5.4 VAD is exposed as its own event stream for callers that want to drive their
+  own segmentation.
+- F5.5 `energy` VAD exists so the library works with zero models installed.
+
+### F6. Audio output
+
+- F6.1 API returns audio. That is the default and always available.
+- F6.2 Local playback through `cpal`, with device enumeration
+  (`GET /v1/audio/devices`), default device selection, and explicit device choice
+  by ID.
+- F6.3 Playback resamples to the device's native rate and channel count.
+- F6.4 Output mode per request or in config: `api`, `device`, or `both`.
+- F6.5 Playback queue depth is bounded. When full, the request either blocks or
+  fails with `429`, per config.
+- F6.6 Mobile playback uses the platform's audio session: AVAudioSession on iOS,
+  AAudio or OpenSL on Android, with the correct category so it mixes or ducks as
+  the app asks.
+
+### F7. Configuration
+
+- F7.1 Sources, in increasing precedence: compiled defaults, JSON file
+  (`--config` or the platform default path), environment variables with the
+  `ARIOSO_` prefix, runtime API changes.
+- F7.2 Runtime changes apply immediately where possible. Engine and model changes
+  trigger an unload and reload, and the endpoint returns when the new state is
+  `ready` or `failed`.
+- F7.3 `PATCH /v1/config` takes a partial document plus `persist: bool`. With
+  `persist: true`, the merged document is written back to the config file.
+- F7.4 Every field is validated on load and on update. Errors name the JSON path.
+- F7.5 `GET /v1/config` returns the effective config with secrets redacted.
+- F7.6 The full config is a published JSON Schema, versioned with the release.
+- F7.7 Config carries `schema_version`. On load, older documents are migrated in
+  memory and reported as migrated in the logs. Writing back persists the current
+  version.
+- F7.8 PATCH semantics are explicit: scalars replace, objects merge, arrays
+  replace. There is no array merging, because merging voice lists or model lists
+  produces states nobody asked for.
+- F7.9 The bearer token is read from the environment only. `GET /v1/config` never
+  echoes it, and a config file containing one is rejected with a clear error.
+
+```json
+{
+  "schema_version": 1,
+  "server": {
+    "bind": "127.0.0.1:10101",
+    "auth": { "mode": "none", "token_env": "ARIOSO_TOKEN" },
+    "openapi": true,
+    "cors_origins": []
+  },
+  "tts": {
+    "enabled": true,
+    "engine": "piper",
+    "voice": "en_US-lessac-medium",
+    "speed": 1.0,
+    "format": "wav",
+    "max_chars": 4000
+  },
+  "stt": {
+    "enabled": true,
+    "engine": "sherpa",
+    "batch_model": "sherpa-whisper-base",
+    "stream_model": "sherpa-zipformer-en",
+    "language": "auto",
+    "partials": true,
+    "partial_interval_ms": 300,
+    "stability_window_ms": 200,
+    "word_timestamps": false,
+    "max_audio_s": 600,
+    "capture": {
+      "sources": ["mic"],
+      "mode": "separate",
+      "loopback_device": null,
+      "process_name": null,
+      "mic_gain_db": 0.0,
+      "loopback_gain_db": 0.0,
+      "echo_guard": "gate"
+    }
+  },
+  "vad": {
+    "engine": "silero",
+    "threshold": 0.5,
+    "min_speech_ms": 250,
+    "min_silence_ms": 700,
+    "padding_ms": 200,
+    "max_segment_ms": 30000,
+    "frame_ms": 32
+  },
+  "audio": {
+    "output": "api",
+    "device": null,
+    "queue_ms": 2000
+  },
+  "models": {
+    "dir": null,
+    "auto_download": ["piper-en_US-lessac-medium", "sherpa-whisper-base"],
+    "mirror": null,
+    "max_concurrent_downloads": 2
+  },
+  "log": {
+    "level": "info",
+    "format": "pretty",
+    "file": null,
+    "log_text": false
+  }
+}
+```
+
+### F8. API
+
+HTTP, JSON, versioned under `/v1`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/healthz` | Process alive |
+| GET | `/readyz` | All enabled engines ready |
+| GET | `/v1/info` | Version, build target, available engines |
+| GET | `/v1/config` | Effective config, secrets redacted |
+| PATCH | `/v1/config` | Partial update, optional persist |
+| GET | `/v1/models` | Catalog with state and progress |
+| POST | `/v1/models/{id}/download` | Start or resume download |
+| DELETE | `/v1/models/{id}` | Remove from disk |
+| GET | `/v1/models/events` | SSE stream of download and load progress |
+| POST | `/v1/models/{id}/warm` | Load a model without waiting for a request |
+| GET | `/v1/engines` | Capabilities per engine: streaming, languages, voice count, loaded |
+| GET | `/v1/voices` | Voices for the active engine, filterable by language |
+| POST | `/v1/tts` | Synthesize, returns audio bytes |
+| POST | `/v1/tts/stream` | Chunked audio response |
+| WS | `/v1/tts/ws` | Text fragments in, audio frames out |
+| POST | `/v1/stt` | Transcribe an uploaded file |
+| WS | `/v1/stt/ws` | PCM in, partial and final events out |
+| GET | `/v1/audio/devices` | Enumerate playback devices |
+| POST | `/v1/audio/play` | Synthesize and play on a device |
+| GET | `/openapi.json` | OpenAPI 3.1 document |
+| GET | `/docs` | Swagger UI |
+| GET | `/metrics` | Prometheus metrics, off by default |
+
+Error model: RFC 9457 problem details, with a stable `code` field:
+`model_not_installed`, `model_integrity_failed`, `engine_unavailable`,
+`engine_busy`, `cancelled`, `unsupported_voice`, `unsupported_format`, `bad_audio`,
+`queue_full`, `too_large`, `session_limit`.
+
+Audio contract, stated once and enforced everywhere:
+
+| Field | Value |
+|---|---|
+| Encoding | `s16le` little endian, or `f32le` on request |
+| Channels | mono |
+| TTS rates | Piper 16000 or 22050 depending on voice tier, Kokoro 24000 |
+| STT input rate | resampled to 16000 before the engine |
+| Device playback | resampled to the device's native rate and channel count |
+
+A client that sends a mismatched rate gets `415 unsupported_format` with the
+expected rate in the problem detail, not silent pitch shifting.
+
+Streaming mechanisms, and which one is canonical: the two WebSockets are the
+contract. `/v1/models/events` is a convenience SSE feed for progress bars, and
+`/v1/tts/stream` is a convenience HTTP response for one-shot audio. Anything that
+needs cancellation, partial results, or bidirectional control uses the WebSocket.
+
+Cancellation: both WebSockets accept `{"type":"cancel"}`. The server stops at the
+next chunk boundary and replies `{"type":"cancelled"}`. Dropping the socket has
+the same effect, and the engine releases its permit either way.
+
+WebSocket STT protocol:
+
+```text
+client → {"type":"start","language":"auto","sample_rate":16000}
+client → {"type":"start","language":"auto","sample_rate":16000,
+          "sources":["mic","loopback"],"mode":"separate"}   # Windows dual capture
+server → {"type":"ready","session":"01J...","sources":["mic","loopback"]}
+client → <binary PCM frames, 16 kHz mono s16le>
+server → {"type":"partial","text":"hello wor","t":1.20}
+server → {"type":"final","text":"hello world","start":0.0,"end":1.85}
+client → {"type":"stop"}
+server → {"type":"done","duration":1.85}
+```
+
+WebSocket TTS protocol:
+
+```text
+client → {"type":"synthesize","text":"Hello.","voice":"af_heart","format":"pcm"}
+server → {"type":"start","sample_rate":24000,"channels":1,"encoding":"s16le"}
+server → <binary audio frames>
+server → {"type":"timing","word":"Hello","start":0.0,"end":0.42}
+server → {"type":"end","duration":0.55}
+```
+
+Binary frames carry audio. JSON frames carry control and metadata. A client that
+cannot read binary frames can request `encoding: "base64"` and get audio inside
+JSON, at roughly 33 percent size cost.
+
+### F9. Logging
+
+- F9.1 `tracing` throughout, with one span per request (`http.request`,
+  `tts.synthesize`, `stt.transcribe`, `model.download`) and fields for engine,
+  model, voice, duration, and bytes.
+- F9.2 `RUST_LOG` and `log.level` both work. `log.format` is `pretty` or `json`.
+- F9.3 Optional file output with daily rotation.
+- F9.4 `log.log_text` defaults to false. Transcripts and synthesized text are not
+  logged. Turn it on deliberately when debugging.
+- F9.5 Download and load events are logged at info with byte counts, so a stuck
+  first run is diagnosable from logs alone.
+- F9.6 Every request gets a request ID, returned in the `x-request-id` header and
+  carried on every span. A client-reported bug is one grep away from its traces.
+
+### F10. C ABI
+
+- F10.1 Header generated with `cbindgen`. Opaque handles, no Rust types in the
+  interface.
+- F10.2 Functions: init and shutdown, config load and patch, model download with a
+  progress callback, TTS create and synthesize with an audio callback, STT create
+  and push audio with an event callback, last error string.
+- F10.3 Every callback can return a cancel code. The engine stops within one chunk.
+- F10.4 Thread safe. Handles are `Send` and `Sync` behind the scenes; the header
+  documents which calls may block.
+- F10.5 Built and smoke tested for iOS (arm64, simulator) and Android
+  (arm64-v8a, x86_64) in CI.
+- F10.6 The header exports `arioso_abi_version()` and every options struct starts
+  with a `struct_size` field, so a newer library accepts an older caller and the
+  reverse fails with a clear error instead of reading past the end.
+
+### F11. Concurrency, backpressure, and limits
+
+- F11.1 Each engine holds a semaphore. Default permits: TTS 2, STT 1 per streaming
+  session model. Configurable per engine.
+- F11.2 Requests beyond the permits wait in a bounded queue, default depth 32.
+  A full queue returns `429 engine_busy` with `Retry-After`.
+- F11.3 WebSocket sessions are capped (default 8) and idle sessions close after 30
+  seconds without audio or control messages. Exceeding the cap returns
+  `session_limit` before the upgrade completes.
+- F11.4 Cancellation is honored within one chunk. A cancelled request frees its
+  permit before the response is written.
+- F11.5 The server reports current queue depth and permit saturation on
+  `/metrics`, so capacity problems are visible before users feel them.
+
+### F12. Mobile audio session
+
+These are requirements, not implementation notes, because they change the API.
+
+- F12.1 iOS: the app declares its audio session category (playback, play and
+  record, or ambient) through config. The library applies it on start and restores
+  the previous category on stop.
+- F12.2 iOS: background audio and background recording are supported when the app
+  declares the corresponding mode. A streaming session that loses foreground stays
+  alive if background audio is enabled, and closes cleanly if it is not.
+- F12.3 iOS and Android: microphone permission state is queryable and every audio
+  entry point fails with `permission_denied` rather than silence.
+- F12.4 Android: streaming capture runs in a foreground service when the app asks
+  for it, with the notification the platform requires.
+- F12.5 Route changes are events. Headphones unplugged, Bluetooth connected, or a
+  call interrupting playback are surfaced to the caller, and playback pauses
+  instead of switching to the speaker at full volume.
+
+### F13. Windows dual-source capture
+
+The case this serves: a call where one side is in the room and the other side is in
+the speakers. Transcribing only the mic loses half the conversation.
+
+- F13.1 Windows only in v1. Other platforms reject a second source with
+  `unsupported_platform` rather than silently capturing one.
+- F13.2 Sources: `mic`, `loopback`, and `process`. `loopback` captures the default
+  render endpoint through WASAPI loopback, which needs no driver and works in
+  shared mode. `process` captures one application and its children through
+  `ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`,
+  which needs Windows 10 build 19041 or newer.
+- F13.3 Two modes. `separate` runs one transcription stream per source and tags
+  every event with `source`, default. `mixed` sums the sources into one stream
+  before the engine, for callers that want a single transcript and accept the
+  accuracy cost of two overlapping speakers.
+- F13.4 Transcript events gain a `source` field with `mic`, `loopback`, `process`,
+  or `mixed`. Segment timestamps stay relative to session start, so two streams can
+  be interleaved on one timeline.
+- F13.5 The two endpoints have independent clocks. Each source is resampled to
+  16 kHz with its own drift estimate, and the mixer compensates by inserting or
+  dropping whole frames. Buffers never grow without bound, and a 30 minute call
+  does not accumulate seconds of skew.
+- F13.6 Echo. A microphone in a room with speakers hears the remote side twice. The
+  supported configuration is headphones, and the docs say so. `echo_guard` offers
+  `off`, `gate` (suppress mic frames while loopback energy is above threshold),
+  and `aec` (WebRTC echo cancellation, behind a Cargo feature because it adds a
+  C++ dependency).
+- F13.7 Per-source gain: `mic_gain_db` and `loopback_gain_db`, both 0 by default.
+- F13.8 Device choice: `loopback_device` takes a device ID, default is the default
+  render device. `GET /v1/audio/devices` lists render endpoints with
+  `kind: "render"`, so a caller can pick the headset instead of the speakers.
+- F13.9 Failure modes are explicit. No render device is `no_device`. A device held
+  in exclusive mode is `loopback_unavailable`. DRM-protected audio is captured as
+  silence by Windows itself, and the session reports a `silent_source` warning
+  after 10 seconds rather than pretending it is working.
+- F13.10 WebSocket `start` accepts
+  `{"sources":["mic","loopback"],"mode":"separate"}`. The reply names the sources
+  that actually opened, because a caller needs to know when one failed.
+- F13.11 CPU cost is two engine sessions, not one. The semaphore in F11 accounts
+  for it, and `separate` mode takes two permits.
+
+## 9. Non-functional requirements
+
+| Area | Target |
+|---|---|
+| TTS first audio, Piper medium, desktop | under 300 ms after warm load |
+| TTS throughput, Piper medium, 4-core mini PC | measured 0.52 s for 6.8 s of audio, RTF 0.08. Keep at or below 0.15 |
+| TTS throughput, Kokoro int8, same box | measured RTF 1.04. Document it as realtime on weak CPUs and prefer Piper there |
+| STT throughput, batch Whisper base, desktop | RTF at or below 0.5. To be measured in M2 |
+| STT streaming, Zipformer transducer, desktop | first partial under 400 ms after speech starts, final under 700 ms after the endpoint. To be measured in M2 |
+| Windows dual capture, separate mode | both streams live within 200 ms of session start, drift under 20 ms over 30 minutes, CPU under 2 cores at 4 threads |
+| Cold start, models cached | under 2 s to ready |
+| Cold start, empty cache | server up and serving `/v1/models` before any download starts |
+| Idle memory, Piper only | under 300 MB |
+| Idle memory, Piper plus whisper base | under 800 MB |
+| Binary size, desktop release | under 25 MB without models |
+| Concurrency | 8 parallel TTS requests, 4 parallel STT sessions, no data races |
+| Offline | zero network calls once models are installed and `auto_download` is satisfied |
+| Platforms | macOS arm64 and x86_64, Linux x86_64 and aarch64, Windows x86_64, iOS arm64 plus simulator, Android arm64-v8a and x86_64 |
+
+## 10. Testing and quality gates
+
+- Golden audio. For each engine, model, and voice, a fixed sentence is synthesized
+  and compared on duration, RMS envelope, and a spectral distance against a stored
+  reference. Tolerance based, because CPUs and SIMD paths differ; never bit exact.
+- G2P regression. A 200 word list with expected IPA output, including names,
+  heteronyms, acronyms, and numbers. Any change to the phonemizer shows up as a
+  diff.
+- Transcript regression. Ten audio clips per streaming model, compared on WER with
+  a ceiling per clip, not an average that hides one bad file.
+- Property tests on the resampler and the sentence chunker: no sample loss, no
+  duplicated audio at boundaries.
+- Fuzz the config loader and the model manifest parser.
+- Load test: 8 concurrent TTS requests and 4 STT sessions for 10 minutes, asserting
+  no queue overflow beyond the configured depth and no memory growth above 5 percent.
+- Cancellation test: cancel mid-stream on both WebSockets and assert the permit is
+  released within 100 ms.
+- Dual-capture soak on Windows: a 30 minute synthetic call, one voice on the mic and
+  one on a virtual render device, asserting both transcripts arrive and drift stays
+  under 20 ms.
+- CI matrix: macOS arm64 and x86_64, Linux x86_64 and aarch64, Windows x86_64,
+  plus build-only jobs for iOS and Android.
+
+## 11. Licensing and compliance
+
+- Core crates: dual MIT or Apache-2.0.
+- `gpl-espeak` feature: off by default. Turning it on links espeak-ng and makes the
+  resulting binary GPL-3.0. The README states this plainly, and CI fails a job that
+  enables the feature in a release build.
+- Model licenses are per model. The manifest carries a `license` field, and
+  `GET /v1/models` exposes it. Non-commercial voices (CC BY-NC-SA, Blizzard) are
+  marked `commercial_use: false` and the default catalog ships only permissive ones:
+  LibriTTS (CC BY 4.0), LJSpeech (public domain), Joe, Mike, Kathleen, Reza
+  Ibrahim (CC0), Sam (Apache-2.0), Kokoro voices (Apache-2.0).
+- No telemetry. No analytics endpoint. No phone-home.
+- Model downloads go only to the configured host or mirror.
+- `cargo-deny` in CI blocks a GPL dependency from entering the default feature set,
+  and a second job builds with `--features gpl-espeak` to prove the opt-in path
+  still compiles.
+- `cargo about` generates a NOTICE file from the dependency tree and the model
+  catalog, so attribution ships with the binary instead of living in a wiki.
+- The model catalog records `commercial_use`, `attribution_required`, and the
+  license URL per model. `GET /v1/models` returns them, so a caller can refuse a
+  non-commercial voice before downloading 60 MB of it.
+
+## 12. Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Kokoro int8 ONNX has a dtype mismatch in `kokoro-onnx` 0.4.7 (speed fed as int32, model wants float) | Engine fails on first run | Pin the model revision, cast inputs in our own session wrapper, add a golden-audio test |
+| sherpa-onnx models are directories of ONNX files plus tokens and config, so a wrong pair loads and produces garbage | Silent bad output | One manifest entry per model directory, pinned revision and hashes, and a CI job that loads every catalog model and transcribes a fixture |
+| Zipformer transducers are language specific and trail Whisper large on hard audio | Worse transcripts than a user expects | Ship Whisper for batch, transducers for live, and state the accuracy difference in `/v1/engines` |
+| Dual capture drifts: mic and render endpoint run on separate clocks | Transcripts slide out of sync on long calls | Independent resampling per source with frame-level drift compensation, plus a 30 minute soak test in CI |
+| Microphone hears the speakers, so the remote side is transcribed twice | Duplicate or garbled text | Headphones documented as supported, `echo_guard` gate by default, AEC behind a feature flag |
+| Windows captures DRM-protected audio as silence | Feature looks broken on some calls | `silent_source` warning after 10 seconds, and a doc note naming the cause |
+| ONNX Runtime iOS build needs a Mac and adds 10 to 20 MB | Mobile binary bloat, CI complexity | `--minimal_build` with an ops config, ORT-format models, one macOS CI runner |
+| Permissive G2P is weaker on names than espeak | Mispronunciations | CMUdict plus rules plus a curated exception list; measure on a fixed 200-word test set; document the `gpl-espeak` escape hatch |
+| Mobile CPU cannot hit the desktop RTF targets | Laggy speech on phones | Streaming synthesis, sentence-level pipelining, ship `low` tier Piper voices for mobile |
+| Disk usage, 1 to 2 GB for a full model set | Bad first-run experience | Per-engine opt-in downloads, size shown before download, `DELETE /v1/models/{id}` |
+
+## 13. Milestones
+
+| Milestone | Scope | Exit criteria |
+|---|---|---|
+| M0 Skeleton, 2 weeks | Workspace, config crate with JSON Schema, tracing, model manifest and downloader with progress and signature check, CI on three desktop OSes | Download a model, verify hash, resume after a killed process, reject a bad signature, progress visible in logs |
+| M1 Piper TTS, 3 weeks | Piper through `ort`, permissive G2P, sentence chunking, `/v1/tts` and `/v1/tts/ws`, WAV and PCM, local playback, concurrency limits | Ten sentences match the golden reference, first audio under 300 ms, queue returns 429 when saturated |
+| M2 STT, 3 weeks | sherpa-onnx engine, batch `/v1/stt`, streaming `/v1/stt/ws` on a Zipformer transducer, Silero VAD, provisional partials, cancel | Live microphone test produces partials during speech and one final per utterance, cancel frees the permit |
+| M3 Config and engines, 2 weeks | `/v1/config` PATCH with persist, `/v1/engines`, engine selection, `arioso doctor`, OpenAPI complete with Swagger UI | Config change switches engine without restart and survives restart |
+| M4 Kokoro, 2 weeks | Kokoro engine behind the same trait, dtype workaround, voice listing | Same sentence through both engines, golden audio for each |
+| M5 FFI and mobile, 3 weeks | C ABI with versioned structs, cbindgen header, iOS and Android builds, audio session requirements | Sample app on a phone synthesizes one sentence and streams one utterance |
+| M6 Release, 2 weeks | Docs, sample app, packaging (binaries, Docker, Homebrew), performance pass, v1.0 tag | Every acceptance criterion passes on all five platforms |
+
+## 14. Acceptance criteria
+
+1. Fresh install, no models, `arioso serve --config sample.json` starts in under
+   two seconds and serves `/v1/models` with every model `not_installed`.
+2. `POST /v1/models/piper-en_US-lessac-medium/download` streams progress events,
+   and a killed download resumes without refetching completed bytes.
+3. After download, `GET /readyz` returns 200 and `POST /v1/tts` returns playable
+   audio.
+4. `POST /v1/tts/stream` delivers the first chunk before synthesis of the last
+   sentence finishes.
+5. A WebSocket STT session on a Zipformer transducer model returns provisional
+   partials during speech and one final per utterance, and every partial carries
+   `provisional: true`.
+6. `PATCH /v1/config` with `{"tts":{"engine":"kokoro"},"persist":true}` switches
+   the engine, returns only after it is ready, and the change survives a restart.
+7. `tts.enabled: false` returns 404 on TTS routes and leaves STT working.
+8. With `audio.output: "device"`, audio plays on the selected device, and
+   `/v1/audio/devices` lists it.
+9. Disconnecting the network after models are cached changes nothing.
+10. `cargo build --target aarch64-apple-ios` and the Android NDK equivalent
+    produce a static library that links into a sample app and synthesizes one
+    sentence.
+11. `{"type":"cancel"}` mid-stream stops synthesis within one chunk and the engine
+    permit is free within 100 ms.
+12. A manifest whose signature does not verify is rejected before any bytes are
+    downloaded.
+13. `arioso doctor` on a machine with no models reports what is missing, what is
+    installed, and what to run next.
+14. On Windows, a session started with `{"sources":["mic","loopback"]}` returns
+    two interleaved transcript streams, each tagged with its source, and a 30
+    minute run stays within 20 ms of drift.
+15. On macOS and Linux, requesting a loopback source fails with
+    `unsupported_platform` instead of capturing only the microphone.
+
+## 15. Open questions
+
+1. Which transducer models enter the default catalog? Each language is a separate
+   model directory, so this is a catalog decision, not a code decision.
+2. If the transducer is monotonic, does the stability window still earn its
+   latency, or is provisional labeling alone enough?
+3. Is an embedded web UI for model management worth v1.1, or does the API cover it?
+4. Do we publish prebuilt binaries and Docker images on day one, or after v1.0
+   stabilizes?
+5. Does v1 accept an SSML subset for pauses and emphasis, or plain text with speed
+   as the only prosody control?
