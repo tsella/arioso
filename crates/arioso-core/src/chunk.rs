@@ -33,14 +33,12 @@ fn best_cut(s: &str, limit: usize) -> usize {
         return s.len();
     }
 
-    let mut consumed = 0usize;
     let mut sentence_end = None;
     let mut space_end = None;
-    for (index, ch) in s.char_indices() {
+    for (consumed, (index, ch)) in s.char_indices().enumerate() {
         if consumed == limit {
             break;
         }
-        consumed += 1;
         let after = index + ch.len_utf8();
         if matches!(ch, '.' | '!' | '?' | '…') {
             sentence_end = Some(after);
