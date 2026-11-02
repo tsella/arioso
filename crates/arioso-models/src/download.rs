@@ -107,17 +107,24 @@ impl Downloader {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<Vec<PathBuf>, DownloadError> {
         tokio::fs::create_dir_all(dir).await?;
+        let total: u64 = spec.files.iter().map(|f| f.size).sum();
+        let mut done = 0u64;
         let mut paths = Vec::with_capacity(spec.files.len());
         for file in &spec.files {
-            paths.push(self.ensure_file(file, dir, progress).await?);
+            paths.push(self.ensure_file(file, dir, done, total, progress).await?);
+            done += file.size;
         }
         Ok(paths)
     }
 
+    /// `base` is the bytes of earlier files in the same model, so progress
+    /// covers the whole model rather than the file in hand.
     async fn ensure_file(
         &self,
         file: &FileSpec,
         dir: &Path,
+        base: u64,
+        total: u64,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<PathBuf, DownloadError> {
         let final_path = dir.join(&file.name);
@@ -127,8 +134,8 @@ impl Downloader {
             let meta = std::fs::metadata(&final_path)?;
             if meta.len() == file.size && hash_file(&final_path)? == file.sha256 {
                 progress(Progress {
-                    downloaded: file.size,
-                    total: file.size,
+                    downloaded: base + file.size,
+                    total,
                 });
                 return Ok(final_path);
             }
@@ -170,8 +177,8 @@ impl Downloader {
             };
 
             progress(Progress {
-                downloaded: offset,
-                total: file.size,
+                downloaded: base + offset,
+                total,
             });
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -179,8 +186,8 @@ impl Downloader {
                 handle.write_all(&chunk).await?;
                 offset += chunk.len() as u64;
                 progress(Progress {
-                    downloaded: offset,
-                    total: file.size,
+                    downloaded: base + offset,
+                    total,
                 });
             }
             handle.flush().await?;
@@ -209,8 +216,8 @@ impl Downloader {
         }
         tokio::fs::rename(&part_path, &final_path).await?;
         progress(Progress {
-            downloaded: file.size,
-            total: file.size,
+            downloaded: base + file.size,
+            total,
         });
         Ok(final_path)
     }
@@ -339,6 +346,44 @@ mod tests {
         assert!(matches!(err, DownloadError::Integrity { .. }), "{err:?}");
         assert!(!dir.path().join("voice.bin.part").exists());
         assert!(!dir.path().join("voice.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn progress_covers_the_whole_model() {
+        let server = MockServer::start().await;
+        let a = payload();
+        let b = b"sidecar".to_vec();
+        Mock::given(method("GET"))
+            .and(path("/a.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(a.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b.clone()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = spec(format!("{}/a.bin", server.uri()), &a);
+        model.files.push(FileSpec {
+            name: "b.bin".into(),
+            url: format!("{}/b.bin", server.uri()),
+            sha256: hex::encode(Sha256::digest(&b)),
+            size: b.len() as u64,
+        });
+        let total = a.len() as u64 + b.len() as u64;
+
+        let mut seen = Vec::new();
+        Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |p| seen.push(p))
+            .await
+            .unwrap();
+
+        assert!(seen.iter().all(|p| p.total == total), "total must be the model size");
+        assert_eq!(seen.last().unwrap().downloaded, total);
+        assert!(seen.windows(2).all(|w| w[0].downloaded <= w[1].downloaded));
     }
 
     #[tokio::test]
