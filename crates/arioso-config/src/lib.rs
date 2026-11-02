@@ -62,6 +62,63 @@ pub struct Server {
     /// Without this, a client that connects and sends nothing holds a task for
     /// as long as it keeps the connection open.
     pub first_message_timeout_ms: u64,
+    /// TLS, when the server is exposed beyond loopback.
+    #[serde(default)]
+    pub tls: Tls,
+    /// What a single client may ask for.
+    #[serde(default)]
+    pub limits: Limits,
+    /// Whether `X-Forwarded-For` may name the client.
+    ///
+    /// Off by default: a header any client can set is not an identity, and trusting it
+    /// on a directly exposed server lets one caller spend another's budget.
+    #[serde(default)]
+    pub trust_forwarded_for: bool,
+}
+
+/// Transport security. Absent means plain HTTP, which is right on loopback.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Tls {
+    /// PEM certificate chain. A file path, never a value in this document.
+    pub cert: Option<PathBuf>,
+    /// PEM private key.
+    pub key: Option<PathBuf>,
+}
+
+impl Tls {
+    /// Whether TLS was asked for at all.
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.cert.is_some() || self.key.is_some()
+    }
+}
+
+/// What one client may ask for, and how long it may take to ask.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    /// Requests per second a single client address may make.
+    pub requests_per_second: u32,
+    /// How many may arrive at once before the rate applies.
+    pub burst: u32,
+    /// Open sockets the process will hold.
+    pub max_connections: usize,
+    /// How long a client has to finish sending its request headers.
+    ///
+    /// Without this, a socket that opens and sends one byte a minute holds a slot.
+    pub header_timeout_ms: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            requests_per_second: 50,
+            burst: 100,
+            max_connections: 512,
+            header_timeout_ms: 10_000,
+        }
+    }
 }
 
 impl Default for Server {
@@ -72,6 +129,9 @@ impl Default for Server {
             bind: "127.0.0.1:10101".into(),
             auth: Auth::default(),
             first_message_timeout_ms: 10_000,
+            tls: Tls::default(),
+            limits: Limits::default(),
+            trust_forwarded_for: false,
         }
     }
 }
@@ -504,6 +564,32 @@ impl Config {
                 supported: SCHEMA_VERSION,
             });
         }
+        if self.server.tls.cert.is_some() != self.server.tls.key.is_some() {
+            return Err(ConfigError::Invalid {
+                path: "server.tls".into(),
+                message: "cert and key must be set together; one without the other cannot \
+                          serve a connection"
+                    .into(),
+            });
+        }
+        if self.server.limits.burst == 0 {
+            return Err(ConfigError::Invalid {
+                path: "server.limits.burst".into(),
+                message: "a burst of 0 refuses every request, which is not a limit".into(),
+            });
+        }
+        if self.server.limits.requests_per_second == 0 {
+            return Err(ConfigError::Invalid {
+                path: "server.limits.requests_per_second".into(),
+                message: "a rate of 0 refuses every request, which is not a limit".into(),
+            });
+        }
+        if self.server.limits.max_connections == 0 {
+            return Err(ConfigError::Invalid {
+                path: "server.limits.max_connections".into(),
+                message: "a cap of 0 refuses every connection".into(),
+            });
+        }
         self.server
             .bind
             .parse::<SocketAddr>()
@@ -724,6 +810,27 @@ mod tests {
         let schema = serde_json::to_value(Config::json_schema()).unwrap();
         assert_eq!(schema["title"], "Config");
         assert!(schema["properties"]["server"].is_object());
+    }
+
+    #[test]
+    fn a_certificate_without_a_key_is_refused() {
+        let mut config = Config::default();
+        config.server.tls.cert = Some(PathBuf::from("cert.pem"));
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("server.tls"), "{error}");
+    }
+
+    #[test]
+    fn a_limit_that_refuses_everything_is_refused() {
+        for (field, change) in [("burst", 0_u32), ("requests_per_second", 0_u32)] {
+            let mut config = Config::default();
+            match field {
+                "burst" => config.server.limits.burst = change,
+                _ => config.server.limits.requests_per_second = change,
+            }
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(field), "{field} must be named: {error}");
+        }
     }
 
     #[test]

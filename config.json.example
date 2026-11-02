@@ -6,7 +6,18 @@
       "mode": "none",
       "token_env": "ARIOSO_TOKEN"
     },
-    "first_message_timeout_ms": 10000
+    "first_message_timeout_ms": 10000,
+    "tls": {
+      "cert": null,
+      "key": null
+    },
+    "limits": {
+      "requests_per_second": 50,
+      "burst": 100,
+      "max_connections": 512,
+      "header_timeout_ms": 10000
+    },
+    "trust_forwarded_for": false
   },
   "tts": {
     "enabled": true,
