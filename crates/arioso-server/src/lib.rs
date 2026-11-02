@@ -74,6 +74,8 @@ pub struct AppState {
     /// Where the config came from, so a patch can be written back. Absent when the
     /// server was started with defaults and no file.
     config_file: Option<std::path::PathBuf>,
+    /// Per-client request budgets, from `server.limits`.
+    limiter: RateLimiter,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -98,6 +100,10 @@ impl AppState {
         config_file: Option<&std::path::Path>,
     ) -> Result<Self, ServerError> {
         let models_dir = models_dir(&config);
+        let limiter = RateLimiter::new(
+            config.server.limits.requests_per_second,
+            config.server.limits.burst,
+        );
         let config_file = config_file.map(std::path::Path::to_path_buf);
         let path = models_dir.join("cmudict.dict");
         let text = std::fs::read_to_string(&path)
@@ -127,6 +133,7 @@ impl AppState {
             stt: Mutex::new(None),
             config: std::sync::RwLock::new(config),
             config_file,
+            limiter,
             manifest,
             models_dir,
         })
@@ -137,6 +144,33 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// The address a request is charged to.
+    ///
+    /// `X-Forwarded-For` is only believed when `server.trust_forwarded_for` is on, because
+    /// a header any client can set is not an identity. Without a peer address the request
+    /// is charged to the unspecified address: a shared bucket, so a client that somehow
+    /// arrives without an address is still limited rather than exempt.
+    fn client_address(
+        &self,
+        headers: &axum::http::HeaderMap,
+        extensions: &axum::http::Extensions,
+    ) -> std::net::IpAddr {
+        let unknown = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        if self.config().server.trust_forwarded_for {
+            if let Some(forwarded) = headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .and_then(|value| value.trim().parse().ok())
+            {
+                return forwarded;
+            }
+        }
+        extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map_or(unknown, |info| info.0.ip())
+    }
+
     pub(crate) fn config(&self) -> Config {
         self.config
             .read()
@@ -712,6 +746,91 @@ fn pair_stamp(
     Some((read(cert)?, read(key)?))
 }
 
+/// One client's budget: how many requests it may still make, and when that was counted.
+#[derive(Debug)]
+struct Bucket {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+/// Per-client request budgets.
+///
+/// A token bucket, not a fixed window: a window lets a client send its whole allowance at
+/// the end of one window and again at the start of the next, which is twice the rate at
+/// exactly the moment the server is least able to absorb it.
+#[derive(Debug)]
+pub struct RateLimiter {
+    per_second: f64,
+    burst: f64,
+    buckets: Mutex<std::collections::HashMap<std::net::IpAddr, Bucket>>,
+}
+
+impl RateLimiter {
+    /// Build a limiter from the configured rate and burst.
+    #[must_use]
+    pub fn new(per_second: u32, burst: u32) -> Self {
+        Self {
+            per_second: f64::from(per_second),
+            burst: f64::from(burst),
+            buckets: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Take one token for this client, returning how long to wait when none is left.
+    ///
+    /// `None` means allowed. `Some(duration)` is how long until the next token, which is
+    /// what the `Retry-After` header reports.
+    pub fn take(&self, client: std::net::IpAddr) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        // A table that grows with every address ever seen is a leak. Dropping the buckets
+        // that have been idle long enough to be full again costs one pass and bounds it.
+        if buckets.len() > 1024 {
+            buckets.retain(|_, bucket| {
+                now.duration_since(bucket.last).as_secs_f64() * self.per_second < self.burst
+            });
+        }
+        let bucket = buckets.entry(client).or_insert(Bucket {
+            tokens: self.burst,
+            last: now,
+        });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.per_second).min(self.burst);
+        bucket.last = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            None
+        } else {
+            let wait = (1.0 - bucket.tokens) / self.per_second;
+            Some(std::time::Duration::from_secs_f64(wait.max(0.001)))
+        }
+    }
+}
+
+/// Refuse a client that has spent its budget.
+async fn rate_limit(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let client = state.client_address(request.headers(), request.extensions());
+    if let Some(wait) = state.limiter.take(client) {
+        let seconds = wait.as_secs().max(1);
+        tracing::debug!(%client, retry_after = seconds, "refused by the rate limit");
+        let mut response = ApiError::coded(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many requests from this address",
+        )
+        .into_response();
+        if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert("retry-after", value);
+        }
+        return response;
+    }
+    next.run(request).await
+}
+
 /// Build the router.
 ///
 /// A disabled engine does not register its routes, so `stt.enabled: false` answers 404
@@ -744,7 +863,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         router = router.route("/v1/stt/ws", get(stt_ws_handler));
     }
 
-    router.with_state(state)
+    // The limiter wraps every route, including the ones a client can afford to hammer:
+    // /healthz is the cheapest way to make the server do work, which makes it the first
+    // thing a flood uses.
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit,
+        ))
+        .with_state(state)
 }
 
 /// Largest audio body accepted: 16-bit mono at 48 kHz for the longest allowed audio.
@@ -2158,6 +2285,79 @@ mod tests {
         let error = tls_config(&cert, &key).await.unwrap_err().to_string();
         assert!(error.contains("cert.pem"), "{error}");
         assert!(error.contains("key.pem"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_spends_its_burst_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.server.limits.requests_per_second = 1;
+        config.server.limits.burst = 2;
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let peer: std::net::SocketAddr = "203.0.113.7:5000".parse().unwrap();
+        let ask = || {
+            Request::builder()
+                .uri("/healthz")
+                .extension(axum::extract::ConnectInfo(peer))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // The burst, then one more than the burst.
+        assert_eq!(call(router(state.clone()), ask()).await.0, StatusCode::OK);
+        assert_eq!(call(router(state.clone()), ask()).await.0, StatusCode::OK);
+
+        let response = router(state.clone()).oneshot(ask()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .expect("a refusal must say when to come back");
+        assert!(retry >= 1, "retry-after was {retry}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("rate_limited"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn another_address_has_its_own_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.server.limits.requests_per_second = 1;
+        config.server.limits.burst = 1;
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let ask = |ip: &str| {
+            let peer: std::net::SocketAddr = format!("{ip}:5000").parse().unwrap();
+            Request::builder()
+                .uri("/healthz")
+                .extension(axum::extract::ConnectInfo(peer))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        assert_eq!(
+            call(router(state.clone()), ask("203.0.113.7")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(router(state.clone()), ask("203.0.113.7")).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // A different client is unaffected by the first one's spending.
+        assert_eq!(
+            call(router(state.clone()), ask("198.51.100.9")).await.0,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

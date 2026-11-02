@@ -237,14 +237,18 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
                 .with_context(|| format!("server.bind {bind:?} is not an address"))?;
             println!("listening on https://{bind}");
             axum_server::bind_rustls(addr, config)
-                .serve(router.into_make_service())
+                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         } else {
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("binding {bind}"))?;
             println!("listening on http://{bind}");
-            axum::serve(listener, router).await?;
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         }
         Ok::<(), anyhow::Error>(())
     })

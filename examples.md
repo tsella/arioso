@@ -611,3 +611,53 @@ and keeps serving the certificate already in use, then succeeds on the next poll
 It encrypts the connection. It does not authenticate the caller, limit what they ask for,
 or stop a flood. Set `server.auth` for the first, `server.limits` for the second, and put a
 reverse proxy in front for the third.
+
+## 18. Refusing a client that asks too much
+
+`server.limits` sets a per-address budget. The default is 50 requests per second with a
+burst of 100, which is far more than a person needs and far less than a flood wants.
+
+```json
+{ "server": { "limits": {
+    "requests_per_second": 2,
+    "burst": 3,
+    "max_connections": 512,
+    "header_timeout_ms": 10000
+} } }
+```
+
+Five requests against that budget, from a real run:
+
+```console
+$ for i in 1 2 3 4 5; do curl -s -o /dev/null -w "request $i -> %{http_code}\n" \
+    --cacert cert.pem https://localhost:10197/healthz; done
+request 1 -> 200
+request 2 -> 200
+request 3 -> 200
+request 4 -> 429
+request 5 -> 429
+```
+
+The refusal is a problem document with the header that says when to come back:
+
+```console
+$ curl -s -D - --cacert cert.pem https://localhost:10197/healthz
+HTTP/2 429
+content-type: application/json
+retry-after: 1
+
+{"code":"rate_limited","detail":"too many requests from this address","status":429,
+ "title":"Too Many Requests","type":"about:blank"}
+```
+
+Notes on what this does and does not do:
+
+- The bucket is per address, and `X-Forwarded-For` is only believed when
+  `server.trust_forwarded_for` is on. Behind a proxy, turn it on or every client shares the
+  proxy's budget. Directly exposed, leave it off, or one client can spend another's.
+- A request with no peer address is charged to a shared bucket rather than exempt. Nothing
+  escapes the limit; some things share it.
+- `/healthz` is limited too. It is the cheapest route to make the server work, which makes
+  it the first thing a flood uses.
+- This refuses work cheaply. It does not absorb a volumetric flood, and a reverse proxy is
+  the tool for that.
