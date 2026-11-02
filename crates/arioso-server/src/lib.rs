@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arioso_config::Config;
+use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
@@ -36,6 +37,9 @@ pub enum ServerError {
     /// The configured voice is not in the manifest.
     #[error("no piper voice matches tts.voice {0:?}")]
     NoVoice(String),
+    /// The user dictionary could not be used.
+    #[error("user dictionary: {0}")]
+    UserDictionary(#[from] arioso_core::DictError),
 }
 
 /// Shared server state.
@@ -45,6 +49,7 @@ pub struct AppState {
     manifest: Manifest,
     models_dir: PathBuf,
     dictionary: CmuDict,
+    user: UserDictionary,
     voice: Mutex<Option<PiperVoice>>,
 }
 
@@ -54,13 +59,23 @@ impl AppState {
     /// # Errors
     ///
     /// Returns [`ServerError::Dictionary`] when the dictionary is unreadable.
-    pub fn new(config: Config, manifest: Manifest) -> Result<Self, ServerError> {
+    pub fn new(
+        config: Config,
+        manifest: Manifest,
+        config_file: Option<&std::path::Path>,
+    ) -> Result<Self, ServerError> {
         let models_dir = models_dir(&config);
         let path = models_dir.join("cmudict.dict");
         let text = std::fs::read_to_string(&path)
             .map_err(|source| ServerError::Dictionary { path, source })?;
+        let user = match UserDictionary::load(&config.dictionary_path(config_file)) {
+            Ok(dictionary) => dictionary,
+            Err(arioso_core::DictError::Io { .. }) => UserDictionary::empty(),
+            Err(error) => return Err(ServerError::UserDictionary(error)),
+        };
         Ok(Self {
             dictionary: CmuDict::parse(&text),
+            user,
             voice: Mutex::new(None),
             config,
             manifest,
@@ -131,11 +146,17 @@ impl AppState {
             *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
-        voice
-            .render(text, &self.dictionary, speed, |audio, rate| {
+        let report = voice
+            .render(text, &self.dictionary, &self.user, speed, |audio, rate| {
                 sink(audio, rate).map_err(PiperError::Consumer)
             })
             .map_err(|error| error.to_string())?;
+        if !report.missing.is_empty() {
+            tracing::debug!(missing = ?report.missing, "words absent from the dictionary");
+        }
+        if !report.unusable.is_empty() {
+            tracing::warn!(entries = ?report.unusable, "user dictionary entries the voice cannot say");
+        }
         Ok(())
     }
 }
@@ -309,7 +330,10 @@ mod tests {
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
-        (Arc::new(AppState::new(config, manifest).unwrap()), dir)
+        (
+            Arc::new(AppState::new(config, manifest, None).unwrap()),
+            dir,
+        )
     }
 
     async fn call(app: Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
@@ -404,7 +428,7 @@ mod tests {
         config.models.dir = Some(dir.path().to_path_buf());
         config.tts.voice = "no-such-voice".into();
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
-        let state = Arc::new(AppState::new(config, manifest).unwrap());
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 
         let (status, body) = call(
             router(state),

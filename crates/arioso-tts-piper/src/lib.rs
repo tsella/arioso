@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use arioso_core::{Entry, Piece, UserDictionary, normalize};
 use arioso_core::{chunk_text, sentences};
 use arioso_g2p::{CmuDict, PhonemeMap, arpabet};
 use ort::session::Session;
@@ -43,6 +44,26 @@ pub enum PiperError {
 
 /// Longest piece of text handed to the model, in characters.
 pub const SYNTHESIS_CHUNK: usize = 300;
+
+/// What a render could not say.
+#[derive(Debug, Default, Clone)]
+pub struct RenderReport {
+    /// Words absent from the built-in dictionary.
+    pub missing: Vec<String>,
+    /// Dictionary entries no form of which the voice can render.
+    pub unusable: Vec<String>,
+}
+
+/// Whether a form is written in ARPAbet rather than as a respelling.
+fn is_arpabet(form: &str) -> bool {
+    form.split_whitespace().all(|phoneme| {
+        phoneme
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+    }) && form
+        .split_whitespace()
+        .any(|phoneme| phoneme.chars().all(|ch| ch.is_ascii_uppercase()))
+}
 
 /// A loaded Piper voice.
 pub struct PiperVoice {
@@ -140,36 +161,44 @@ impl PiperVoice {
         &mut self,
         text: &str,
         dictionary: &CmuDict,
+        user: &UserDictionary,
         speed: f32,
         mut sink: impl FnMut(&[f32], u32) -> Result<(), PiperError>,
-    ) -> Result<Vec<String>, PiperError> {
+    ) -> Result<RenderReport, PiperError> {
         self.set_speed(speed);
         let rate = self.sample_rate();
-        let mut missing = Vec::new();
+        let mut report = RenderReport::default();
 
         for sentence in sentences(text) {
             for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
-                let mut symbols: Vec<&str> = Vec::new();
-                for word in chunk.split(|c: char| {
-                    c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')
-                }) {
-                    let cleaned: String = word
-                        .chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '\'')
-                        .collect::<String>()
-                        .to_lowercase();
-                    if cleaned.is_empty() {
-                        continue;
-                    }
-                    match dictionary.lookup(&cleaned) {
-                        Some(pronunciations) => {
-                            if !symbols.is_empty() {
-                                symbols.push(" ");
+                let mut groups: Vec<Vec<&'static str>> = Vec::new();
+                for piece in user.pieces(chunk) {
+                    match piece {
+                        Piece::Entry(entry) => match self.entry_symbols(entry, dictionary) {
+                            Some(symbols) => groups.push(symbols),
+                            None => {
+                                // The voice cannot say any form of this entry, so
+                                // say the term itself and report it.
+                                report.unusable.push(entry.term.clone());
+                                groups.push(self.words(
+                                    &entry.term,
+                                    dictionary,
+                                    &mut report.missing,
+                                ));
                             }
-                            symbols.extend(arpabet::to_ipa(&pronunciations[0]));
+                        },
+                        Piece::Text(segment) => {
+                            groups.push(self.words(segment, dictionary, &mut report.missing));
                         }
-                        None => missing.push(cleaned),
                     }
+                }
+
+                let mut symbols: Vec<&str> = Vec::new();
+                for group in groups.into_iter().filter(|group| !group.is_empty()) {
+                    if !symbols.is_empty() {
+                        symbols.push(" ");
+                    }
+                    symbols.extend(group);
                 }
                 if symbols.is_empty() {
                     continue;
@@ -178,7 +207,57 @@ impl PiperVoice {
                 sink(&audio, rate)?;
             }
         }
-        Ok(missing)
+        Ok(report)
+    }
+
+    /// Symbols for a run of text, after normalization.
+    fn words(
+        &self,
+        text: &str,
+        dictionary: &CmuDict,
+        missing: &mut Vec<String>,
+    ) -> Vec<&'static str> {
+        let expanded = normalize(text);
+        let mut symbols = Vec::new();
+        for word in expanded
+            .split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
+        {
+            let cleaned: String = word
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .collect::<String>()
+                .to_lowercase();
+            if cleaned.is_empty() {
+                continue;
+            }
+            match dictionary.lookup(&cleaned) {
+                Some(pronunciations) => symbols.extend(arpabet::to_ipa(&pronunciations[0])),
+                None => missing.push(cleaned),
+            }
+        }
+        symbols
+    }
+
+    /// Symbols for a dictionary entry, trying its forms in order.
+    ///
+    /// Returns `None` when the voice cannot render any of them.
+    fn entry_symbols(&self, entry: &Entry, dictionary: &CmuDict) -> Option<Vec<&'static str>> {
+        for form in entry.forms() {
+            let symbols = if is_arpabet(form) {
+                arpabet::to_ipa(form)
+            } else {
+                let mut ignored = Vec::new();
+                self.words(form, dictionary, &mut ignored)
+            };
+            if !symbols.is_empty()
+                && symbols
+                    .iter()
+                    .all(|symbol| self.map.ids_of(symbol).is_some())
+            {
+                return Some(symbols);
+            }
+        }
+        None
     }
 
     /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.

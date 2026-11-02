@@ -105,6 +105,10 @@ pub struct Tts {
     pub format: String,
     /// Longest accepted input, in characters.
     pub max_chars: u32,
+    /// Path to the user dictionary. Defaults to `dictionary.json` beside the
+    /// config file.
+    #[serde(default)]
+    pub dictionary: Option<PathBuf>,
 }
 
 impl Default for Tts {
@@ -116,6 +120,7 @@ impl Default for Tts {
             speed: 1.0,
             format: "wav".into(),
             max_chars: 4000,
+            dictionary: None,
         }
     }
 }
@@ -395,6 +400,9 @@ impl Config {
         if let Some(v) = get("ARIOSO_TTS_ENGINE") {
             self.tts.engine = v;
         }
+        if let Some(v) = get("ARIOSO_TTS_DICTIONARY") {
+            self.tts.dictionary = Some(PathBuf::from(v));
+        }
         if let Some(v) = get("ARIOSO_TTS_VOICE") {
             self.tts.voice = v;
         }
@@ -421,6 +429,20 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError::UnsupportedVersion`] or [`ConfigError::Invalid`].
+    /// Where the user dictionary lives: the configured path when set, else
+    /// `dictionary.json` beside the config file, else beside the models.
+    #[must_use]
+    pub fn dictionary_path(&self, config_file: Option<&Path>) -> PathBuf {
+        if let Some(path) = &self.tts.dictionary {
+            return path.clone();
+        }
+        if let Some(directory) = config_file.and_then(Path::parent) {
+            return directory.join("dictionary.json");
+        }
+        PathBuf::from("dictionary.json")
+    }
+
+    /// Validate every field, naming the offending path.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(ConfigError::UnsupportedVersion {

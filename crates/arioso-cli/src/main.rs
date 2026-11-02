@@ -90,8 +90,8 @@ fn main() -> Result<()> {
             ModelsCommand::Download { id } => download(&config, &id),
         },
         Command::Doctor => doctor(&config, &config_path),
-        Command::Say { text, out, dict } => say(&config, &text, out, dict),
-        Command::Serve => serve(config),
+        Command::Say { text, out, dict } => say(&config, &config_path, &text, out, dict),
+        Command::Serve => serve(config, &config_path),
         Command::Normalize { text } => {
             println!("{}", arioso_core::normalize(&text));
             Ok(())
@@ -192,9 +192,13 @@ fn download(config: &Config, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn serve(config: Config) -> Result<()> {
+fn serve(config: Config, config_path: &Path) -> Result<()> {
     let manifest = load_manifest(&config)?;
-    let state = Arc::new(arioso_server::AppState::new(config.clone(), manifest)?);
+    let state = Arc::new(arioso_server::AppState::new(
+        config.clone(),
+        manifest,
+        Some(config_path),
+    )?);
     let bind = config.server.bind.clone();
 
     tokio::runtime::Runtime::new()?.block_on(async move {
@@ -207,7 +211,13 @@ fn serve(config: Config) -> Result<()> {
     })
 }
 
-fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>) -> Result<()> {
+fn say(
+    config: &Config,
+    config_path: &Path,
+    text: &str,
+    out: Option<PathBuf>,
+    dict: Option<PathBuf>,
+) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
     let voices: Vec<&ModelSpec> = manifest
@@ -246,9 +256,18 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
         .with_context(|| format!("reading {}", dict_path.display()))?;
     let dictionary = CmuDict::parse(&dict_text);
 
+    let user_path = config.dictionary_path(Some(config_path));
+    let user = match arioso_core::UserDictionary::load(&user_path) {
+        Ok(dictionary) => dictionary,
+        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::empty(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", user_path.display()));
+        }
+    };
+
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
     let mut samples: Vec<f32> = Vec::new();
-    let missing = voice.render(text, &dictionary, config.tts.speed, |audio, _| {
+    let report = voice.render(text, &dictionary, &user, config.tts.speed, |audio, _| {
         samples.extend_from_slice(audio);
         Ok(())
     })?;
@@ -265,17 +284,29 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
         out.display(),
         samples.len() as f32 / rate as f32
     );
-    if !missing.is_empty() {
-        let shown = missing
+    if !report.missing.is_empty() {
+        let shown = report
+            .missing
             .iter()
             .take(5)
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        let more = if missing.len() > 5 { ", ..." } else { "" };
+        let more = if report.missing.len() > 5 {
+            ", ..."
+        } else {
+            ""
+        };
         eprintln!(
             "{} word(s) not in the dictionary and skipped: {shown}{more}",
-            missing.len()
+            report.missing.len()
+        );
+    }
+    if !report.unusable.is_empty() {
+        eprintln!(
+            "{} entr(y/ies) the voice cannot say: {}",
+            report.unusable.len(),
+            report.unusable.join(", ")
         );
     }
     Ok(())

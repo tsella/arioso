@@ -28,7 +28,7 @@ async fn streams_one_frame_per_sentence() {
     let mut config = Config::default();
     config.models.dir = Some(PathBuf::from(dir));
     let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
-    let state = Arc::new(AppState::new(config, manifest).unwrap());
+    let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
