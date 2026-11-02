@@ -748,6 +748,39 @@ wherever they appear. An entry that says `sell a` will turn "we sell a car" into
 car". That follows from the user writing that form down, and the dictionary is the place
 to correct it.
 
+### F16. Transport security and abuse resistance
+
+A local server is not attacked until someone exposes it. These requirements cover the
+case where it is exposed on purpose, and they are honest about what a single process can
+and cannot do about a flood.
+
+- F16.1 TLS terminates in the server with rustls when `server.tls.cert` and
+  `server.tls.key` are both set. With neither set the server speaks plain HTTP exactly as
+  it does today, so an existing config keeps working.
+- F16.2 Certificates are file paths, never values in the document. The pair is re-read
+  when either file's modification time changes, because certbot renews on a timer and a
+  renewal that needs a restart is a renewal that eventually takes the service down.
+- F16.3 ALPN offers `h2` and `http/1.1`.
+- F16.4 Two documented paths to a certificate: certbot for a public hostname, and a
+  locally generated pair for a LAN or a development machine. Both examples are run in CI
+  or in `examples.md` against a real server before they are published.
+- F16.5 The default bind stays loopback. Exposing the port is an explicit edit, and the
+  README says what that exposes.
+- F16.6 Every route has a body limit. The speech route already raises it deliberately;
+  the rest stay at the framework default.
+- F16.7 A per-client token bucket caps request rate: `server.limits.requests_per_second`
+  and `server.limits.burst`. Over the limit answers `429 rate_limited` with `Retry-After`.
+- F16.8 A connection cap (`server.limits.max_connections`) and a request-header timeout,
+  so an idle or half-open socket cannot hold capacity indefinitely.
+- F16.9 Engine permits and the bounded queue from F11 stay the last line: a full queue
+  answers `429 engine_busy`, which is cheaper than queueing work nobody will run.
+- F16.10 The client identity used by the limits is the peer address. `X-Forwarded-For` is
+  honoured only when `server.trust_forwarded_for` is on, because a header any client can
+  set is not an identity.
+- F16.11 Limits are per process and per address, not distributed. A volumetric flood is
+  the network's problem and is out of scope: what this server promises is to refuse work
+  cheaply, not to absorb a flood. The README says so rather than implying otherwise.
+
 ## 9. Non-functional requirements
 
 | Area | Target |
