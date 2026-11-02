@@ -56,7 +56,10 @@ fn unknown_phonemes_are_dropped() {
 #[test]
 fn every_arpabet_phoneme_maps_to_something() {
     for phoneme in ALL_ARPABET {
-        assert!(!phoneme_to_ipa(phoneme).is_empty(), "{phoneme} produced nothing");
+        assert!(
+            !phoneme_to_ipa(phoneme).is_empty(),
+            "{phoneme} produced nothing"
+        );
     }
 }
 

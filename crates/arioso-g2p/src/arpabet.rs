@@ -5,8 +5,13 @@
 //! before the vowel it marks.
 //!
 //! The table was checked against espeak-ng through Piper's own bridge, which is
-//! the phonemizer these voices were trained with. Two of its habits are copied:
-//! stressed `ER` is `ɜ` with no following `ɹ`, and unstressed `ER` is `ɚ`.
+//! the phonemizer these voices were trained with. Its habits are copied where
+//! they were observed: stressed `ER` is `ɜ` with no following `ɹ`, unstressed
+//! `ER` is `ɚ`, and stressed tense vowels take a length mark.
+//!
+//! One difference is known and accepted: espeak sometimes gives unstressed `AH`
+//! as `ɐ` rather than `ə`, depending on where the word sits. CMUdict does not
+//! carry that information, so this table always writes `ə`.
 
 /// Symbols for one ARPAbet token such as `AH0`.
 #[must_use]
