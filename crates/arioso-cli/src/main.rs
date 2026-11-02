@@ -232,6 +232,10 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
         samples.extend(voice.synthesize(&symbols)?);
     }
 
+    if samples.is_empty() {
+        bail!("nothing to say: none of the words are in the dictionary");
+    }
+
     let out = out.unwrap_or_else(|| PathBuf::from("out.wav"));
     let rate = voice.sample_rate();
     write_wav(&out, &samples, rate)?;
