@@ -50,7 +50,9 @@ pub enum ServerError {
 /// Shared server state.
 #[derive(Debug)]
 pub struct AppState {
-    config: Config,
+    /// Mutable so PATCH /v1/config can change it without a restart. Read through
+    /// `config()`, which clones, so no lock is held across an await.
+    config: std::sync::RwLock<Config>,
     manifest: Manifest,
     models_dir: PathBuf,
     dictionary: CmuDict,
@@ -58,6 +60,9 @@ pub struct AppState {
     voice: Mutex<Option<PiperVoice>>,
     /// Whisper, loaded on first use. One model, so one slot.
     stt: Mutex<Option<arioso_stt_sherpa::Whisper>>,
+    /// Where the config came from, so a patch can be written back. Absent when the
+    /// server was started with defaults and no file.
+    config_file: Option<std::path::PathBuf>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -82,10 +87,11 @@ impl AppState {
         config_file: Option<&std::path::Path>,
     ) -> Result<Self, ServerError> {
         let models_dir = models_dir(&config);
+        let config_file = config_file.map(std::path::Path::to_path_buf);
         let path = models_dir.join("cmudict.dict");
         let text = std::fs::read_to_string(&path)
             .map_err(|source| ServerError::Dictionary { path, source })?;
-        let path = config.dictionary_path(config_file);
+        let path = config.dictionary_path(config_file.as_deref());
         let modified = std::fs::metadata(&path)
             .and_then(|meta| meta.modified())
             .ok();
@@ -106,20 +112,56 @@ impl AppState {
             }),
             voice: Mutex::new(None),
             stt: Mutex::new(None),
-            config,
+            config: std::sync::RwLock::new(config),
+            config_file,
             manifest,
             models_dir,
         })
     }
 
+    /// The config as it stands, cloned.
+    ///
+    /// Cloned rather than borrowed so a caller never holds the lock across an await.
+    /// A poisoned lock still yields the value: the config is plain data, so a panic in
+    /// another task cannot leave it inconsistent.
+    pub(crate) fn config(&self) -> Config {
+        self.config
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Drop the loaded voice, so the next request loads the one the config now names.
+    fn drop_voice(&self) {
+        if let Ok(mut guard) = self.voice.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Drop the loaded transcription model.
+    fn drop_stt(&self) {
+        if let Ok(mut guard) = self.stt.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Replace the config.
+    fn set_config(&self, config: Config) {
+        match self.config.write() {
+            Ok(mut guard) => *guard = config,
+            Err(poisoned) => *poisoned.into_inner() = config,
+        }
+    }
+
     /// The voice the config asks for.
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
+        let voice = self.config().tts.voice;
         self.manifest
             .models
             .iter()
             .filter(|m| m.kind == Kind::Tts && m.engine == "piper")
-            .find(|m| m.id == self.config.tts.voice || m.id.ends_with(&self.config.tts.voice))
-            .ok_or_else(|| ServerError::NoVoice(self.config.tts.voice.clone()))
+            .find(|m| m.id == voice || m.id.ends_with(&voice))
+            .ok_or(ServerError::NoVoice(voice))
     }
 
     /// The speech to text model the config asks for.
@@ -129,7 +171,8 @@ impl AppState {
     /// not exist either, so a client that reads this list sees exactly what it can call.
     fn engines(&self) -> Vec<EngineView> {
         let mut engines = Vec::new();
-        if self.config.tts.enabled {
+        let config = self.config();
+        if config.tts.enabled {
             engines.push(EngineView {
                 id: "piper".to_string(),
                 kind: "tts".to_string(),
@@ -143,7 +186,7 @@ impl AppState {
                     .unwrap_or(false),
             });
         }
-        if self.config.stt.enabled {
+        if config.stt.enabled {
             engines.push(EngineView {
                 id: "sherpa-whisper".to_string(),
                 kind: "stt".to_string(),
@@ -196,12 +239,13 @@ impl AppState {
     }
 
     fn stt_spec(&self) -> Result<&ModelSpec, ServerError> {
+        let model = self.config().stt.batch_model;
         self.manifest
             .models
             .iter()
             .filter(|m| m.kind == Kind::Stt && m.engine == "sherpa")
-            .find(|m| m.id == self.config.stt.batch_model)
-            .ok_or_else(|| ServerError::NoSttModel(self.config.stt.batch_model.clone()))
+            .find(|m| m.id == model)
+            .ok_or(ServerError::NoSttModel(model))
     }
 
     /// Transcribe WAV bytes, loading the engine on first use.
@@ -213,10 +257,10 @@ impl AppState {
         } else {
             samples.len() as f64 / f64::from(rate)
         };
-        if seconds > f64::from(self.config.stt.max_audio_s) {
+        let max_audio_s = self.config().stt.max_audio_s;
+        if seconds > f64::from(max_audio_s) {
             return Err(SttFailure::Audio(format!(
-                "the audio is {seconds:.0} s, longer than stt.max_audio_s of {} s",
-                self.config.stt.max_audio_s
+                "the audio is {seconds:.0} s, longer than stt.max_audio_s of {max_audio_s} s"
             )));
         }
 
@@ -258,10 +302,11 @@ impl AppState {
             if !self.is_installed(spec) {
                 return Err(SttFailure::NotInstalled(spec.id.clone()));
             }
-            let language = if self.config.stt.language == "auto" {
+            let configured = self.config().stt.language;
+            let language = if configured == "auto" {
                 None
             } else {
-                Some(self.config.stt.language.as_str())
+                Some(configured.as_str())
             };
             let threads = std::thread::available_parallelism()
                 .map_or(4, |count| (count.get() / 2).clamp(1, 8));
@@ -418,7 +463,7 @@ impl AppState {
         let options = arioso_tts_piper::RenderOptions {
             speed,
             normalize: arioso_core::NormalizeOptions {
-                time_of_day: self.config.tts.time_of_day,
+                time_of_day: self.config().tts.time_of_day,
             },
         };
         let report = voice
@@ -493,6 +538,8 @@ impl ApiError {
         info,
         list_engines,
         list_voices,
+        get_config,
+        patch_config,
         list_models,
         synthesize,
         transcribe_audio
@@ -590,19 +637,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
         .route("/v1/voices", get(list_voices))
+        .route("/v1/config", get(get_config).patch(patch_config))
         // The Swagger UI serves the document at the URL it is given, so this registers
         // /openapi.json as well as /docs. An explicit route beside it is a collision.
-        .merge(
-            utoipa_swagger_ui::SwaggerUi::new("/docs")
-                .url("/openapi.json", <ApiDoc as utoipa::OpenApi>::openapi()),
-        );
+        .merge(utoipa_swagger_ui::SwaggerUi::new("/docs").url("/openapi.json", document(&state)));
 
-    if state.config.tts.enabled {
+    if state.config().tts.enabled {
         router = router
             .route("/v1/tts", post(synthesize))
             .route("/v1/tts/ws", get(ws_handler));
     }
-    if state.config.stt.enabled {
+    if state.config().stt.enabled {
         // The body is audio, so the default 2 MiB limit is too small.
         let limit = MAX_AUDIO_BYTES;
         router = router.route(
@@ -812,6 +857,278 @@ async fn list_engines(State(state): State<Arc<AppState>>) -> Json<EngineListView
     })
 }
 
+/// A partial config update. Only the fields present in the body change.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigPatch {
+    /// Write the result to the config file, so it survives a restart.
+    #[serde(default)]
+    pub persist: bool,
+    /// Text to speech settings.
+    pub tts: Option<TtsPatch>,
+    /// Speech to text settings.
+    pub stt: Option<SttPatch>,
+    /// Listener settings.
+    pub server: Option<ServerPatch>,
+}
+
+/// Text to speech fields a patch may change.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TtsPatch {
+    /// Whether the speech routes are served.
+    pub enabled: Option<bool>,
+    /// Engine id. Only `piper` is built into this binary.
+    pub engine: Option<String>,
+    /// Voice id, or the bare voice name.
+    pub voice: Option<String>,
+    /// Speaking rate, 0.5 to 2.0.
+    pub speed: Option<f32>,
+    /// `wav`, `pcm`, `mp3`, or `opus`.
+    pub format: Option<String>,
+    /// Whether times are read with a part of day.
+    pub time_of_day: Option<bool>,
+}
+
+/// Speech to text fields a patch may change.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SttPatch {
+    /// Whether the transcription routes are served.
+    pub enabled: Option<bool>,
+    /// Catalog id of the batch model.
+    pub batch_model: Option<String>,
+    /// `auto`, or a language code.
+    pub language: Option<String>,
+    /// Whether the stream sends partial transcripts.
+    pub partials: Option<bool>,
+}
+
+/// Listener fields a patch may change.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServerPatch {
+    /// How long a WebSocket client may stay silent, in milliseconds.
+    pub first_message_timeout_ms: Option<u64>,
+}
+
+/// What a patch touched, so the engines it invalidated can be dropped.
+#[derive(Debug, Default)]
+struct Touched {
+    voice: bool,
+    stt: bool,
+}
+
+impl ConfigPatch {
+    /// Apply the fields present, and report what changed.
+    fn apply(self, config: &mut Config) -> Touched {
+        let mut touched = Touched::default();
+        if let Some(tts) = self.tts {
+            if let Some(enabled) = tts.enabled {
+                config.tts.enabled = enabled;
+            }
+            if let Some(engine) = tts.engine {
+                config.tts.engine = engine;
+                touched.voice = true;
+            }
+            if let Some(voice) = tts.voice {
+                config.tts.voice = voice;
+                touched.voice = true;
+            }
+            if let Some(speed) = tts.speed {
+                config.tts.speed = speed;
+            }
+            if let Some(format) = tts.format {
+                config.tts.format = format;
+            }
+            if let Some(time_of_day) = tts.time_of_day {
+                config.tts.time_of_day = time_of_day;
+            }
+        }
+        if let Some(stt) = self.stt {
+            if let Some(enabled) = stt.enabled {
+                config.stt.enabled = enabled;
+            }
+            if let Some(model) = stt.batch_model {
+                config.stt.batch_model = model;
+                touched.stt = true;
+            }
+            if let Some(language) = stt.language {
+                config.stt.language = language;
+                touched.stt = true;
+            }
+            if let Some(partials) = stt.partials {
+                config.stt.partials = partials;
+            }
+        }
+        if let Some(server) = self.server {
+            if let Some(timeout) = server.first_message_timeout_ms {
+                config.server.first_message_timeout_ms = timeout;
+            }
+        }
+        touched
+    }
+}
+
+/// Engines this binary can actually serve, and what they are called.
+const TTS_ENGINES: [&str; 1] = ["piper"];
+const STT_ENGINES: [&str; 1] = ["sherpa"];
+const AUDIO_FORMATS: [&str; 4] = ["wav", "pcm", "mp3", "opus"];
+
+#[utoipa::path(
+    get,
+    path = "/v1/config",
+    tag = "config",
+    summary = "The config as it stands",
+    description = "No field here is secret: the bearer token is read from the environment, \
+        never from this document.",
+    responses((status = 200, body = serde_json::Value))
+)]
+async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(config_json(&state.config()))
+}
+
+/// The config as JSON, with floats written the way the file writes them.
+///
+/// `to_value` turns an f32 into an f64, so a speed of 1.4 comes back as
+/// 1.399999976158142. Serialising to text first uses the f32 formatter and keeps 1.4.
+fn config_json(config: &Config) -> serde_json::Value {
+    serde_json::to_string(config)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/config",
+    tag = "config",
+    summary = "Change the config without a restart",
+    description = "Only the fields present in the body change. An unknown field is refused, \
+        so a typo does not look like a successful change. Validation runs before anything \
+        is applied, so a refused patch changes nothing.",
+    request_body = ConfigPatch,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 422, description = "The patch is valid JSON but not a usable value", body = Problem),
+        (status = 409, description = "persist was asked for but there is no config file", body = Problem)
+    )
+)]
+async fn patch_config(
+    State(state): State<Arc<AppState>>,
+    Json(patch): Json<ConfigPatch>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let persist = patch.persist;
+    let mut next = state.config();
+    let touched = patch.apply(&mut next);
+    validate(&next, &state)?;
+
+    if persist {
+        let Some(path) = state.config_file.as_deref() else {
+            return Err(ApiError::coded(
+                StatusCode::CONFLICT,
+                "no_config_file",
+                "the server started without a config file, so there is nothing to persist to",
+            ));
+        };
+        next.save(path).map_err(|error| {
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_write_failed",
+                format!("writing {path:?}: {error}"),
+            )
+        })?;
+    }
+
+    state.set_config(next.clone());
+    if touched.voice {
+        state.drop_voice();
+    }
+    if touched.stt {
+        state.drop_stt();
+    }
+    Ok(Json(config_json(&next)))
+}
+
+/// The API document, cut down to the routes this server actually registered.
+///
+/// The document is built from the handlers, so it names every route the crate can serve.
+/// A disabled engine has no route, and a document promising one would send a client to a
+/// 404.
+fn document(state: &AppState) -> utoipa::openapi::OpenApi {
+    let config = state.config();
+    let mut document = <ApiDoc as utoipa::OpenApi>::openapi();
+    if !config.tts.enabled {
+        document.paths.paths.remove("/v1/tts");
+    }
+    if !config.stt.enabled {
+        document.paths.paths.remove("/v1/stt");
+    }
+    document
+}
+
+/// Refuse a config this binary cannot serve, before any of it is applied.
+fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
+    if !TTS_ENGINES.contains(&config.tts.engine.as_str()) {
+        return Err(unprocessable(format!(
+            "tts.engine {} is not built into this binary; the engines here are {}",
+            config.tts.engine,
+            TTS_ENGINES.join(", ")
+        )));
+    }
+    if !STT_ENGINES.contains(&config.stt.engine.as_str()) {
+        return Err(unprocessable(format!(
+            "stt.engine {} is not built into this binary; the engines here are {}",
+            config.stt.engine,
+            STT_ENGINES.join(", ")
+        )));
+    }
+    if !(0.5..=2.0).contains(&config.tts.speed) {
+        return Err(unprocessable(format!(
+            "tts.speed {} is outside 0.5 to 2.0",
+            config.tts.speed
+        )));
+    }
+    if !AUDIO_FORMATS.contains(&config.tts.format.as_str()) {
+        return Err(unprocessable(format!(
+            "tts.format {} is not one of {}",
+            config.tts.format,
+            AUDIO_FORMATS.join(", ")
+        )));
+    }
+    if config.server.first_message_timeout_ms < 100 {
+        return Err(unprocessable(
+            "server.first_message_timeout_ms must be at least 100".to_string(),
+        ));
+    }
+    let voice_known = state.manifest.models.iter().any(|model| {
+        model.kind == arioso_models::Kind::Tts
+            && (model.id == config.tts.voice || model.id.ends_with(&config.tts.voice))
+    });
+    if !voice_known {
+        return Err(unprocessable(format!(
+            "tts.voice {} is not in the catalog; GET /v1/voices lists what is",
+            config.tts.voice
+        )));
+    }
+    let model_known =
+        state.manifest.models.iter().any(|model| {
+            model.kind == arioso_models::Kind::Stt && model.id == config.stt.batch_model
+        });
+    if !model_known {
+        return Err(unprocessable(format!(
+            "stt.batch_model {} is not in the catalog; GET /v1/models lists what is",
+            config.stt.batch_model
+        )));
+    }
+    Ok(())
+}
+
+/// A refused value, with the field named.
+fn unprocessable(detail: String) -> ApiError {
+    ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", detail)
+}
+
 #[utoipa::path(
     get,
     path = "/v1/voices",
@@ -938,7 +1255,7 @@ async fn synthesize(
             format!("text is longer than {MAX_TEXT_CHARS} characters"),
         ));
     }
-    let speed = request.speed.unwrap_or(state.config.tts.speed);
+    let speed = request.speed.unwrap_or(state.config().tts.speed);
     if !(0.5..=2.0).contains(&speed) {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1110,6 +1427,7 @@ mod tests {
             "/v1/info",
             "/v1/engines",
             "/v1/voices",
+            "/v1/config",
             "/v1/models",
             "/v1/tts",
             "/v1/stt",
@@ -1256,6 +1574,149 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body["voices"].as_array().unwrap().is_empty(), "{body}");
+    }
+
+    async fn patch(state: Arc<AppState>, body: &str) -> (StatusCode, serde_json::Value) {
+        let (status, bytes) = call(
+            router(state),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn a_patch_changes_only_the_fields_it_names() {
+        let (state, _dir) = state();
+        let before = state.config();
+        let (status, body) = patch(state.clone(), r#"{"tts":{"speed":1.4}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["tts"]["speed"], 1.4);
+        // Everything else is untouched.
+        assert_eq!(state.config().tts.voice, before.tts.voice);
+        assert_eq!(state.config().tts.format, before.tts.format);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_field_is_refused() {
+        let (state, _dir) = state();
+        let before = state.config();
+        let (status, _) = patch(state.clone(), r#"{"tts":{"speeed":1.4}}"#).await;
+        assert!(
+            status == StatusCode::UNPROCESSABLE_ENTITY || status == StatusCode::BAD_REQUEST,
+            "a typo must not look like success, got {status}"
+        );
+        assert_eq!(state.config(), before, "a refused patch changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_value_out_of_range_is_refused_and_nothing_is_applied() {
+        let (state, _dir) = state();
+        let before = state.config();
+        let (status, body) = patch(state.clone(), r#"{"tts":{"speed":5.0,"format":"opus"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "invalid_value");
+        assert_eq!(
+            state.config().tts.format,
+            before.tts.format,
+            "the valid half of a refused patch must not be applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_is_not_built_is_refused_with_the_alternative() {
+        let (state, _dir) = state();
+        let (status, body) = patch(state, r#"{"tts":{"engine":"kokoro"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let detail = body["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("piper"),
+            "the refusal names what works: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voice_outside_the_catalog_is_refused() {
+        let (state, _dir) = state();
+        let (status, body) = patch(state, r#"{"tts":{"voice":"piper-xx_YY-nobody"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+
+    #[tokio::test]
+    async fn persisting_without_a_config_file_is_a_conflict() {
+        let (state, _dir) = state();
+        let (status, body) = patch(state, r#"{"persist":true,"tts":{"speed":1.2}}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "no_config_file");
+    }
+
+    #[tokio::test]
+    async fn a_patch_survives_a_reload_when_it_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.save(&path).unwrap();
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, Some(&path)).unwrap());
+
+        let (status, body) = patch(state, r#"{"persist":true,"tts":{"speed":1.7}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let reloaded = Config::load(&path).unwrap();
+        assert_eq!(reloaded.tts.speed, 1.7, "the file holds the change");
+    }
+
+    #[tokio::test]
+    async fn the_config_is_readable_and_carries_no_token() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["tts"]["engine"], "piper");
+        assert!(
+            body["server"]["auth"].get("token").is_none(),
+            "the token lives in the environment, not the document"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_document_leaves_out_a_disabled_route() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.stt.enabled = false;
+        config.models.dir = Some(dir.path().to_path_buf());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            document["paths"].get("/v1/stt").is_none(),
+            "a route that is not registered must not be promised: {document}"
+        );
+        assert!(document["paths"].get("/v1/tts").is_some(), "{document}");
     }
 
     #[tokio::test]

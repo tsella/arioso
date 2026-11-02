@@ -395,6 +395,31 @@ impl Config {
     ///
     /// As [`Config::load`], plus [`ConfigError::Invalid`] for a malformed
     /// environment value.
+    /// Write the document to `path`, atomically.
+    ///
+    /// The text goes to a sibling file first and is renamed into place, so a crash
+    /// mid-write cannot leave a half-written config behind: a reader sees either the old
+    /// document or the new one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Io`] when the directory or file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        let temporary = path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(self).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        std::fs::write(&temporary, format!("{text}\n")).map_err(|source| ConfigError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+        std::fs::rename(&temporary, path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     pub fn load_with_env(path: &Path) -> Result<Self, ConfigError> {
         let mut cfg = Self::load(path)?;
         cfg.apply_env(|key| std::env::var(key).ok())?;

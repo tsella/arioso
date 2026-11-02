@@ -87,7 +87,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    let limit = Duration::from_millis(state.config.server.first_message_timeout_ms);
+    let limit = Duration::from_millis(state.config().server.first_message_timeout_ms);
     let first = match tokio::time::timeout(limit, stream.next()).await {
         Ok(Some(Ok(message))) => message,
         _ => {
@@ -146,10 +146,10 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     .await;
 
     let mut segmenter = Segmenter::new(STREAM_RATE, VadConfig::default());
-    let interval_ms = state.config.stt.partial_interval_ms.max(50);
+    let interval_ms = state.config().stt.partial_interval_ms.max(50);
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(interval_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let partials = state.config.stt.partials;
+    let partials = state.config().stt.partials;
     // Bumped when an utterance is finalised, so a partial still running for it is
     // dropped instead of arriving after the final.
     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));

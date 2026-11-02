@@ -58,7 +58,7 @@ async fn first_message(socket: &mut WebSocket, limit: std::time::Duration) -> Op
 
 async fn run(mut socket: WebSocket, state: Arc<AppState>) {
     // A client that connects and says nothing must not hold the task open.
-    let limit = std::time::Duration::from_millis(state.config.server.first_message_timeout_ms);
+    let limit = std::time::Duration::from_millis(state.config().server.first_message_timeout_ms);
     let Some(first) = first_message(&mut socket, limit).await else {
         let frame = json!({
             "type": "error",
@@ -82,7 +82,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    let (text, speed) = match prepare(&request, state.config.tts.speed) {
+    let (text, speed) = match prepare(&request, state.config().tts.speed) {
         Ok(pair) => pair,
         Err(detail) => {
             let frame = json!({"type": "error", "detail": detail});
