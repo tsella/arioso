@@ -220,12 +220,31 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
     )?);
     let bind = config.server.bind.clone();
 
+    let tls = config.server.tls.clone();
+
     tokio::runtime::Runtime::new()?.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(&bind)
-            .await
-            .with_context(|| format!("binding {bind}"))?;
-        println!("listening on http://{bind}");
-        axum::serve(listener, arioso_server::router(state)).await?;
+        let router = arioso_server::router(state);
+        if tls.is_configured() {
+            // Validation already refused one half of the pair, so both are here.
+            let (cert, key) = match (tls.cert.clone(), tls.key.clone()) {
+                (Some(cert), Some(key)) => (cert, key),
+                _ => anyhow::bail!("server.tls needs both cert and key"),
+            };
+            let config = arioso_server::tls_config(&cert, &key).await?;
+            let addr: std::net::SocketAddr = bind
+                .parse()
+                .with_context(|| format!("server.bind {bind:?} is not an address"))?;
+            println!("listening on https://{bind}");
+            axum_server::bind_rustls(addr, config)
+                .serve(router.into_make_service())
+                .await?;
+        } else {
+            let listener = tokio::net::TcpListener::bind(&bind)
+                .await
+                .with_context(|| format!("binding {bind}"))?;
+            println!("listening on http://{bind}");
+            axum::serve(listener, router).await?;
+        }
         Ok::<(), anyhow::Error>(())
     })
 }

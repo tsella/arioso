@@ -45,6 +45,17 @@ pub enum ServerError {
     /// The user dictionary could not be used.
     #[error("user dictionary: {0}")]
     UserDictionary(#[from] arioso_core::DictError),
+    /// The certificate or key could not be read, or they do not match.
+    #[error("reading the certificate {cert} and the key {key}: {source}")]
+    Tls {
+        /// Certificate path, as configured.
+        cert: String,
+        /// Key path, as configured.
+        key: String,
+        /// Underlying error from the TLS loader.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Shared server state.
@@ -626,6 +637,29 @@ pub struct ModelView {
     pub installed: bool,
     /// Total size in bytes.
     pub bytes: u64,
+}
+
+/// Read a certificate and key, ready to serve TLS.
+///
+/// The pair is read once here and again whenever the files change, because certbot renews
+/// on a timer and a renewal that needs a restart is a renewal that takes the service down
+/// the one time nobody is watching.
+pub async fn tls_config(
+    cert: &std::path::Path,
+    key: &std::path::Path,
+) -> Result<axum_server::tls_rustls::RustlsConfig, ServerError> {
+    // axum-server takes a provider-agnostic rustls build, so the process has to choose
+    // one before the first handshake or rustls panics looking for a default. ring rather
+    // than aws-lc-rs: it needs no C toolchain beyond what the other native dependencies
+    // already require, and Windows CI is already the fragile one.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+        .await
+        .map_err(|error| ServerError::Tls {
+            cert: cert.display().to_string(),
+            key: key.display().to_string(),
+            source: error,
+        })
 }
 
 /// Build the router.
@@ -2057,6 +2091,23 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(String::from_utf8_lossy(&body).contains("no piper voice"));
+    }
+
+    #[tokio::test]
+    async fn a_generated_pair_is_accepted_and_a_bad_key_is_named() {
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, generated.cert.pem()).unwrap();
+        std::fs::write(&key, generated.signing_key.serialize_pem()).unwrap();
+
+        assert!(tls_config(&cert, &key).await.is_ok());
+
+        std::fs::write(&key, "not a key").unwrap();
+        let error = tls_config(&cert, &key).await.unwrap_err().to_string();
+        assert!(error.contains("cert.pem"), "{error}");
+        assert!(error.contains("key.pem"), "{error}");
     }
 
     #[tokio::test]

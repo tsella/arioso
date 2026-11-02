@@ -21,6 +21,8 @@ arioso-tts-piper = { path = "crates/arioso-tts-piper" }
 arioso-core = { path = "crates/arioso-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive"] }

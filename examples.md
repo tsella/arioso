@@ -523,3 +523,73 @@ it. Copy it to the config path and edit what you need:
 ```console
 $ cp config.json.example ~/.local/share/arioso/config.json
 ```
+
+## 17. Serving over TLS
+
+Set both files and the server speaks HTTPS; set neither and it speaks HTTP as before. One
+without the other is refused at startup, because half a pair cannot serve a connection.
+
+```json
+{ "server": { "tls": { "cert": "/path/cert.pem", "key": "/path/key.pem" } } }
+```
+
+### A pair for your own machine or LAN
+
+No certificate authority is involved, so clients must be told to trust it. This is the
+right tool for a laptop, a test box, or a LAN address, and it is not a substitute for a
+public certificate.
+
+```console
+$ openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout key.pem -out cert.pem -days 365 \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+$ arioso --config config.json serve
+listening on https://127.0.0.1:10197
+```
+
+```console
+$ curl --cacert cert.pem https://localhost:10197/healthz -w ' [%{http_code} h%{http_version}]'
+ok [200 h2]
+$ curl http://127.0.0.1:10197/healthz
+curl: (7) Failed to connect to 127.0.0.1 port 10197
+```
+
+The second request fails because the port speaks TLS only: there is no plain listener
+beside it, so a client cannot silently downgrade. Both lines above are from a real run.
+
+### A certificate for a public hostname
+
+The commands below are the standard certbot recipe. They are not run by this repository's
+tests, because they need a public hostname and a port 80 that Let's Encrypt can reach.
+
+```console
+$ sudo certbot certonly --standalone -d tts.example.com
+$ sudo chgrp -R staff /etc/letsencrypt/live /etc/letsencrypt/archive
+$ sudo chmod -R g+r /etc/letsencrypt/live /etc/letsencrypt/archive
+```
+
+Point the config at the two files certbot maintains:
+
+```json
+{ "server": { "tls": {
+    "cert": "/etc/letsencrypt/live/tts.example.com/fullchain.pem",
+    "key":  "/etc/letsencrypt/live/tts.example.com/privkey.pem"
+} } }
+```
+
+`fullchain.pem`, not `cert.pem`: a client that does not already hold the intermediate
+certificate cannot build a chain from the leaf alone. The group and mode commands matter
+because certbot writes as root and the server usually does not run as root.
+
+### Renewal
+
+The pair is re-read when either file's modification time changes, so a renewal takes effect
+without a restart. A restart would work too, until the one time it is forgotten and the
+certificate expires while the service is up.
+
+### What TLS does not do
+
+It encrypts the connection. It does not authenticate the caller, limit what they ask for,
+or stop a flood. Set `server.auth` for the first, `server.limits` for the second, and put a
+reverse proxy in front for the third.

@@ -17,6 +17,8 @@ arioso-stt-sherpa.workspace = true
 arioso-vad.workspace = true
 arioso-tts-piper.workspace = true
 axum.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,6 +30,7 @@ utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+rcgen = "0.14"
 tempfile.workspace = true
 tokio-tungstenite = "0.30"
 tower.workspace = true
