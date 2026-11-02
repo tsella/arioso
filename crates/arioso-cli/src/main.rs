@@ -356,11 +356,88 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
         println!("            copy models/manifest.json there, then run `arioso models list`");
     }
 
+    problems += report_dictionary(config, config_path, &dir)?;
+
     if problems > 0 {
         bail!("{problems} problem(s) found");
     }
     println!("ok");
     Ok(())
+}
+
+/// Report the user dictionary, and the entries the configured voice cannot say.
+fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Result<usize> {
+    let path = config.dictionary_path(Some(config_path));
+    let user = match arioso_core::UserDictionary::load(&path) {
+        Ok(user) => user,
+        Err(arioso_core::DictError::Io { .. }) => {
+            println!("dictionary  absent at {} (optional)", path.display());
+            return Ok(0);
+        }
+        Err(error) => {
+            println!("dictionary  {} INVALID: {error}", path.display());
+            return Ok(1);
+        }
+    };
+    println!("dictionary  {} entries from {}", user.len(), path.display());
+
+    // The voice's symbol inventory lives in its config, so no model is loaded.
+    let voice_config = std::fs::read_dir(models)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.to_string_lossy().ends_with(".onnx.json")
+                && path.to_string_lossy().contains(&config.tts.voice)
+        });
+    let Some(voice_config) = voice_config else {
+        println!(
+            "            voice {} is not installed, so entries were not checked",
+            config.tts.voice
+        );
+        return Ok(0);
+    };
+
+    let map = arioso_g2p::PhonemeMap::from_voice_config(&std::fs::read_to_string(&voice_config)?)?;
+    let dict_path = models.join("cmudict.dict");
+    let pronunciations = match std::fs::read_to_string(&dict_path) {
+        Ok(text) => CmuDict::parse(&text),
+        Err(_) => {
+            println!(
+                "            no cmudict.dict in {}, so entries were not checked",
+                models.display()
+            );
+            return Ok(0);
+        }
+    };
+
+    let unusable: Vec<&str> =
+        user.entries()
+            .iter()
+            .filter(|entry| {
+                !entry.forms().iter().any(|form| {
+                    arioso_tts_piper::form_symbols(form, &map, &pronunciations).is_some()
+                })
+            })
+            .map(|entry| entry.term.as_str())
+            .collect();
+
+    if unusable.is_empty() {
+        println!(
+            "            every entry can be said by {}",
+            config.tts.voice
+        );
+        Ok(0)
+    } else {
+        println!(
+            "            {} entr(y/ies) this voice cannot say: {}",
+            unusable.len(),
+            unusable.join(", ")
+        );
+        Ok(1)
+    }
 }
 
 fn init_tracing(config: &Config) {

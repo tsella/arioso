@@ -217,47 +217,17 @@ impl PiperVoice {
         dictionary: &CmuDict,
         missing: &mut Vec<String>,
     ) -> Vec<&'static str> {
-        let expanded = normalize(text);
-        let mut symbols = Vec::new();
-        for word in expanded
-            .split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
-        {
-            let cleaned: String = word
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '\'')
-                .collect::<String>()
-                .to_lowercase();
-            if cleaned.is_empty() {
-                continue;
-            }
-            match dictionary.lookup(&cleaned) {
-                Some(pronunciations) => symbols.extend(arpabet::to_ipa(&pronunciations[0])),
-                None => missing.push(cleaned),
-            }
-        }
-        symbols
+        text_symbols(text, dictionary, missing)
     }
 
     /// Symbols for a dictionary entry, trying its forms in order.
     ///
     /// Returns `None` when the voice cannot render any of them.
     fn entry_symbols(&self, entry: &Entry, dictionary: &CmuDict) -> Option<Vec<&'static str>> {
-        for form in entry.forms() {
-            let symbols = if is_arpabet(form) {
-                arpabet::to_ipa(form)
-            } else {
-                let mut ignored = Vec::new();
-                self.words(form, dictionary, &mut ignored)
-            };
-            if !symbols.is_empty()
-                && symbols
-                    .iter()
-                    .all(|symbol| self.map.ids_of(symbol).is_some())
-            {
-                return Some(symbols);
-            }
-        }
-        None
+        entry
+            .forms()
+            .into_iter()
+            .find_map(|form| form_symbols(form, &self.map, dictionary))
     }
 
     /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.
@@ -294,4 +264,47 @@ impl PiperVoice {
         let (_shape, samples) = output.try_extract_tensor::<f32>()?;
         Ok(samples.to_vec())
     }
+}
+
+/// Symbols for a run of text, after normalization.
+fn text_symbols(text: &str, dictionary: &CmuDict, missing: &mut Vec<String>) -> Vec<&'static str> {
+    let expanded = normalize(text);
+    let mut symbols = Vec::new();
+    for word in
+        expanded.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
+    {
+        let cleaned: String = word
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '\'')
+            .collect::<String>()
+            .to_lowercase();
+        if cleaned.is_empty() {
+            continue;
+        }
+        match dictionary.lookup(&cleaned) {
+            Some(pronunciations) => symbols.extend(arpabet::to_ipa(&pronunciations[0])),
+            None => missing.push(cleaned),
+        }
+    }
+    symbols
+}
+
+/// Symbols for one dictionary form, if this voice can render all of them.
+///
+/// `arioso doctor` uses this to report entries the configured voice cannot say.
+#[must_use]
+pub fn form_symbols(
+    form: &str,
+    map: &PhonemeMap,
+    dictionary: &CmuDict,
+) -> Option<Vec<&'static str>> {
+    let symbols = if is_arpabet(form) {
+        arpabet::to_ipa(form)
+    } else {
+        text_symbols(form, dictionary, &mut Vec::new())
+    };
+    if symbols.is_empty() || symbols.iter().any(|symbol| map.ids_of(symbol).is_none()) {
+        return None;
+    }
+    Some(symbols)
 }
