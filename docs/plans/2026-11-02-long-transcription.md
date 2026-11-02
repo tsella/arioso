@@ -285,7 +285,8 @@ Same audio, same voice, same windowing, two models:
 The larger model is worse by this measure, and the reason is visible in the columns: it
 makes 45 fewer substitutions and 280 more deletions. It is not mishearing more words; it is
 leaving more out. Its output is 5,464 tokens against the reference's 5,782 and base's
-5,751.
+5,751. The novel was run through the same model afterwards, and it behaves the same way
+there: see the four-run table below.
 
 What it drops is small words, not just fillers: `a` 12 times, `the` 10, `i` 9, `you` 9,
 `and` 8. Only 41 of its 350 deletions are disfluencies. Word error rate counts a dropped
@@ -299,23 +300,41 @@ Cost: 2.9 times the wall clock and 2.2 times the memory for a worse score on thi
 
 ### What the two runs say together
 
-| corpus | model | WER |
-| --- | --- | --- |
-| 1895 novel | `base.en` | 8.79% |
-| podcast, 2023 | `base.en` | 6.99% |
-| podcast, 2023 | `small.en` | 10.93% |
-| 1895 novel | `small.en` | not run |
+Four runs, three ways of scoring:
 
-Contemporary speech scores better than the novel with the same engine, which is what the
-vocabulary analysis predicted. The larger model does not help on this audio, and a reader
-who wants fewer wrong words rather than fewer missing words might still prefer it: 250
-substitutions against 295.
+| corpus | model | plain | digits folded | spelling folded |
+| --- | --- | --- | --- | --- |
+| 1895 novel | `base.en` | 8.79% | 8.62% | 7.49% |
+| 1895 novel | `small.en` | 9.20% | 9.18% | 8.29% |
+| podcast, 2023 | `base.en` | **6.99%** | **6.76%** | **6.75%** |
+| podcast, 2023 | `small.en` | 10.93% | 10.76% | 10.74% |
 
-The missing cell is the honest gap. Without the novel through `small.en`, the interaction
-between corpus and model size is measured on one side only, and the claim "small.en is
-worse" is scoped to podcast speech rather than to the engine.
+Contemporary speech scores better than the novel on both models, which is what the
+vocabulary analysis predicted.
 
-A model that omits content is also a correctness risk beyond the score: a caller that
-transcribes a meeting and trusts the text cannot tell which sentences were skipped. If the
-larger tier is ever offered, the catalog should say what this run found rather than imply
-that bigger is better.
+The larger model is worse on both corpora, and the cause is the same in both:
+
+| corpus | model | substitutions | deletions |
+| --- | --- | --- | --- |
+| novel | `base.en` | 437 | 32 |
+| novel | `small.en` | 325 | 188 |
+| podcast | `base.en` | 295 | 70 |
+| podcast | `small.en` | 250 | 350 |
+
+`small.en` makes about a fifth fewer substitutions on each corpus and five to six times the
+deletions. That pattern does not follow the corpus, so it is a property of the model's
+decoding rather than of the audio: it is more willing to leave words out. Word error rate
+weights an omission exactly like an error, so the score follows the deletions.
+
+Whether that is worse depends on the caller. For a transcript a person will read, 250 wrong
+words and 350 missing ones is a different product from 295 wrong and 70 missing, and not
+obviously a better one. For search or indexing, a missing sentence is a hole the index
+cannot see.
+
+Cost: on the podcast, 2.9 times the wall clock (1,238 s against 428 s) and 2.2 times the
+memory (89 MiB against 82 MiB peak, plus 358 MiB on disk against 160 MiB).
+
+A model that omits content is a correctness risk beyond the score: a caller that transcribes
+a meeting and trusts the text cannot tell which sentences were skipped. If the larger tier
+is ever offered, the catalog should say what these runs found rather than imply that bigger
+is better.
