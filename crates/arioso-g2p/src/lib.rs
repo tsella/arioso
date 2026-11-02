@@ -1,5 +1,6 @@
 //! Grapheme to phoneme conversion for Arioso.
 
+pub mod arpabet;
 pub mod cmudict;
 
 use std::collections::HashMap;
