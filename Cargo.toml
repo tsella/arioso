@@ -13,12 +13,16 @@ repository = "https://github.com/tsella/arioso"
 [workspace.dependencies]
 arioso-config = { path = "crates/arioso-config" }
 arioso-models = { path = "crates/arioso-models" }
+arioso-g2p = { path = "crates/arioso-g2p" }
+arioso-tts-piper = { path = "crates/arioso-tts-piper" }
+arioso-core = { path = "crates/arioso-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 fs4 = "0.13"
 futures-util = "0.3"
 hex = "0.4"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
