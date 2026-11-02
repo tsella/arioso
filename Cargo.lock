@@ -163,6 +163,7 @@ dependencies = [
  "arioso-models",
  "arioso-stt-sherpa",
  "arioso-tts-piper",
+ "arioso-vad",
  "axum",
  "futures-util",
  "http-body-util",

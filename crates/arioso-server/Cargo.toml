@@ -14,6 +14,7 @@ arioso-core.workspace = true
 arioso-g2p.workspace = true
 arioso-models.workspace = true
 arioso-stt-sherpa.workspace = true
+arioso-vad.workspace = true
 arioso-tts-piper.workspace = true
 axum.workspace = true
 serde.workspace = true
@@ -21,11 +22,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
+futures-util = "0.3"
 
 [dev-dependencies]
 http-body-util.workspace = true
 tempfile.workspace = true
-futures-util = "0.3"
 tokio-tungstenite = "0.30"
 tower.workspace = true
 

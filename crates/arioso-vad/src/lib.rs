@@ -120,6 +120,18 @@ impl Segmenter {
         events
     }
 
+    /// The utterance being collected, with its start, if one is open.
+    ///
+    /// A caller that wants a partial transcript reads this between pushes.
+    #[must_use]
+    pub fn open(&self) -> Option<(&[f32], u64)> {
+        if self.speech.is_empty() {
+            None
+        } else {
+            Some((&self.speech, self.started_at))
+        }
+    }
+
     /// Close the open utterance, if any, at the end of the stream.
     pub fn flush(&mut self) -> Option<Event> {
         if !self.speaking || self.speech.is_empty() {

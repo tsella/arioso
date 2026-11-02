@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod ws;
+mod ws_stt;
 
 pub use ws::handler as ws_handler;
+pub use ws_stt::handler as stt_ws_handler;
 
 /// Longest text one synthesis request accepts.
 pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
@@ -150,7 +152,34 @@ impl AppState {
             .stt
             .lock()
             .map_err(|_| SttFailure::Engine("the speech to text lock is poisoned".to_string()))?;
-        if guard.is_none() {
+        let engine = self.ensure_engine(&mut guard)?;
+        let text = self.hear(engine, &samples, rate)?;
+        Ok((text, seconds))
+    }
+
+    /// Transcribe samples already in hand, for the streaming path.
+    pub(crate) fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        rate: u32,
+    ) -> Result<String, SttFailure> {
+        if samples.is_empty() {
+            return Err(SttFailure::Audio("the audio is empty".to_string()));
+        }
+        let mut guard = self
+            .stt
+            .lock()
+            .map_err(|_| SttFailure::Engine("the speech to text lock is poisoned".to_string()))?;
+        let engine = self.ensure_engine(&mut guard)?;
+        self.hear(engine, samples, rate)
+    }
+
+    /// The engine, loaded on first use.
+    fn ensure_engine<'a>(
+        &'a self,
+        slot: &'a mut Option<arioso_stt_sherpa::Whisper>,
+    ) -> Result<&'a arioso_stt_sherpa::Whisper, SttFailure> {
+        if slot.is_none() {
             let spec = self
                 .stt_spec()
                 .map_err(|e| SttFailure::Engine(e.to_string()))?;
@@ -164,24 +193,46 @@ impl AppState {
             };
             let threads = std::thread::available_parallelism()
                 .map_or(4, |count| (count.get() / 2).clamp(1, 8));
-            *guard = Some(
+            *slot = Some(
                 arioso_stt_sherpa::Whisper::load(&self.models_dir, language, threads)
                     .map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?,
             );
         }
-        let engine = guard
-            .as_ref()
-            .ok_or_else(|| SttFailure::Engine("the engine failed to load".to_string()))?;
-        let transcript = engine
-            .transcribe(&samples, rate)
-            .map_err(|e| SttFailure::Engine(e.to_string()))?;
+        slot.as_ref()
+            .ok_or_else(|| SttFailure::Engine("the engine failed to load".to_string()))
+    }
 
+    /// Transcribe samples and run the dictionary over the result.
+    fn hear(
+        &self,
+        engine: &arioso_stt_sherpa::Whisper,
+        samples: &[f32],
+        rate: u32,
+    ) -> Result<String, SttFailure> {
+        let transcript = engine
+            .transcribe(samples, rate)
+            .map_err(|e| SttFailure::Engine(e.to_string()))?;
         // The dictionary runs backwards as well, compared by sound rather than by
         // letters, because the engine writes "Tonseller" for "tom seller".
         let user = self.user_dictionary();
-        let text =
-            arioso_g2p::reverse::correct(&user.dictionary, &self.dictionary, &transcript.text);
-        Ok((text, seconds))
+        Ok(arioso_g2p::reverse::correct(
+            &user.dictionary,
+            &self.dictionary,
+            &transcript.text,
+        ))
+    }
+
+    /// Transcribe for a partial hypothesis, or give up if the engine is busy.
+    ///
+    /// A partial is worth less than a final, so it never waits: a missed partial costs
+    /// one interval, a queued one delays the final.
+    pub(crate) fn try_transcribe_samples(&self, samples: &[f32], rate: u32) -> Option<String> {
+        if samples.is_empty() {
+            return None;
+        }
+        let mut guard = self.stt.try_lock().ok()?;
+        let engine = self.ensure_engine(&mut guard).ok()?;
+        self.hear(engine, samples, rate).ok()
     }
 
     /// The user dictionary, reloaded if the file changed since the last look.
@@ -343,13 +394,16 @@ impl IntoResponse for ApiError {
 }
 
 /// Why a transcription did not happen.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum SttFailure {
     /// The bytes were not audio we can read.
+    #[error("{0}")]
     Audio(String),
     /// The engine could not load or run.
+    #[error("{0}")]
     Engine(String),
     /// The model the config asks for is not downloaded.
+    #[error("{0} is not installed")]
     NotInstalled(String),
 }
 
@@ -401,6 +455,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/stt",
             post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
         );
+        router = router.route("/v1/stt/ws", get(stt_ws_handler));
     }
 
     router.with_state(state)
