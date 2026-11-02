@@ -1,6 +1,6 @@
 [package]
 name = "arioso-server"
-description = "HTTP surface for Arioso"
+description = "HTTP surface for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,8 @@ thiserror.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 futures-util = "0.3"
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
