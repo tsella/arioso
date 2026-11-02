@@ -38,6 +38,13 @@ jobs:
             curl -sSL "$url" | tar -xz -C vendor
           fi
           mv "vendor/$archive" vendor/onnxruntime
+      # The sherpa build script downloads its native libraries into OUT_DIR and links
+      # against them. rust-cache can restore the fingerprint without the files it points
+      # at, and the link then fails with "could not find native static library". Dropping
+      # the directory makes the script run and fetch them again.
+      - name: forget a cached native download
+        shell: bash
+        run: rm -rf target/debug/build/sherpa-onnx-sys-*
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace
