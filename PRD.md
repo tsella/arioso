@@ -786,8 +786,20 @@ and cannot do about a flood.
   or in `examples.md` against a real server before they are published.
 - F16.5 The default bind stays loopback. Exposing the port is an explicit edit, and the
   README says what that exposes.
-- F16.6 Every route has a body limit. The speech route already raises it deliberately;
-  the rest stay at the framework default.
+- F16.6 Every route has a body limit. The speech route raises it deliberately, and the
+  raise follows `stt.max_audio_s`: a body limit fixed at the default duration would refuse
+  audio the config says it accepts, which is two limits disagreeing and the settable one
+  losing. The rest stay at the framework default.
+- F16.6a The longest text one synthesis request accepts is
+  `server.limits.max_text_chars`, default 4000 characters, about two and a half minutes of
+  speech. It applies to `POST /v1/tts` and to the first message on `/v1/tts/ws`. One
+  request renders its whole text before the reply is written, so the limit bounds the work
+  and the memory of a single call; a client with more text sends it in pieces or streams
+  it, and `IMPLEMENTATION.md` shows both.
+- F16.6b The transcriber decodes windows of at most 29 seconds. The engine accepts "less
+  than 30 seconds" and silently keeps only the first thirty of anything longer, so the
+  window is cut one second short and the pieces are joined. Before this, an hour of audio
+  returned the first half minute with a 200 and no error.
 - F16.7 A per-client token bucket caps request rate: `server.limits.requests_per_second`
   and `server.limits.burst`. Over the limit answers `429 rate_limited` with `Retry-After`.
 - F16.8 A request-header timeout, and `server.limits.max_connections` applied where it can

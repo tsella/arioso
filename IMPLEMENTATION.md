@@ -129,6 +129,68 @@ client → {"type":"cancel"}
 Streaming pays off when the text is long or the audio is live. For one short line, the
 plain routes are simpler and just as fast.
 
+## Working with long text and long audio
+
+Four limits stand between you and an hour of speech. Three are yours to set.
+
+| limit | default | bounds |
+| --- | --- | --- |
+| `server.limits.max_text_chars` | 4000 characters | one synthesis request, about 2.5 minutes of speech |
+| `stt.max_audio_s` | 600 seconds | audio one transcription request accepts |
+| request body | follows `stt.max_audio_s`, 16-bit mono at 48 kHz | the bytes on the wire |
+| decode window | 29 seconds | internal to the engine, not settable |
+
+The text limit exists because one request renders its whole text into memory before the
+reply is written. 4000 characters is a compromise, not a law: raise it and each request
+holds more memory for longer, which is the trade a single call makes. The streaming route
+makes no such trade, because it sends a frame per sentence.
+
+**Speak thirty minutes.** Send the text in pieces and join the audio. Cut at paragraph
+boundaries, then at sentence ends, and never in the middle of a word:
+
+```python
+def chunks(text, limit=3800):          # under the route's 4000, room for the JSON
+    out, current = [], ""
+    for para in text.split("\n\n"):
+        candidate = f"{current}\n\n{para}".strip() if current else para
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        out.append(current)
+        current = para
+    if current:
+        out.append(current)
+    return out
+```
+
+Every reply is a complete WAV at the voice's sample rate, so the pieces concatenate: read
+each one, append its frames, write one header at the end. A small silence between pieces
+reads better than a hard cut.
+
+Measured on this machine, 5,787 words: ten requests of at most 3,800 characters produced
+1,828 seconds of audio in 163 seconds of wall clock, a real time factor of 0.089. The
+model loads once and stays loaded, so per-request cost is small.
+
+**Transcribe thirty minutes.** Raise `stt.max_audio_s`, and the body limit follows it. Send
+the whole file:
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/stt \
+    -H 'content-type: audio/wav' --data-binary @meeting.wav
+{"text":"…","seconds":1827.96}
+```
+
+The server cuts the audio into 29-second windows, decodes each, and joins the text. The
+window is one second short of the engine's own limit on purpose: the engine accepts "less
+than 30 seconds" and keeps only the first thirty of anything longer, without an error.
+Cutting at 29 s makes that impossible.
+
+Measured on the same file: 1,828 seconds of audio transcribed in 429 seconds, a real time
+factor of 0.235, word error rate 8.96 percent against the source text with the default
+`base.en` model. Most of that error is spelling (`traveller` for `traveler`, `colour` for
+`color`) and small words at window edges, which is what the base tier does; a larger model
+trades memory and time for accuracy.
+
 ## Make text say what you mean
 
 ```console
