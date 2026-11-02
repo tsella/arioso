@@ -123,6 +123,78 @@ impl AppState {
     }
 
     /// The speech to text model the config asks for.
+    /// Every engine this binary can serve, with what it can do.
+    ///
+    /// A disabled engine is absent rather than reported as unavailable: its routes do
+    /// not exist either, so a client that reads this list sees exactly what it can call.
+    fn engines(&self) -> Vec<EngineView> {
+        let mut engines = Vec::new();
+        if self.config.tts.enabled {
+            engines.push(EngineView {
+                id: "piper".to_string(),
+                kind: "tts".to_string(),
+                streaming: true,
+                languages: self.catalog_languages("piper"),
+                models: self.catalog_count("piper"),
+                loaded: self
+                    .voice
+                    .lock()
+                    .map(|guard| guard.is_some())
+                    .unwrap_or(false),
+            });
+        }
+        if self.config.stt.enabled {
+            engines.push(EngineView {
+                id: "sherpa-whisper".to_string(),
+                kind: "stt".to_string(),
+                streaming: true,
+                languages: self.catalog_languages("sherpa"),
+                models: self.catalog_count("sherpa"),
+                loaded: self
+                    .stt
+                    .lock()
+                    .map(|guard| guard.is_some())
+                    .unwrap_or(false),
+            });
+        }
+        engines
+    }
+
+    /// Languages the catalog has a model for, on one engine.
+    fn catalog_languages(&self, engine: &str) -> Vec<String> {
+        let mut languages: Vec<String> = self
+            .manifest
+            .models
+            .iter()
+            .filter(|model| model.engine == engine)
+            // meta is free-form manifest data, so the language list is read as JSON.
+            .flat_map(|model| {
+                model
+                    .meta
+                    .get("languages")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|entry| entry.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        languages.sort();
+        languages.dedup();
+        languages
+    }
+
+    /// How many catalog models belong to one engine.
+    fn catalog_count(&self, engine: &str) -> usize {
+        self.manifest
+            .models
+            .iter()
+            .filter(|model| model.engine == engine)
+            .count()
+    }
+
     fn stt_spec(&self) -> Result<&ModelSpec, ServerError> {
         self.manifest
             .models
@@ -415,7 +487,15 @@ impl ApiError {
             partial and final transcripts. Both accept `{\"type\":\"cancel\"}` and answer \
             `{\"type\":\"cancelled\"}`."
     ),
-    paths(healthz, readyz, list_models, synthesize, transcribe_audio),
+    paths(
+        healthz,
+        readyz,
+        info,
+        list_engines,
+        list_models,
+        synthesize,
+        transcribe_audio
+    ),
     components(schemas(
         TtsRequest,
         ModelView,
@@ -506,6 +586,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/models", get(list_models))
+        .route("/v1/info", get(info))
+        .route("/v1/engines", get(list_engines))
         // The Swagger UI serves the document at the URL it is given, so this registers
         // /openapi.json as well as /docs. An explicit route beside it is a collision.
         .merge(
@@ -571,6 +653,41 @@ pub struct ReadyView {
     pub models_installed: usize,
 }
 
+/// Response body for `GET /v1/info`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InfoView {
+    /// Version of the crate that built this binary.
+    pub version: String,
+    /// Target triple the binary was built for.
+    pub target: String,
+    /// Engines compiled into this binary, by id.
+    pub engines: Vec<String>,
+}
+
+/// One engine as reported by `GET /v1/engines`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EngineView {
+    /// Engine id, as a client names it in config.
+    pub id: String,
+    /// `tts` or `stt`.
+    pub kind: String,
+    /// Whether it can produce results before the input ends.
+    pub streaming: bool,
+    /// Languages the catalog has a model for.
+    pub languages: Vec<String>,
+    /// How many models in the catalog belong to this engine.
+    pub models: usize,
+    /// Whether a model of this engine is loaded right now.
+    pub loaded: bool,
+}
+
+/// Response body for `GET /v1/engines`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EngineListView {
+    /// Every engine this binary can serve.
+    pub engines: Vec<EngineView>,
+}
+
 /// Response body for `GET /v1/models`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ModelListView {
@@ -622,6 +739,36 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Json<ReadyView> {
         voice_installed,
         voice_loaded,
         models_installed: installed,
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/info",
+    tag = "system",
+    summary = "Version, target, and the engines compiled in",
+    responses((status = 200, body = InfoView))
+)]
+async fn info(State(state): State<Arc<AppState>>) -> Json<InfoView> {
+    Json(InfoView {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        engines: state.engines().into_iter().map(|e| e.id).collect(),
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/engines",
+    tag = "engines",
+    summary = "What each engine can do",
+    description = "Built from the engines this binary can serve, not from the catalog, \
+        so a model file on disk does not invent an engine.",
+    responses((status = 200, body = EngineListView))
+)]
+async fn list_engines(State(state): State<Arc<AppState>>) -> Json<EngineListView> {
+    Json(EngineListView {
+        engines: state.engines(),
     })
 }
 
@@ -844,7 +991,15 @@ mod tests {
         let paths = document["paths"].as_object().expect("a paths object");
         // Every route the router registers, except the two WebSockets and the Swagger
         // UI, which have no schema to derive.
-        for route in ["/healthz", "/readyz", "/v1/models", "/v1/tts", "/v1/stt"] {
+        for route in [
+            "/healthz",
+            "/readyz",
+            "/v1/info",
+            "/v1/engines",
+            "/v1/models",
+            "/v1/tts",
+            "/v1/stt",
+        ] {
             assert!(
                 paths.contains_key(route),
                 "{route} is missing from the document"
@@ -852,6 +1007,74 @@ mod tests {
         }
         assert_eq!(document["openapi"], "3.1.0", "{document}");
         assert_eq!(document["info"]["title"], "arioso");
+    }
+
+    #[tokio::test]
+    async fn info_names_the_engines_the_binary_serves() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        let engines = body["engines"].as_array().unwrap();
+        assert!(engines.iter().any(|id| id == "piper"), "{body}");
+        assert!(engines.iter().any(|id| id == "sherpa-whisper"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn engines_report_what_they_can_do() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/engines")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let engines = body["engines"].as_array().unwrap();
+        let piper = engines.iter().find(|e| e["id"] == "piper").unwrap();
+        assert_eq!(piper["kind"], "tts");
+        assert_eq!(piper["streaming"], true);
+        assert!(piper["models"].as_u64().unwrap() > 0, "{body}");
+        assert!(
+            piper["languages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l.as_str().unwrap().starts_with("en"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_engine_is_absent_from_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.stt.enabled = false;
+        config.models.dir = Some(dir.path().to_path_buf());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let (_, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/engines")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let engines = body["engines"].as_array().unwrap();
+        assert!(engines.iter().all(|e| e["kind"] != "stt"), "{body}");
     }
 
     #[tokio::test]
