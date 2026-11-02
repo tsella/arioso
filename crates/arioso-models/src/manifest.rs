@@ -8,9 +8,9 @@ use thiserror::Error;
 
 /// Public key that signs the released manifest.
 ///
-/// Replaced when a release manifest is published; tests pass their own key.
-pub const RELEASE_PUBKEY_HEX: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+/// Empty until a release key exists. An empty key is an error, not a silent
+/// verification failure, so a build cannot look signed when it is not.
+pub const RELEASE_PUBKEY_HEX: &str = "";
 
 /// What a model is used for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +214,11 @@ pub fn verify_manifest(
     signature_hex: &str,
     pubkey_hex: &str,
 ) -> Result<(), ManifestError> {
+    if pubkey_hex.trim().is_empty() {
+        return Err(ManifestError::Malformed(
+            "no release public key is compiled in".into(),
+        ));
+    }
     let key_bytes: [u8; 32] = hex::decode(pubkey_hex.trim())
         .map_err(|e| ManifestError::Malformed(format!("public key: {e}")))?
         .try_into()
@@ -311,6 +316,12 @@ mod tests {
         let tampered = SAMPLE.replace("63201294", "63201295");
         let err = verify_manifest(tampered.as_bytes(), &sig, &public).unwrap_err();
         assert!(matches!(err, ManifestError::BadSignature));
+    }
+
+    #[test]
+    fn missing_release_key_is_named() {
+        let err = verify_manifest(b"x", "00", RELEASE_PUBKEY_HEX).unwrap_err();
+        assert!(err.to_string().contains("no release public key"), "{err}");
     }
 
     #[test]
