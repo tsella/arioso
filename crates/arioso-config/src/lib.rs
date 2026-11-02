@@ -109,6 +109,15 @@ pub struct Tts {
     /// config file.
     #[serde(default)]
     pub dictionary: Option<PathBuf>,
+    /// Say the part of the day after a clock time: "seven forty five in the
+    /// evening". A written `am` or `pm` decides it; otherwise the hour does.
+    #[serde(default = "yes")]
+    pub time_of_day: bool,
+}
+
+/// A default that is on.
+fn yes() -> bool {
+    true
 }
 
 impl Default for Tts {
@@ -121,6 +130,7 @@ impl Default for Tts {
             format: "wav".into(),
             max_chars: 4000,
             dictionary: None,
+            time_of_day: true,
         }
     }
 }
@@ -403,6 +413,9 @@ impl Config {
         if let Some(v) = get("ARIOSO_TTS_DICTIONARY") {
             self.tts.dictionary = Some(PathBuf::from(v));
         }
+        if let Some(v) = get("ARIOSO_TTS_TIME_OF_DAY") {
+            self.tts.time_of_day = parse_bool(&v, "ARIOSO_TTS_TIME_OF_DAY")?;
+        }
         if let Some(v) = get("ARIOSO_TTS_VOICE") {
             self.tts.voice = v;
         }
@@ -600,6 +613,20 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.tts.engine, "piper");
         assert!(!cfg.tts.enabled);
+    }
+
+    #[test]
+    fn the_part_of_the_day_is_on_unless_turned_off() {
+        assert!(Config::default().tts.time_of_day);
+        let file = Config::from_json(r#"{"tts":{}}"#, &origin()).unwrap();
+        assert!(file.tts.time_of_day, "absent means on");
+
+        let mut cfg = Config::from_json(r#"{"tts":{"time_of_day":false}}"#, &origin()).unwrap();
+        assert!(!cfg.tts.time_of_day);
+
+        cfg.apply_env(|k| (k == "ARIOSO_TTS_TIME_OF_DAY").then(|| "true".to_string()))
+            .unwrap();
+        assert!(cfg.tts.time_of_day, "the environment wins");
     }
 
     #[test]

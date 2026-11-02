@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use arioso_core::{Entry, Piece, UserDictionary, normalize};
+use arioso_core::{Entry, Piece, UserDictionary, normalize_with};
 use arioso_core::{chunk_text, sentences};
 use arioso_g2p::{CmuDict, PhonemeMap, arpabet};
 use ort::session::Session;
@@ -44,6 +44,24 @@ pub enum PiperError {
 
 /// Longest piece of text handed to the model, in characters.
 pub const SYNTHESIS_CHUNK: usize = 300;
+
+/// How a render is done.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    /// Speaking rate, as a multiplier of the voice's own length scale.
+    pub speed: f32,
+    /// How text is expanded before it is phonemized.
+    pub normalize: arioso_core::Options,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            normalize: arioso_core::Options::default(),
+        }
+    }
+}
 
 /// What a render could not say.
 #[derive(Debug, Default, Clone)]
@@ -162,10 +180,10 @@ impl PiperVoice {
         text: &str,
         dictionary: &CmuDict,
         user: &UserDictionary,
-        speed: f32,
+        options: RenderOptions,
         mut sink: impl FnMut(&[f32], u32) -> Result<(), PiperError>,
     ) -> Result<RenderReport, PiperError> {
-        self.set_speed(speed);
+        self.set_speed(options.speed);
         let rate = self.sample_rate();
         let mut report = RenderReport::default();
 
@@ -174,21 +192,29 @@ impl PiperVoice {
                 let mut groups: Vec<Vec<&'static str>> = Vec::new();
                 for piece in user.pieces(chunk) {
                     match piece {
-                        Piece::Entry(entry) => match self.entry_symbols(entry, dictionary) {
-                            Some(symbols) => groups.push(symbols),
-                            None => {
-                                // The voice cannot say any form of this entry, so
-                                // say the term itself and report it.
-                                report.unusable.push(entry.term.clone());
-                                groups.push(self.words(
-                                    &entry.term,
-                                    dictionary,
-                                    &mut report.missing,
-                                ));
+                        Piece::Entry(entry) => {
+                            match self.entry_symbols(entry, dictionary, options.normalize) {
+                                Some(symbols) => groups.push(symbols),
+                                None => {
+                                    // The voice cannot say any form of this entry, so
+                                    // say the term itself and report it.
+                                    report.unusable.push(entry.term.clone());
+                                    groups.push(self.words(
+                                        &entry.term,
+                                        dictionary,
+                                        &mut report.missing,
+                                        options.normalize,
+                                    ));
+                                }
                             }
-                        },
+                        }
                         Piece::Text(segment) => {
-                            groups.push(self.words(segment, dictionary, &mut report.missing));
+                            groups.push(self.words(
+                                segment,
+                                dictionary,
+                                &mut report.missing,
+                                options.normalize,
+                            ));
                         }
                     }
                 }
@@ -216,18 +242,24 @@ impl PiperVoice {
         text: &str,
         dictionary: &CmuDict,
         missing: &mut Vec<String>,
+        options: arioso_core::Options,
     ) -> Vec<&'static str> {
-        text_symbols(text, dictionary, missing)
+        text_symbols(text, dictionary, missing, options)
     }
 
     /// Symbols for a dictionary entry, trying its forms in order.
     ///
     /// Returns `None` when the voice cannot render any of them.
-    fn entry_symbols(&self, entry: &Entry, dictionary: &CmuDict) -> Option<Vec<&'static str>> {
+    fn entry_symbols(
+        &self,
+        entry: &Entry,
+        dictionary: &CmuDict,
+        options: arioso_core::Options,
+    ) -> Option<Vec<&'static str>> {
         entry
             .forms()
             .into_iter()
-            .find_map(|form| form_symbols(form, &self.map, dictionary))
+            .find_map(|form| form_symbols(form, &self.map, dictionary, options))
     }
 
     /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.
@@ -267,8 +299,13 @@ impl PiperVoice {
 }
 
 /// Symbols for a run of text, after normalization.
-fn text_symbols(text: &str, dictionary: &CmuDict, missing: &mut Vec<String>) -> Vec<&'static str> {
-    let expanded = normalize(text);
+fn text_symbols(
+    text: &str,
+    dictionary: &CmuDict,
+    missing: &mut Vec<String>,
+    options: arioso_core::Options,
+) -> Vec<&'static str> {
+    let expanded = normalize_with(text, options);
     let mut symbols = Vec::new();
     for word in
         expanded.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
@@ -297,11 +334,12 @@ pub fn form_symbols(
     form: &str,
     map: &PhonemeMap,
     dictionary: &CmuDict,
+    options: arioso_core::Options,
 ) -> Option<Vec<&'static str>> {
     let symbols = if is_arpabet(form) {
         arpabet::to_ipa(form)
     } else {
-        text_symbols(form, dictionary, &mut Vec::new())
+        text_symbols(form, dictionary, &mut Vec::new(), options)
     };
     if symbols.is_empty() || symbols.iter().any(|symbol| map.ids_of(symbol).is_none()) {
         return None;

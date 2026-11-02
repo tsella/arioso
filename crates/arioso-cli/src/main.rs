@@ -93,7 +93,15 @@ fn main() -> Result<()> {
         Command::Say { text, out, dict } => say(&config, &config_path, &text, out, dict),
         Command::Serve => serve(config, &config_path),
         Command::Normalize { text } => {
-            println!("{}", arioso_core::normalize(&text));
+            println!(
+                "{}",
+                arioso_core::normalize_with(
+                    &text,
+                    arioso_core::Options {
+                        time_of_day: config.tts.time_of_day,
+                    },
+                )
+            );
             Ok(())
         }
         Command::Config { command } => match command {
@@ -267,7 +275,13 @@ fn say(
 
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
     let mut samples: Vec<f32> = Vec::new();
-    let report = voice.render(text, &dictionary, &user, config.tts.speed, |audio, _| {
+    let options = arioso_tts_piper::RenderOptions {
+        speed: config.tts.speed,
+        normalize: arioso_core::Options {
+            time_of_day: config.tts.time_of_day,
+        },
+    };
+    let report = voice.render(text, &dictionary, &user, options, |audio, _| {
         samples.extend_from_slice(audio);
         Ok(())
     })?;
@@ -413,16 +427,22 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
         }
     };
 
-    let unusable: Vec<&str> =
-        user.entries()
-            .iter()
-            .filter(|entry| {
-                !entry.forms().iter().any(|form| {
-                    arioso_tts_piper::form_symbols(form, &map, &pronunciations).is_some()
-                })
+    let unusable: Vec<&str> = user
+        .entries()
+        .iter()
+        .filter(|entry| {
+            !entry.forms().iter().any(|form| {
+                arioso_tts_piper::form_symbols(
+                    form,
+                    &map,
+                    &pronunciations,
+                    arioso_core::Options::default(),
+                )
+                .is_some()
             })
-            .map(|entry| entry.term.as_str())
-            .collect();
+        })
+        .map(|entry| entry.term.as_str())
+        .collect();
 
     if unusable.is_empty() {
         println!(

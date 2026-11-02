@@ -203,12 +203,18 @@ impl AppState {
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
         let user = self.user_dictionary();
+        let options = arioso_tts_piper::RenderOptions {
+            speed,
+            normalize: arioso_core::Options {
+                time_of_day: self.config.tts.time_of_day,
+            },
+        };
         let report = voice
             .render(
                 text,
                 &self.dictionary,
                 &user.dictionary,
-                speed,
+                options,
                 |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
             )
             .map_err(|error| error.to_string())?;

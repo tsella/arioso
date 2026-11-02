@@ -46,9 +46,30 @@ const ABBREVIATIONS: [(&str, &str); 12] = [
     ("inc.", "incorporated"),
 ];
 
-/// Expand numbers, currency, times, percentages, and common abbreviations.
+/// How text is expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// Say the part of the day after a clock time: "seven forty five in the
+    /// evening". A written `am` or `pm` decides it; otherwise the hour does.
+    pub time_of_day: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { time_of_day: true }
+    }
+}
+
+/// Expand numbers, currency, times, percentages, and common abbreviations,
+/// with the default [`Options`].
 #[must_use]
 pub fn normalize(text: &str) -> String {
+    normalize_with(text, Options::default())
+}
+
+/// Expand with explicit [`Options`].
+#[must_use]
+pub fn normalize_with(text: &str, options: Options) -> String {
     let expanded = expand_abbreviations(text);
     let chars: Vec<char> = expanded.chars().collect();
     let mut out = String::with_capacity(expanded.len() * 2);
@@ -67,7 +88,16 @@ pub fn normalize(text: &str) -> String {
 
         if ch.is_ascii_digit() {
             if let Some((hour, minute, next)) = scan_time(&chars, index) {
-                out.push_str(&clock(hour, minute));
+                // A written marker decides the period and is consumed, so
+                // "7:45 pm" does not leave "p m" behind.
+                let (hour, next) = match scan_marker(&chars, next) {
+                    Some((pm, after)) => {
+                        let hour = if pm { hour % 12 + 12 } else { hour % 12 };
+                        (hour, after)
+                    }
+                    None => (hour, next),
+                };
+                out.push_str(&clock(hour, minute, options));
                 index = next;
                 continue;
             }
@@ -374,13 +404,60 @@ fn currency(dollars: u64, fraction: &[u64]) -> String {
 }
 
 /// The clock reading of an hour and minute pair.
-fn clock(hour: u64, minute: u64) -> String {
+fn clock(hour: u64, minute: u64, options: Options) -> String {
     let twelve = if hour % 12 == 0 { 12 } else { hour % 12 };
-    match minute {
+    let mut spoken = match minute {
         0 => format!("{} o'clock", cardinal(twelve)),
         minute if minute < 10 => format!("{} oh {}", cardinal(twelve), cardinal(minute)),
         minute => format!("{} {}", cardinal(twelve), cardinal(minute)),
+    };
+    if options.time_of_day {
+        spoken.push_str(period(hour));
     }
+    spoken
+}
+
+/// The part of the day, from the hour on a 24-hour clock.
+fn period(hour: u64) -> &'static str {
+    match hour {
+        0..=11 => " in the morning",
+        12..=17 => " in the afternoon",
+        _ => " in the evening",
+    }
+}
+
+/// Read an `am` or `pm` marker after a time.
+///
+/// Accepts `am`, `pm`, `a.m.`, and `p.m.`, with or without a space before, in
+/// any case. Returns whether it was `pm`, and the index after the marker.
+fn scan_marker(chars: &[char], start: usize) -> Option<(bool, usize)> {
+    let mut index = start;
+    while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
+        index += 1;
+    }
+
+    let rest: String = chars.iter().skip(index).take(4).collect();
+    let lower = rest.to_lowercase();
+    let (pm, length) = if lower.starts_with("a.m.") {
+        (false, 4)
+    } else if lower.starts_with("p.m.") {
+        (true, 4)
+    } else if lower.starts_with("am") {
+        (false, 2)
+    } else if lower.starts_with("pm") {
+        (true, 2)
+    } else {
+        return None;
+    };
+
+    // "7:45 amps" is a word, not a marker.
+    if chars
+        .get(index + length)
+        .is_some_and(|ch| ch.is_alphanumeric())
+    {
+        return None;
+    }
+    Some((pm, index + length))
 }
 
 #[cfg(test)]
@@ -422,21 +499,48 @@ mod tests {
     }
 
     #[test]
-    fn times_are_twelve_hour_with_no_marker() {
-        // Deliberate, per PRD F14.13: the morning and the evening sound the same.
-        assert_eq!(normalize("19:45"), "seven forty five");
-        assert_eq!(normalize("07:45"), "seven forty five");
-        assert_eq!(normalize("23:59"), "eleven fifty nine");
-        assert_eq!(normalize("00:00"), "twelve o'clock");
+    fn the_part_of_the_day_follows_a_time() {
+        assert_eq!(normalize("7:45"), "seven forty five in the morning");
+        assert_eq!(normalize("19:45"), "seven forty five in the evening");
+        assert_eq!(normalize("12:30"), "twelve thirty in the afternoon");
+        assert_eq!(normalize("00:30"), "twelve thirty in the morning");
+        assert_eq!(normalize("17:59"), "five fifty nine in the afternoon");
+        assert_eq!(normalize("18:00"), "six o'clock in the evening");
+        assert_eq!(normalize("23:59"), "eleven fifty nine in the evening");
+    }
+
+    #[test]
+    fn without_the_option_the_hour_stands_alone() {
+        let options = Options { time_of_day: false };
+        assert_eq!(normalize_with("19:45", options), "seven forty five");
+        assert_eq!(normalize_with("07:45", options), "seven forty five");
+    }
+
+    #[test]
+    fn a_written_marker_wins_and_is_consumed() {
+        assert_eq!(normalize("7:45 pm"), "seven forty five in the evening");
+        assert_eq!(normalize("7:45pm"), "seven forty five in the evening");
+        assert_eq!(normalize("7:45 a.m."), "seven forty five in the morning");
+        assert_eq!(normalize("12:30 am"), "twelve thirty in the morning");
+        assert_eq!(normalize("12:30 pm"), "twelve thirty in the afternoon");
+        assert_eq!(normalize("9:05 P.M."), "nine oh five in the evening");
+    }
+
+    #[test]
+    fn a_word_that_starts_like_a_marker_is_not_one() {
+        assert_eq!(
+            normalize("7:45 amps"),
+            "seven forty five in the morning amps"
+        );
     }
 
     #[test]
     fn times() {
-        assert_eq!(normalize("14:30"), "two thirty");
-        assert_eq!(normalize("14:00"), "two o'clock");
-        assert_eq!(normalize("14:05"), "two oh five");
-        assert_eq!(normalize("00:15"), "twelve fifteen");
-        assert_eq!(normalize("9:41"), "nine forty one");
+        assert_eq!(normalize("14:30"), "two thirty in the afternoon");
+        assert_eq!(normalize("14:00"), "two o'clock in the afternoon");
+        assert_eq!(normalize("14:05"), "two oh five in the afternoon");
+        assert_eq!(normalize("00:15"), "twelve fifteen in the morning");
+        assert_eq!(normalize("9:41"), "nine forty one in the morning");
     }
 
     #[test]
@@ -488,6 +592,9 @@ mod tests {
             normalize("it costs $3.99 today"),
             "it costs three dollars and ninety nine cents today"
         );
-        assert_eq!(normalize("call at 14:30 sharp"), "call at two thirty sharp");
+        assert_eq!(
+            normalize("call at 14:30 sharp"),
+            "call at two thirty in the afternoon sharp"
+        );
     }
 }
