@@ -331,7 +331,32 @@ Tonseller built REO so for his own machine.
 "koober netties", which came back as "Cooper Netis". The fix is recorded in the PRD: match
 on phonemes, not letters.
 
-## 12. Models
+## 12. Comparing voices
+
+The same sentence through each voice, with `ARIOSO_TTS_VOICE`:
+
+```console
+$ for v in en_US-kathleen-low en_US-joe-medium en_GB-alba-medium en_US-lessac-medium en_US-ljspeech-high; do
+    ARIOSO_TTS_VOICE=$v arioso say "The quick brown fox jumps over the lazy dog while the five boxing wizards jump quickly" --out $v.wav
+  done
+```
+
+| voice | wall clock | audio | real time factor | read back by whisper |
+| --- | --- | --- | --- | --- |
+| `en_US-kathleen-low` | 2.40 s | 5.38 s | 0.45 | exact |
+| `en_US-joe-medium` | 2.47 s | 4.92 s | 0.50 | exact |
+| `en_GB-alba-medium` | 2.47 s | 4.83 s | 0.51 | "the quick brand fox ... the laser dork" |
+| `en_US-lessac-medium` | 2.53 s | 5.03 s | 0.50 | exact |
+| `en_US-ljspeech-high` | 5.77 s | 5.83 s | 0.99 | "the lazy door ... five barksing wizards" |
+
+The last column is a rough intelligibility check, not a quality score: whisper tiny.en is
+an American English model, so the Scottish voice scores badly partly because the reader is
+wrong for it. The timing columns are the honest part.
+
+The high tier is the surprise: twice the time of medium, a 108.9 MiB file against 60.3,
+and nothing here shows it is better.
+
+## 13. Models
 
 ```console
 $ arioso models list
