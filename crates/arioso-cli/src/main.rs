@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use arioso_config::Config;
+use arioso_core::chunk_text;
+use arioso_g2p::{CmuDict, arpabet};
+use arioso_tts_piper::{PiperVoice, wav::write_wav};
 use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -32,6 +35,17 @@ enum Command {
     },
     /// Check the install: config, cache directory, manifest.
     Doctor,
+    /// Synthesize text to a WAV file.
+    Say {
+        /// Text to speak.
+        text: String,
+        /// Output file. Defaults to out.wav.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Pronunciation dictionary. Defaults to cmudict.dict in the models directory.
+        #[arg(long)]
+        dict: Option<PathBuf>,
+    },
     /// Print or export configuration.
     Config {
         #[command(subcommand)]
@@ -69,6 +83,7 @@ fn main() -> Result<()> {
             ModelsCommand::Download { id } => download(&config, &id),
         },
         Command::Doctor => doctor(&config, &config_path),
+        Command::Say { text, out, dict } => say(&config, &text, out, dict),
         Command::Config { command } => match command {
             ConfigCommand::Schema => {
                 println!("{}", serde_json::to_string_pretty(&Config::json_schema())?);
@@ -162,6 +177,72 @@ fn download(config: &Config, id: &str) -> Result<()> {
     })?;
     eprintln!();
     println!("ready: {} file(s)", paths.len());
+    Ok(())
+}
+
+fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>) -> Result<()> {
+    let manifest = load_manifest(config)?;
+    let dir = models_dir(config);
+    let model = manifest
+        .models
+        .iter()
+        .find(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
+        .context("the manifest holds no piper voice")?;
+    let file = |suffix: &str| {
+        model
+            .files
+            .iter()
+            .find(|f| f.name.ends_with(suffix))
+            .map(|f| dir.join(&f.name))
+            .with_context(|| format!("voice {} has no {suffix} file", model.id))
+    };
+    let onnx = file(".onnx")?;
+    let voice_config = file(".onnx.json")?;
+
+    let dict_path = dict.unwrap_or_else(|| dir.join("cmudict.dict"));
+    let dict_text = std::fs::read_to_string(&dict_path)
+        .with_context(|| format!("reading {}", dict_path.display()))?;
+    let dictionary = CmuDict::parse(&dict_text);
+
+    let mut voice = PiperVoice::load(&onnx, &voice_config)?;
+    let mut samples: Vec<f32> = Vec::new();
+    let mut missing = 0usize;
+
+    for chunk in chunk_text(text, 300) {
+        let mut symbols: Vec<&str> = Vec::new();
+        for word in chunk.split_whitespace() {
+            let cleaned: String = word
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .collect::<String>()
+                .to_lowercase();
+            match dictionary.lookup(&cleaned) {
+                Some(pronunciations) => {
+                    if !symbols.is_empty() {
+                        symbols.push(" ");
+                    }
+                    symbols.extend(arpabet::to_ipa(&pronunciations[0]));
+                }
+                None => missing += 1,
+            }
+        }
+        if symbols.is_empty() {
+            continue;
+        }
+        samples.extend(voice.synthesize(&symbols)?);
+    }
+
+    let out = out.unwrap_or_else(|| PathBuf::from("out.wav"));
+    let rate = voice.sample_rate();
+    write_wav(&out, &samples, rate)?;
+    println!(
+        "wrote {} ({:.2} s at {rate} Hz)",
+        out.display(),
+        samples.len() as f32 / rate as f32
+    );
+    if missing > 0 {
+        eprintln!("{missing} word(s) were not in the dictionary and were skipped");
+    }
     Ok(())
 }
 
