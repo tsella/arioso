@@ -92,6 +92,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "arioso-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "arioso-g2p"
 version = "0.1.0"
 dependencies = [
