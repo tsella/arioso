@@ -338,3 +338,70 @@ A model that omits content is a correctness risk beyond the score: a caller that
 a meeting and trusts the text cannot tell which sentences were skipped. If the larger tier
 is ever offered, the catalog should say what these runs found rather than imply that bigger
 is better.
+
+## Third run: transducers, and a multilingual Parakeet
+
+Whisper is one family. The engine the project already depends on, sherpa-onnx, also runs
+transducer models, and those have a different failure shape: they cannot invent fluent text
+the way a Whisper decoder can, and they are much cheaper per second of audio.
+
+### Setup
+
+| engine | model | size on disk | note |
+| --- | --- | --- | --- |
+| whisper | `base.en` int8 | 160 MiB | the project default |
+| whisper | `small.en` int8 | 358 MiB | not in the catalog |
+| parakeet | `parakeet-tdt-0.6b-v2` int8 | 661 MiB | English |
+| parakeet | `parakeet-tdt-0.6b-v3` int8 | 674 MiB | 25 European languages |
+| zipformer | `zipformer-en-2023-06-26` int8 | 307 MiB | streaming family, offline variant |
+
+All five ran through sherpa-onnx 2.0.1, the version in the workspace lock file, driven by a
+scratch binary outside the repository. Four threads, no GPU.
+
+The cuts are arioso's own rule, ported to Python from `crates/arioso-stt-sherpa/src/lib.rs`
+so every engine gets the identical pieces: 29 second windows, a cut at the middle of the
+quietest 20 millisecond frame in the last three seconds, never before the halfway mark, the
+pieces covering the input exactly. That gave 60 pieces for the podcast and 67 for the novel.
+
+### Results
+
+| engine | corpus | plain | spelling folded | wall clock | RTF |
+| --- | --- | --- | --- | --- | --- |
+| whisper `base.en` | novel | 8.79% | 7.49% | 422 s | 0.23 |
+| whisper `small.en` | novel | 9.20% | 8.29% | 1,325 s | 0.73 |
+| **parakeet v2** | novel | **4.62%** | **3.49%** | 464 s | 0.25 |
+| parakeet v3 | novel | not run | not run | — | — |
+| zipformer en | novel | 6.84% | 6.12% | 211 s | 0.12 |
+| whisper `base.en` | podcast | 6.99% | 6.75% | 428 s | 0.26 |
+| whisper `small.en` | podcast | 10.93% | 10.74% | 1,238 s | 0.75 |
+| **parakeet v2** | podcast | **5.88%** | **5.66%** | 394 s | 0.24 |
+| parakeet v3 | podcast | 6.95% | 6.49% | 444 s | 0.27 |
+| zipformer en | podcast | 14.16% | 13.63% | 174 s | 0.11 |
+
+### What the numbers say
+
+Parakeet v2 is the best of the five on both corpora, and it is not close on the novel: 4.62
+percent against whisper base's 8.79. It runs at whisper-base speed. Its error shape is the
+opposite of `small.en`'s: 248 substitutions and 9 deletions on the novel, where `small.en`
+had 325 and 188. It mishears words rather than skipping them.
+
+The multilingual v3 costs about a point on English (6.95 against 5.88 on the podcast). If
+only English is wanted, v2 is the better model; v3 earns its place when 25 languages are the
+requirement, and that is a coverage decision, not an accuracy one.
+
+Zipformer is 2.3 times faster than either and loses badly on the podcast: 14.16 percent, with
+49 of its errors the word `yeah` heard as `yet`. Conversational disfluency is where it breaks,
+and a meeting recording is mostly disfluency. It is the right choice when latency dominates
+and the speech is clean; it is not the right default for transcription.
+
+Feeding a 27 minute file to Parakeet as a single sequence did not finish in thirty minutes on
+four cores. Windowing is not an optimization here; it is what makes the model usable.
+
+### What this does not settle
+
+Two corpora, one voice, one speaker setup, English only, no microphone audio. The reference
+transcripts are themselves machine-generated, so every number here is a comparison between
+engines rather than an absolute claim about any of them. Parakeet emits punctuation and
+capitalization and Zipformer emits neither; the scorer strips both, so neither is rewarded
+for formatting a caller would pay for.
+
