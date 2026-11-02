@@ -101,6 +101,24 @@ impl UserDictionary {
         Self::default()
     }
 
+    /// The dictionary that ships with the binary, used when the user has no file.
+    ///
+    /// It holds the project's own name and the name of the person it was built for,
+    /// because neither is in CMUdict and a voice that cannot say the product's name is
+    /// the first thing anyone notices. A user file replaces it; it does not merge, so
+    /// what the user wrote is what is heard.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the text is compiled in and a test parses it. If the file were
+    /// malformed the build would still succeed, so the fallback is an empty dictionary
+    /// rather than a panic at startup.
+    #[must_use]
+    pub fn shipped() -> Self {
+        const TEXT: &str = include_str!("../assets/dictionary.json");
+        Self::parse(TEXT).unwrap_or_default()
+    }
+
     /// Parse and validate a dictionary file.
     ///
     /// # Errors
@@ -364,6 +382,23 @@ mod tests {
             { "term": "Sella", "spoken": ["seller"] }
         ]
     }"#;
+
+    #[test]
+    fn the_shipped_dictionary_parses_and_names_the_project() {
+        let dictionary = UserDictionary::shipped();
+        assert_eq!(dictionary.len(), 3, "arioso, Tom Sella, Sella");
+        // The name is spoken as two ordinary words, so a voice without the name in
+        // CMUdict still says it.
+        let pieces = dictionary.pieces("arioso is Tom Sella");
+        let matched: Vec<&str> = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Entry(entry) => Some(entry.term.as_str()),
+                Piece::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(matched, ["arioso", "Tom Sella"], "{matched:?}");
+    }
 
     #[test]
     fn parses_a_minimal_file() {

@@ -278,7 +278,7 @@ fn say(
     let user_path = config.dictionary_path(Some(config_path));
     let user = match arioso_core::UserDictionary::load(&user_path) {
         Ok(dictionary) => dictionary,
-        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::empty(),
+        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::shipped(),
         Err(error) => {
             return Err(error).with_context(|| format!("reading {}", user_path.display()));
         }
@@ -567,7 +567,7 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
     let user_path = config.dictionary_path(Some(config_path));
     let user = match arioso_core::UserDictionary::load(&user_path) {
         Ok(dictionary) => dictionary,
-        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::empty(),
+        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::shipped(),
         Err(error) => {
             return Err(error).with_context(|| format!("reading {}", user_path.display()));
         }

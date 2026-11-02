@@ -97,7 +97,9 @@ impl AppState {
             .ok();
         let (dictionary, error) = match UserDictionary::load(&path) {
             Ok(dictionary) => (dictionary, None),
-            Err(arioso_core::DictError::Io { .. }) => (UserDictionary::empty(), None),
+            // No file is not an empty dictionary: the shipped one carries the names
+            // a voice cannot otherwise say.
+            Err(arioso_core::DictError::Io { .. }) => (UserDictionary::shipped(), None),
             Err(error) => {
                 return Err(ServerError::UserDictionary(error));
             }
@@ -386,7 +388,8 @@ impl AppState {
         state.modified = modified;
 
         if modified.is_none() {
-            state.dictionary = UserDictionary::empty();
+            // The file was deleted, so the shipped dictionary is what applies again.
+            state.dictionary = UserDictionary::shipped();
             state.error = None;
             return state;
         }
@@ -1923,7 +1926,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["dictionary"]["entries"], 0);
+        // No file of the user's own, so the shipped dictionary is what applies.
+        assert_eq!(json["dictionary"]["entries"], 3);
         assert!(json["dictionary"]["error"].is_null());
     }
 
