@@ -399,6 +399,51 @@ impl ApiError {
     }
 }
 
+/// The API document, derived from the handlers so a new route cannot be missing from it.
+///
+/// The two WebSockets have no request body to derive from, so they are described in the
+/// document's own text.
+#[derive(Debug, utoipa::OpenApi)]
+#[openapi(
+    info(
+        title = "arioso",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "Local text to speech and speech to text.\n\n\
+            Two routes are WebSockets and cannot be described by a schema: \n\
+            `GET /v1/tts/ws` takes text fragments and returns audio frames; \n\
+            `GET /v1/stt/ws` takes a start frame then 16 kHz mono `s16le` PCM and returns \
+            partial and final transcripts. Both accept `{\"type\":\"cancel\"}` and answer \
+            `{\"type\":\"cancelled\"}`."
+    ),
+    paths(healthz, readyz, list_models, synthesize, transcribe_audio),
+    components(schemas(
+        TtsRequest,
+        ModelView,
+        ModelListView,
+        SttResponse,
+        ReadyView,
+        DictionaryView,
+        Problem
+    ))
+)]
+pub struct ApiDoc;
+
+/// The error body, in the RFC 9457 shape with the PRD's stable `code`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct Problem {
+    /// Always `about:blank` for now.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Short name of the status.
+    pub title: String,
+    /// HTTP status, repeated in the body.
+    pub status: u16,
+    /// Machine-readable code, when the failure has one.
+    pub code: Option<String>,
+    /// What went wrong, in words meant for a person.
+    pub detail: String,
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = serde_json::json!({
@@ -427,7 +472,7 @@ enum SttFailure {
 }
 
 /// Request body for `POST /v1/tts`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct TtsRequest {
     /// Text to speak.
     pub text: String,
@@ -436,7 +481,7 @@ pub struct TtsRequest {
 }
 
 /// One model as reported by `GET /v1/models`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ModelView {
     /// Model id.
     pub id: String,
@@ -460,7 +505,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/v1/models", get(list_models));
+        .route("/v1/models", get(list_models))
+        // The Swagger UI serves the document at the URL it is given, so this registers
+        // /openapi.json as well as /docs. An explicit route beside it is a collision.
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/docs")
+                .url("/openapi.json", <ApiDoc as utoipa::OpenApi>::openapi()),
+        );
 
     if state.config.tts.enabled {
         router = router
@@ -483,11 +534,59 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// Largest audio body accepted: 16-bit mono at 48 kHz for the longest allowed audio.
 const MAX_AUDIO_BYTES: usize = 48_000 * 2 * 600;
 
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "system",
+    summary = "Liveness",
+    responses((status = 200, description = "The process is alive", body = String))
+)]
 async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+/// The user dictionary as reported by readiness.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DictionaryView {
+    /// Entries in the loaded dictionary.
+    pub entries: usize,
+    /// Why the last reload failed, if it did.
+    pub error: Option<String>,
+}
+
+/// Response body for `GET /readyz`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ReadyView {
+    /// `ready` when the configured voice is installed.
+    pub status: String,
+    /// The user dictionary.
+    pub dictionary: DictionaryView,
+    /// Voice the server will load.
+    pub voice: Option<String>,
+    /// Whether that voice is on disk.
+    pub voice_installed: bool,
+    /// Whether it is loaded right now.
+    pub voice_loaded: bool,
+    /// How many catalog models are installed.
+    pub models_installed: usize,
+}
+
+/// Response body for `GET /v1/models`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ModelListView {
+    /// Every model in the catalog.
+    pub models: Vec<ModelView>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/readyz",
+    tag = "system",
+    summary = "Readiness",
+    description = "Ready means the configured voice is installed, not that some model is.",
+    responses((status = 200, body = ReadyView))
+)]
+async fn readyz(State(state): State<Arc<AppState>>) -> Json<ReadyView> {
     let installed = state
         .manifest
         .models
@@ -506,22 +605,34 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .map(|guard| guard.is_some())
         .unwrap_or(false);
     let user = state.user_dictionary();
-    let dictionary = serde_json::json!({
-        "entries": user.dictionary.len(),
-        "error": user.error,
-    });
+    let dictionary = DictionaryView {
+        entries: user.dictionary.len(),
+        error: user.error.clone(),
+    };
     drop(user);
-    Json(serde_json::json!({
-        "status": if voice_installed { "ready" } else { "voice_missing" },
-        "dictionary": dictionary,
-        "voice": voice,
-        "voice_installed": voice_installed,
-        "voice_loaded": voice_loaded,
-        "models_installed": installed,
-    }))
+    Json(ReadyView {
+        status: if voice_installed {
+            "ready"
+        } else {
+            "voice_missing"
+        }
+        .to_string(),
+        dictionary,
+        voice,
+        voice_installed,
+        voice_loaded,
+        models_installed: installed,
+    })
 }
 
-async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/v1/models",
+    tag = "models",
+    summary = "The catalog with what is installed",
+    responses((status = 200, body = ModelListView))
+)]
+async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelListView> {
     let models: Vec<ModelView> = state
         .manifest
         .models
@@ -535,9 +646,21 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
             bytes: m.total_size(),
         })
         .collect();
-    Json(serde_json::json!({ "models": models }))
+    Json(ModelListView { models })
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/tts",
+    tag = "tts",
+    summary = "Synthesize speech",
+    request_body = TtsRequest,
+    responses(
+        (status = 200, description = "WAV audio", content_type = "audio/wav", body = Vec<u8>),
+        (status = 400, body = Problem),
+        (status = 409, description = "The voice is not installed", body = Problem)
+    )
+)]
 async fn synthesize(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TtsRequest>,
@@ -578,7 +701,7 @@ async fn synthesize(
 }
 
 /// Response body for `POST /v1/stt`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SttResponse {
     /// What the engine heard, after the user dictionary.
     pub text: String,
@@ -590,6 +713,19 @@ pub struct SttResponse {
 ///
 /// The body is the audio itself, not a JSON envelope: a client that already has a
 /// recording should not have to base64 it.
+#[utoipa::path(
+    post,
+    path = "/v1/stt",
+    tag = "stt",
+    summary = "Transcribe an uploaded file",
+    description = "The body is the audio itself, not a JSON envelope.",
+    request_body(content = Vec<u8>, content_type = "audio/wav"),
+    responses(
+        (status = 200, body = SttResponse),
+        (status = 415, description = "Not a WAV, or an unsupported rate", body = Problem),
+        (status = 409, description = "The model is not installed", body = Problem)
+    )
+)]
 async fn transcribe_audio(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -690,6 +826,55 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, body)
+    }
+
+    #[tokio::test]
+    async fn the_document_names_every_route() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let paths = document["paths"].as_object().expect("a paths object");
+        // Every route the router registers, except the two WebSockets and the Swagger
+        // UI, which have no schema to derive.
+        for route in ["/healthz", "/readyz", "/v1/models", "/v1/tts", "/v1/stt"] {
+            assert!(
+                paths.contains_key(route),
+                "{route} is missing from the document"
+            );
+        }
+        assert_eq!(document["openapi"], "3.1.0", "{document}");
+        assert_eq!(document["info"]["title"], "arioso");
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_is_served() {
+        let (state, _dir) = state();
+        // /docs redirects to /docs/, which is where the UI lives.
+        let (status, _) = call(
+            router(state.clone()),
+            Request::builder().uri("/docs").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/docs/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("swagger"), "{}", &html[..html.len().min(200)]);
     }
 
     async fn post_stt(
