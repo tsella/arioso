@@ -110,12 +110,15 @@ impl Downloader {
     ///
     /// Returns [`DownloadError`] on network failure, a bad status, a size
     /// mismatch, or a hash mismatch. A hash mismatch deletes the partial file.
-    pub async fn ensure_model(
+    pub async fn ensure_model<F>(
         &self,
         spec: &ModelSpec,
         dir: &Path,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<Vec<PathBuf>, DownloadError> {
+        progress: &mut F,
+    ) -> Result<Vec<PathBuf>, DownloadError>
+    where
+        F: FnMut(Progress) + Send,
+    {
         tokio::fs::create_dir_all(dir).await?;
         let total: u64 = spec.files.iter().map(|f| f.size).sum();
         let needed = spec
@@ -136,14 +139,17 @@ impl Downloader {
 
     /// `base` is the bytes of earlier files in the same model, so progress
     /// covers the whole model rather than the file in hand.
-    async fn ensure_file(
+    async fn ensure_file<F>(
         &self,
         file: &FileSpec,
         dir: &Path,
         base: u64,
         total: u64,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<PathBuf, DownloadError> {
+        progress: &mut F,
+    ) -> Result<PathBuf, DownloadError>
+    where
+        F: FnMut(Progress) + Send,
+    {
         let final_path = dir.join(&file.name);
         let part_path = dir.join(format!("{}.part", file.name));
 

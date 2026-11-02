@@ -8,7 +8,7 @@ use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -97,6 +97,12 @@ pub struct AppState {
     /// Set by whoever starts the server, because the server library does not own the
     /// listener. Absent in tests, where there is no accept loop to stop.
     handle: std::sync::OnceLock<axum_server::Handle<std::net::SocketAddr>>,
+    /// Downloads in flight, keyed by model id: bytes fetched and bytes expected.
+    ///
+    /// A download outlives the request that started it, so the progress has to live
+    /// somewhere other than the handler. It is a map rather than a channel because the
+    /// catalog has to answer "what is happening" without a subscriber.
+    downloads: std::sync::Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -178,6 +184,7 @@ impl AppState {
             token,
             sessions,
             handle: std::sync::OnceLock::new(),
+            downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             manifest,
             models_dir,
         })
@@ -188,6 +195,30 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// Record a download's progress, replacing what was there.
+    fn note_download(&self, id: &str, downloaded: u64, total: u64) {
+        if let Ok(mut map) = self.downloads.lock() {
+            map.insert(id.to_owned(), (downloaded, total));
+        }
+    }
+
+    /// Forget a download that ended, whether it worked or not.
+    fn finish_download(&self, id: &str) {
+        if let Ok(mut map) = self.downloads.lock() {
+            map.remove(id);
+        }
+    }
+
+    /// What a download has reported so far, if one is running.
+    fn download_progress(&self, id: &str) -> Option<(u64, u64)> {
+        self.downloads.lock().ok()?.get(id).copied()
+    }
+
+    /// Whether this model is being fetched right now.
+    fn is_downloading(&self, id: &str) -> bool {
+        self.download_progress(id).is_some()
+    }
+
     /// The accept loop's handle, when this process is serving.
     pub(crate) fn handle(&self) -> Option<&axum_server::Handle<std::net::SocketAddr>> {
         self.handle.get()
@@ -652,6 +683,8 @@ impl ApiError {
         list_voices,
         get_config,
         patch_config,
+        start_download,
+        delete_model,
         stop_server,
         abort_server,
         list_models,
@@ -1004,6 +1037,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/{id}/download", post(start_download))
+        .route("/v1/models/{id}", axum::routing::delete(delete_model))
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
         .route("/v1/voices", get(list_voices))
@@ -1660,6 +1695,146 @@ async fn list_voices(
         })
         .collect();
     Json(VoiceListView { voices })
+}
+
+/// Start fetching a model, or report the one already in flight.
+///
+/// The request returns before the bytes arrive: a model is tens of megabytes and a
+/// caller that waits for it holds a connection open for the length of a download. The
+/// catalog reports the progress.
+#[utoipa::path(
+    post,
+    path = "/v1/models/{id}/download",
+    tag = "models",
+    summary = "Start or resume a download",
+    params(("id" = String, Path, description = "Model id")),
+    responses(
+        (status = 202, description = "The download is running", body = serde_json::Value),
+        (status = 404, description = "No such model", body = Problem)
+    )
+)]
+async fn start_download(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(spec) = state.manifest.find(&id).cloned() else {
+        return ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "unknown_model",
+            format!("no model with id {id} in the catalog"),
+        )
+        .into_response();
+    };
+    if let Some((downloaded, total)) = state.download_progress(&id) {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "id": id, "state": "downloading", "downloaded": downloaded, "total": total
+            })),
+        )
+            .into_response();
+    }
+
+    let total = spec.total_size();
+    state.note_download(&id, 0, total);
+    let task_state = Arc::clone(&state);
+    let dir = state.models_dir.clone();
+    let task_id = id.clone();
+    tokio::spawn(async move {
+        let id = task_id;
+        let result = match arioso_models::Downloader::new() {
+            Ok(downloader) => {
+                let mut progress = |p: arioso_models::Progress| {
+                    task_state.note_download(&id, p.downloaded, p.total);
+                };
+                downloader.ensure_model(&spec, &dir, &mut progress).await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(paths) => tracing::info!(
+                model = %id,
+                files = paths.len(),
+                bytes = total,
+                "model downloaded"
+            ),
+            // The catalog stops showing the download, so the failure has to be visible
+            // somewhere: a caller that asked for a model and got silence has nothing.
+            Err(error) => tracing::error!(model = %id, %error, "model download failed"),
+        }
+        task_state.finish_download(&id);
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "id": id, "state": "downloading", "downloaded": 0, "total": total
+        })),
+    )
+        .into_response()
+}
+
+/// Remove a model's files from the models directory.
+///
+/// Only the files the manifest names, joined onto the configured directory: a delete that
+/// walked a directory would remove whatever else had been put there.
+#[utoipa::path(
+    delete,
+    path = "/v1/models/{id}",
+    tag = "models",
+    summary = "Remove a model from disk",
+    params(("id" = String, Path, description = "Model id")),
+    responses(
+        (status = 200, description = "What was removed", body = serde_json::Value),
+        (status = 404, description = "No such model", body = Problem),
+        (status = 409, description = "The model is being downloaded", body = Problem)
+    )
+)]
+async fn delete_model(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(spec) = state.manifest.find(&id).cloned() else {
+        return ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "unknown_model",
+            format!("no model with id {id} in the catalog"),
+        )
+        .into_response();
+    };
+    if state.is_downloading(&id) {
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "download_in_progress",
+            "the model is being downloaded; removing it now would leave a half-written set",
+        )
+        .into_response();
+    }
+
+    let mut removed = Vec::new();
+    for file in &spec.files {
+        let path = state.models_dir.join(&file.name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(file.name.clone()),
+            // Absent is the state the caller asked for, so it is not an error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::error!(%error, model = %id, "could not remove {}", path.display());
+                return ApiError::coded(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "remove_failed",
+                    "a file could not be removed; the server log has the detail",
+                )
+                .into_response();
+            }
+        }
+    }
+    tracing::info!(model = %id, files = removed.len(), "model removed");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": id, "removed": removed })),
+    )
+        .into_response()
 }
 
 /// Strings under one key of a manifest's free-form metadata.
@@ -2721,6 +2896,97 @@ mod tests {
         // A session that ends returns its permit.
         drop(first);
         assert!(state.open_session().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_download_of_an_unknown_model_is_a_404() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/models/not-a-model/download")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "unknown_model");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_model_removes_the_files_the_manifest_names() {
+        let (state, dir) = state();
+        let spec = state.manifest.models.first().unwrap().clone();
+        // One file the manifest names, and one it does not: the delete must not sweep.
+        for file in &spec.files {
+            std::fs::write(dir.path().join(&file.name), b"weights").unwrap();
+        }
+        std::fs::write(dir.path().join("unrelated.bin"), b"keep me").unwrap();
+
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/models/{}", spec.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        for file in &spec.files {
+            assert!(
+                !dir.path().join(&file.name).exists(),
+                "{} survived",
+                file.name
+            );
+        }
+        assert!(
+            dir.path().join("unrelated.bin").exists(),
+            "a file the manifest does not name was removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_being_downloaded_cannot_be_deleted() {
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        state.note_download(&id, 10, 100);
+
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/models/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "download_in_progress");
+    }
+
+    #[tokio::test]
+    async fn a_second_download_request_reports_the_first() {
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        state.note_download(&id, 40, 100);
+
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/models/{id}/download"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["downloaded"], 40, "the running download was restarted");
     }
 
     #[tokio::test]
