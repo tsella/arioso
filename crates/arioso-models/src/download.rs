@@ -2,6 +2,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
@@ -85,6 +86,8 @@ impl Downloader {
     pub fn new() -> Result<Self, DownloadError> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("arioso/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(60))
             .build()?;
         Ok(Self { client })
     }
@@ -199,6 +202,10 @@ impl Downloader {
                 expected: file.size,
                 actual: actual_size,
             });
+        }
+        // Windows refuses to rename onto an existing file, so clear a stale one first.
+        if final_path.exists() {
+            tokio::fs::remove_file(&final_path).await?;
         }
         tokio::fs::rename(&part_path, &final_path).await?;
         progress(Progress {
@@ -332,6 +339,28 @@ mod tests {
         assert!(matches!(err, DownloadError::Integrity { .. }), "{err:?}");
         assert!(!dir.path().join("voice.bin.part").exists());
         assert!(!dir.path().join("voice.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn replaces_a_stale_file() {
+        let server = MockServer::start().await;
+        let data = payload();
+        Mock::given(method("GET"))
+            .and(path("/voice.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("voice.bin"), b"older build of this voice").unwrap();
+        let model = spec(format!("{}/voice.bin", server.uri()), &data);
+
+        let paths = Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), data);
     }
 
     #[tokio::test]
