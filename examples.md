@@ -466,8 +466,22 @@ client generator.
 
 ## 16. Watching it work
 
-The server logs to stderr, and the config decides the level and the shape. The default is
-`info` in human form:
+The server logs to stderr, and the config decides the level and the shape. The default
+level is `error`, so a working server says one line and nothing else:
+
+```console
+$ arioso serve
+listening on http://127.0.0.1:10101
+```
+
+Requests arrive, a dictionary is rewritten, and the output above is still the whole of it.
+That is the point: a log that prints on every healthy request is a log nobody reads.
+
+Raise the level when you want the timeline. At `info`, a state change is one line:
+
+```json
+{ "log": { "level": "info", "format": "pretty" } }
+```
 
 ```console
 $ arioso serve

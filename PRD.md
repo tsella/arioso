@@ -509,6 +509,24 @@ JSON, at roughly 33 percent size cost.
   first run is diagnosable from logs alone.
 - F9.6 Every request gets a request ID, returned in the `x-request-id` header and
   carried on every span. A client-reported bug is one grep away from its traces.
+- F9.7 The default level is `error`. A server that is working says nothing; a server
+  that is not says why. Anything a healthy run would print on every request is not
+  information, it is noise that trains the operator to ignore the log.
+- F9.8 The level policy, applied across every crate:
+
+  | Level | Belongs here | Examples |
+  | --- | --- | --- |
+  | `error` | The process cannot do its job for this request, and the operator must know | a model file fails its hash, a config reload writes an unusable file, a port cannot be bound |
+  | `warn` | The request was served, but something is wrong that will bite later | the dictionary did not parse and the last good copy was kept, a download resumed from a truncated file, a request was refused by a limit, a certificate expires within 14 days |
+  | `info` | A state change an operator would want in a timeline, and nothing per-request | listening on an address, model downloaded with byte count, engine loaded, config changed by a patch, dictionary reloaded with its entry count |
+  | `debug` | One request or one internal step, useful when reproducing a report | request finished with status, engine, duration and bytes; a sentence split; a phoneme guess; a VAD segment boundary; a rate limit bucket refilled |
+  | `trace` | Per-frame or per-chunk detail that only matters inside one algorithm | every audio frame, every queue push, every partial re-run |
+
+  The test for `info`: would an operator reading the log tomorrow care that this happened
+  at 03:14? If the answer is "only if it broke", it is `debug`. The test for `warn`: is
+  there an action the operator could take? If not, it is `info` or `debug`.
+- F9.9 Text is never logged at any level unless `log.log_text` is on, including at
+  `trace`. A recording is the most private thing this server touches.
 
 ### F10. C ABI
 

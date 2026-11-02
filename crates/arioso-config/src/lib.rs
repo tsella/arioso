@@ -371,7 +371,7 @@ pub struct Log {
 impl Default for Log {
     fn default() -> Self {
         Self {
-            level: "info".into(),
+            level: "error".into(),
             format: "pretty".into(),
             file: None,
             log_text: false,

@@ -68,7 +68,7 @@
     "auto_download": []
   },
   "log": {
-    "level": "info",
+    "level": "error",
     "format": "pretty",
     "file": null,
     "log_text": false
