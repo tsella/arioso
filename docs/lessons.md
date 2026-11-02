@@ -177,3 +177,21 @@ which broke the platforms that had been passing, because it forced a re-run that
 same empty directory. The second added the fingerprint, with the same result. The rule:
 when a third-party build script fails to link, read the script before changing the cache.
 The answer was four lines into its download function.
+
+**A PID file without a lock is a number, not a fact.** The first version wrote the child's
+PID and nothing else. Two instances on one config overwrote each other's file, so `stop`
+killed whichever wrote last, and a file left by a crash named a PID the system had already
+given to something else. The lock is what carries the meaning: a file that can still be
+locked has no owner. `flock -n` failing is the proof that a process is alive; a file naming
+PID 1 was removed as stale without a signal leaving the machine.
+
+**A new config field is a breaking change unless the struct says otherwise.** Adding
+`shutdown_grace_ms` to `Limits` made every config written by the previous version fail to
+parse with `missing field`. `#[serde(deny_unknown_fields, default)]` gives the two
+behaviours that matter together: a field a later version added is filled from the default,
+and a field the operator misspelled is still refused.
+
+**Bound the socket before you print the port.** `axum-server` refuses a blocking
+`TcpListener`, so the bind has to set non-blocking first. And the port line has to come
+after the server object exists, not after the bind: a bound socket is not a server that can
+answer, and the first version announced a port and then panicked.

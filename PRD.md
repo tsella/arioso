@@ -1,6 +1,6 @@
 # arioso: Product Requirements Document
 
-Version 0.2 (draft for review) · 1 November 2026 · Owner: Tom Sella
+Version 0.3 (draft for review) · 2 November 2026 · Owner: Tom Sella
 
 ---
 
@@ -428,6 +428,8 @@ HTTP, JSON, versioned under `/v1`.
 | DELETE | `/v1/models/{id}` | Remove from disk |
 | GET | `/v1/models/events` | SSE stream of download and load progress |
 | POST | `/v1/models/{id}/warm` | Load a model without waiting for a request |
+| POST | `/v1/stop` | Stop gracefully: drain in-flight work, then exit |
+| POST | `/v1/abort` | Stop now: flush, drop in-flight work, exit |
 | GET | `/v1/engines` | Capabilities per engine: streaming, languages, voice count, loaded |
 | GET | `/v1/voices` | Voices for the active engine, filterable by language |
 | POST | `/v1/tts` | Synthesize, returns audio bytes |
@@ -788,8 +790,12 @@ and cannot do about a flood.
   the rest stay at the framework default.
 - F16.7 A per-client token bucket caps request rate: `server.limits.requests_per_second`
   and `server.limits.burst`. Over the limit answers `429 rate_limited` with `Retry-After`.
-- F16.8 A connection cap (`server.limits.max_connections`) and a request-header timeout,
-  so an idle or half-open socket cannot hold capacity indefinitely.
+- F16.8 A request-header timeout, and `server.limits.max_connections` applied where it can
+  be enforced: concurrent WebSocket sessions, which are the connections that accumulate
+  because they end when a document ends. A refused session gets `503 too_many_sessions`
+  rather than queueing behind sessions whose length it cannot see. A cap on plain sockets
+  would need the accept loop, which the server does not own; the PRD says so rather than
+  claiming a control that does not exist.
 - F16.9 Engine permits and the bounded queue from F11 stay the last line: a full queue
   answers `429 engine_busy`, which is cheaper than queueing work nobody will run.
 - F16.10 The client identity used by the limits is the peer address. `X-Forwarded-For` is
@@ -814,6 +820,66 @@ and cannot do about a flood.
   error names the exact fix. Exposure is a decision, not a typo.
 - F17.6 A refusal carries `WWW-Authenticate: Bearer realm="arioso"` and the problem code
   `unauthorized`.
+
+### F18. Response hygiene and surface control
+
+Added after a deliberate pass for remote code execution. Each item below came from a
+finding, not from a checklist.
+
+- F18.1 Every response carries `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. A browser that sniffs a JSON
+  body as HTML turns a reflected string into a script.
+- F18.2 A runtime failure's own message is logged at `error` and never returned. The client
+  gets a stable sentence and a code. The runtime's words can name a path or a library
+  symbol, which is a map of the machine handed to whoever asked.
+- F18.3 The same rule for a failed config write: the path goes to the log, not the response.
+- F18.4 `server.docs` turns `/docs` and `/openapi.json` off. Unregistered, so they answer
+  404 rather than 401: a refusal confirms a route exists, a 404 does not.
+- F18.5 A model file name in the manifest is a plain name: no separator, no `..`, not
+  absolute. Refused at parse time, so a corrupted manifest cannot become an arbitrary file
+  write.
+
+### F19. Sidecar mode
+
+For a caller that wants a server, not a shell. A desktop or mobile application spawns
+arioso, reads one line, and talks HTTP.
+
+- F19.1 `server.sidecar: true` makes `arioso serve` detach: the parent spawns a child copy of
+  itself, the child binds and serves, the parent exits 0 once the child is ready. No `fork`,
+  no `setsid`, so the same code works on macOS, Linux and Windows.
+- F19.2 The child writes exactly one line to stdout, `START {port}`, and flushes it.
+  Everything else — logs, the listening message, errors — goes to stderr, so a caller can
+  read the port from a pipe without parsing anything.
+- F19.3 The child binds `server.bind`. When that port is taken it binds port 0 and reports
+  the port the operating system gave it, so two instances on one machine never collide.
+- F19.4 The child writes `arioso-{port}.pid` beside the config file. The port is in the
+  name because one config can run two instances, and a single file would let the second
+  overwrite the first. The child holds an exclusive lock on that file for its lifetime, so
+  a file that can still be locked has no owner: `stop` removes it instead of signalling a
+  number the system may have given to another program. `arioso stop` walks every
+  `arioso-*.pid` beside that config, stops the live ones, and removes the rest. A process
+  that stops on request removes its own file.
+- F19.5 Sidecar mode requires a loopback bind and carries no token. The caller is on the
+  same machine, and a secret passed through a pipe on a shared machine protects nothing. A
+  non-loopback bind with sidecar mode is refused at validation.
+- F19.6 The parent waits for readiness before exiting, so a caller never connects to a port
+  that is not listening yet, and a child that fails to start makes the parent exit non-zero
+  instead of leaving the caller waiting.
+
+### F20. Lifecycle over the API
+
+A caller that can start a server should be able to end it without a process table.
+
+- F20.1 `POST /v1/stop` stops accepting, lets in-flight requests finish, and ends the
+  process when they do or when `server.limits.shutdown_grace_ms` expires (default 5000).
+  Answers `202` before it begins. A streaming session is ended, because it has no natural
+  end. When the process is not serving, it answers `409 no_accept_loop`.
+- F20.2 `POST /v1/abort` answers `202`, flushes, and ends the process. Work in flight is
+  dropped on purpose; a caller that wanted it kept would have asked to stop.
+- F20.3 Both are ordinary routes: bearer auth applies when it is configured, and neither
+  is exempt. `/healthz` stays the only unauthenticated route.
+- F20.4 SIGTERM and Ctrl-C take the graceful path. A service manager that stops the
+  process and a caller that posts `/v1/stop` get the same behaviour.
 
 ## 9. Non-functional requirements
 

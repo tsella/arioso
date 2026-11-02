@@ -116,6 +116,7 @@ curl -s -X POST localhost:10101/v1/tts -H 'content-type: application/json' \
 | `arioso say <text> [--out FILE] [--dict FILE]` | Write a WAV file |
 | `arioso transcribe <file.wav> [--json]` | Read a WAV file back as text |
 | `arioso serve` | Run the HTTP and WebSocket server |
+| `arioso stop` | Stop a server started in sidecar mode |
 | `arioso normalize <text>` | Show what the voice will actually say |
 | `arioso doctor` | Check the config, the models, and the dictionary |
 | `arioso models list` | Show the manifest and what is installed |
@@ -264,6 +265,24 @@ Kokoro is M4. Until then the switch mechanism works and has one destination.
 The WebSocket stream sends a `start` frame with the sample rate, one binary frame per
 sentence, and an `end` frame with the counts. Audio starts before the last sentence is
 synthesized, because the queue between them holds two frames.
+
+## Sidecar mode
+
+A program that wants a server, not a shell, sets `server.sidecar` and reads one line:
+
+```console
+$ arioso serve
+START 10194
+```
+
+The parent process exits; the child serves. `START` is the only thing on stdout — logs and
+errors go to stderr — so a caller reads the port from a pipe without parsing anything. When
+the configured port is taken the child takes one the system picks and reports that instead,
+so two instances never collide. `arioso stop` ends it.
+
+A running server can also be stopped over HTTP: `POST /v1/stop` drains in-flight work, and
+`POST /v1/abort` answers and exits at once. Sidecar mode refuses a non-loopback bind,
+because it carries no token.
 
 ## Configuration
 

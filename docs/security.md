@@ -17,6 +17,11 @@ Every route takes input from the network:
 | `GET /v1/*` | query parameters | manifest lookup |
 | `/docs`, `/openapi.json` | none | the API document |
 
+Two routes exist to end the process, and they are ordinary routes: bearer auth applies to
+them when it is configured, and neither is exempt. On a loopback bind with `auth.mode`
+`none` any local process can call `POST /v1/abort`, which is the same power it already has
+through a signal. What the routes do not do is reach the network when the bind is loopback.
+
 ## Remote code execution: not found, and why
 
 The search covered the four places an RCE normally lives in a service like this:

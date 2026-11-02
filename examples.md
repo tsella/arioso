@@ -695,3 +695,67 @@ b'' 2.0007
 
 A normal request on the same server still answers `200`, so the limit costs a slow client
 nothing it was not already spending.
+
+## 19. Running as a sidecar, and stopping it
+
+A desktop application does not want to tell a person to open a terminal. It starts the
+server, reads one line, and talks HTTP.
+
+```console
+$ arioso serve > port.txt 2> log.txt
+$ cat port.txt
+START 10194
+```
+
+The launcher exits and the child keeps serving, so `arioso serve` returns as soon as the
+socket answers. That is the point of the line: a caller that connects the instant it reads
+the port is not refused.
+
+Start a second one on the same config while the first is running:
+
+```console
+$ arioso serve > port2.txt 2> log2.txt
+$ cat port2.txt
+START 37819
+```
+
+The configured port was taken, so the child took one the system picked and reported that
+one. Two instances, one config, no collision.
+
+Each child writes `arioso-{port}.pid` beside the config file and holds an exclusive lock on
+it for as long as it runs. The lock is what makes the number trustworthy: a file that can
+still be locked has no owner, so `stop` removes it instead of signalling whatever the
+system handed that number to next.
+
+```console
+$ flock -n config/arioso-10194.pid -c true || echo locked
+locked
+$ arioso stop
+stopped 2998180 on port 10194
+1 sidecar(s) stopped
+```
+
+### Stopping over HTTP
+
+A caller that started the server through the API can end it the same way.
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/stop
+{"grace_ms":5000,"stopping":true}
+```
+
+The answer is `202` before the stop begins. In-flight requests finish, then the process
+ends; a streaming session is ended, because it has no natural end. The grace period is
+`server.limits.shutdown_grace_ms`.
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/abort
+{"aborting":true}
+```
+
+Measured: the port stopped accepting 82 ms after the request, 50 ms of which is the pause
+that lets the reply leave the socket before the socket closes. Work in flight is dropped on
+purpose; a caller that wanted it kept would have asked to stop.
+
+`SIGTERM` and Ctrl-C take the same graceful path, so a service manager stopping the process
+and a caller posting `/v1/stop` get the same behaviour.
