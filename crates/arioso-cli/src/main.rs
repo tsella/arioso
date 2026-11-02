@@ -1,5 +1,6 @@
 //! The `arioso` binary.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -37,6 +38,8 @@ enum Command {
     Doctor,
     /// Serve the HTTP API.
     Serve,
+    /// Stop a sidecar started with `server.sidecar` on.
+    Stop,
     /// Show how text is expanded before it reaches the voice.
     Normalize {
         /// Text to expand.
@@ -101,6 +104,7 @@ fn main() -> Result<()> {
         Command::Say { text, out, dict } => say(&config, &config_path, &text, out, dict),
         Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
+        Command::Stop => stop(&config_path),
         Command::Normalize { text } => {
             println!(
                 "{}",
@@ -211,33 +215,98 @@ fn download(config: &Config, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The marker that tells a child process it is the server, not the launcher.
+const SIDECAR_CHILD: &str = "ARIOSO_SIDECAR_CHILD";
+
+/// Where the child reports the port it bound, so the launcher never guesses.
+const SIDECAR_READY: &str = "ARIOSO_SIDECAR_READY";
+
 fn serve(config: Config, config_path: &Path) -> Result<()> {
+    if config.server.sidecar && std::env::var_os(SIDECAR_CHILD).is_none() {
+        return detach(config_path);
+    }
+    serve_here(config, config_path)
+}
+
+/// Serve in this process, reporting the port before serving it.
+fn serve_here(config: Config, config_path: &Path) -> Result<()> {
     let manifest = load_manifest(&config)?;
+    let sidecar = config.server.sidecar;
     let state = Arc::new(arioso_server::AppState::new(
         config.clone(),
         manifest,
         Some(config_path),
     )?);
     let bind = config.server.bind.clone();
-
     let tls = config.server.tls.clone();
     let header_timeout = config.server.limits.header_timeout_ms;
+    let config_grace = config.server.limits.shutdown_grace_ms;
+
+    // Bound here rather than inside the server, because the port has to be known before
+    // anything is printed: with port 0 the operating system chooses it, and a caller
+    // cannot guess what it chose.
+    let listener = bind_listener(&bind, sidecar)?;
+    let local = listener
+        .local_addr()
+        .context("the bound address could not be read")?;
+    // Known only after the bind, so the file is named for the port it ended up with.
+    let pid_path = pid_file(config_path, local.port());
+
+    // Announced only after the server object exists: a socket that is bound is not a
+    // server that can answer, and a caller told the port a moment too early connects to
+    // nothing. The closure is called from both branches below.
+    let scheme = if tls.is_configured() { "https" } else { "http" };
+    let announce_pid = pid_path.clone();
+    let announce = move || -> Result<Option<std::fs::File>> {
+        if sidecar {
+            // The lock comes first: a child that cannot claim its PID file must fail before
+            // it prints a port, not after, or the caller reads a port that never serves.
+            let lock = hold_pid_file(&announce_pid)?;
+            // The one line a caller reads, flushed before anything else can fail so a pipe
+            // never waits on a buffer.
+            println!("START {}", local.port());
+            std::io::stdout().flush()?;
+            if let Some(ready) = std::env::var_os(SIDECAR_READY) {
+                let _ = std::fs::write(PathBuf::from(ready), format!("port {}\n", local.port()));
+            }
+            return Ok(Some(lock));
+        } else {
+            println!("listening on {scheme}://{local}");
+        }
+        Ok(None)
+    };
 
     tokio::runtime::Runtime::new()?.block_on(async move {
+        // The accept loop's handle, so a route can stop the server and so a signal is a
+        // request to stop rather than a reason to drop what is in flight.
+        let handle = axum_server::Handle::<std::net::SocketAddr>::new();
+        state.attach_handle(handle.clone());
+        {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                wait_for_stop_signal().await;
+                tracing::info!(grace_ms = config_grace, "stopping on a signal");
+                handle.graceful_shutdown(Some(std::time::Duration::from_millis(config_grace)));
+            });
+        }
         let router = arioso_server::router(state);
-        if tls.is_configured() {
+        let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let timeout = std::time::Duration::from_millis(header_timeout);
+        // Two branches rather than one: a TLS acceptor changes the server's type, so the
+        // two configurations cannot share a binding. The timeout setup is repeated
+        // deliberately; a macro to save four lines would hide what it configures.
+        let outcome = if tls.is_configured() {
             // Validation already refused one half of the pair, so both are here.
             let (cert, key) = match (tls.cert.clone(), tls.key.clone()) {
                 (Some(cert), Some(key)) => (cert, key),
                 _ => anyhow::bail!("server.tls needs both cert and key"),
             };
-            let config = arioso_server::tls_config(&cert, &key).await?;
-            let _reload = arioso_server::watch_certificates(config.clone(), cert, key);
-            let addr: std::net::SocketAddr = bind
-                .parse()
-                .with_context(|| format!("server.bind {bind:?} is not an address"))?;
-            println!("listening on https://{bind}");
-            let mut server = axum_server::bind_rustls(addr, config);
+            let tls_config = arioso_server::tls_config(&cert, &key).await?;
+            // Held for the life of the server: dropping it stops the certificate watch.
+            let _reload = arioso_server::watch_certificates(tls_config.clone(), cert, key);
+            let mut server =
+                axum_server::from_tcp_rustls(listener, tls_config)?.handle(handle.clone());
+            let _pid_lock = announce()?;
             // A client that opens a socket and never finishes its headers holds a task for
             // as long as it likes. The timeout is the difference between a slow client and
             // a cheap denial of service.
@@ -245,27 +314,330 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
                 .http_builder()
                 .http1()
                 .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(std::time::Duration::from_millis(header_timeout));
-            server
-                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+                .header_read_timeout(timeout);
+            server.serve(service).await
         } else {
-            let addr: std::net::SocketAddr = bind
-                .parse()
-                .with_context(|| format!("server.bind {bind:?} is not an address"))?;
-            println!("listening on http://{bind}");
-            let mut server = axum_server::bind(addr);
+            let mut server = axum_server::from_tcp(listener)?.handle(handle.clone());
+            let _pid_lock = announce()?;
             server
                 .http_builder()
                 .http1()
                 .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(std::time::Duration::from_millis(header_timeout));
-            server
-                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+                .header_read_timeout(timeout);
+            server.serve(service).await
+        };
+        if sidecar {
+            // A process that stopped on request has no PID to point at. Left behind, the
+            // file makes the next `stop` look at a number the system has reused.
+            let _ = std::fs::remove_file(&pid_path);
         }
+        outcome?;
         Ok::<(), anyhow::Error>(())
     })
+}
+
+/// Resolve when the process is asked to stop.
+///
+/// SIGTERM and Ctrl-C both mean "finish what you are doing and go", which is what a
+/// service manager sends. The handle turns that into a graceful shutdown; a kill that
+/// cannot wait is what `abort` is for.
+async fn wait_for_stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not listen for SIGTERM; only Ctrl-C will stop this process");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Start the server in a child process and let the caller read its port from stdout.
+///
+/// No `fork` and no `setsid`: the same code runs on macOS, Linux and Windows. The child
+/// inherits our stdout and stderr on purpose, so a caller reads `START {port}` from the
+/// pipe it gave us and a child that fails says why in the same place.
+fn detach(config_path: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let ready = std::env::temp_dir().join(format!(
+        "arioso-sidecar-{}-{stamp}.ready",
+        std::process::id()
+    ));
+    let exe = std::env::current_exe().context("finding the running binary")?;
+    let mut child = std::process::Command::new(exe)
+        .arg("--config")
+        .arg(config_path)
+        .arg("serve")
+        .env(SIDECAR_CHILD, "1")
+        .env(SIDECAR_READY, &ready)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("starting a sidecar for {}", config_path.display()))?;
+
+    // A caller must never connect to a port that is not listening yet, and a child that
+    // dies must not leave the caller waiting for a line that will not come.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Ok(report) = std::fs::read_to_string(&ready) {
+            let _ = std::fs::remove_file(&ready);
+            let report = report.trim().to_owned();
+            return match report.strip_prefix("port ") {
+                Some(_) => Ok(()),
+                None => anyhow::bail!("the sidecar reported: {report}"),
+            };
+        }
+        if let Some(status) = child.try_wait()? {
+            let _ = std::fs::remove_file(&ready);
+            anyhow::bail!("the sidecar exited before it was ready ({status})");
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = std::fs::remove_file(&ready);
+            anyhow::bail!("the sidecar did not report a port within 30 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// Bind the configured address, falling back to a port the system chooses.
+///
+/// A sidecar reports the port it got, so a taken port is not a failure: it is a reason to
+/// take another. Anywhere else a taken port is an error the operator must see.
+fn bind_listener(bind: &str, may_choose_port: bool) -> Result<std::net::TcpListener> {
+    let addr: std::net::SocketAddr = bind
+        .parse()
+        .with_context(|| format!("server.bind {bind:?} is not an address"))?;
+    // Tokio refuses to register a blocking socket, and this one is handed straight to it.
+    let prepare = |listener: std::net::TcpListener| -> Result<std::net::TcpListener> {
+        listener
+            .set_nonblocking(true)
+            .context("making the listening socket non-blocking")?;
+        Ok(listener)
+    };
+    match std::net::TcpListener::bind(addr) {
+        Ok(listener) => prepare(listener),
+        Err(error) if may_choose_port && error.kind() == std::io::ErrorKind::AddrInUse => {
+            let fallback = std::net::SocketAddr::new(addr.ip(), 0);
+            let listener = std::net::TcpListener::bind(fallback)
+                .with_context(|| format!("binding {fallback} after {addr} was taken"))?;
+            prepare(listener)
+        }
+        Err(error) => Err(error).with_context(|| format!("binding {addr}")),
+    }
+}
+
+/// The name every PID file starts with.
+///
+/// Named after the program, not the config file, so a PID file is recognisable in a
+/// directory listing without knowing which config wrote it.
+const PID_PREFIX: &str = "arioso-";
+
+/// The PID file for one sidecar, keyed by port.
+///
+/// Keyed by port because one config can run more than one sidecar: the second takes the
+/// port the first did not want. A single file per config would have them overwrite each
+/// other, and `stop` would then kill whichever wrote last.
+fn pid_file(config_path: &Path, port: u16) -> PathBuf {
+    config_path.with_file_name(format!("{PID_PREFIX}{port}.pid"))
+}
+
+/// Write the PID and hold an exclusive lock on the file for as long as this process runs.
+///
+/// The lock is what makes the number trustworthy. Without it a file left by a crash names
+/// a process that no longer exists, and the system will hand that number to something else;
+/// `stop` would then signal a stranger. A file that can be locked has no owner, which is
+/// how a stale entry is told from a live one.
+#[cfg(unix)]
+fn hold_pid_file(path: &Path) -> Result<std::fs::File> {
+    use std::io::Write as _;
+    use std::os::unix::io::AsRawFd as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "{} is locked by another sidecar for this port",
+            path.display()
+        );
+    }
+    writeln!(file, "{}", std::process::id())
+        .with_context(|| format!("writing {}", path.display()))?;
+    // The lock lives as long as this handle, which the caller keeps until the server ends.
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn hold_pid_file(path: &Path) -> Result<std::fs::File> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    writeln!(file, "{}", std::process::id())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(file)
+}
+
+/// The process that owns a PID file, or `None` when the file is left over from one that ended.
+#[cfg(unix)]
+fn pid_file_owner(path: &Path) -> Option<u32> {
+    use std::os::unix::io::AsRawFd as _;
+    let file = std::fs::OpenOptions::new().write(true).open(path).ok()?;
+    // Taking the lock means nobody holds it, so the number in the file belongs to a process
+    // that has ended. Releasing it immediately keeps `stop` from blocking a later start.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        return None;
+    }
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+#[cfg(not(unix))]
+fn pid_file_owner(path: &Path) -> Option<u32> {
+    // Windows has no advisory lock here, so the name is checked instead: a PID that now
+    // belongs to another program is not this sidecar.
+    let pid: u32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    if text.contains("arioso") {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+/// Every PID file beside this config, with the port read back out of the name.
+fn pid_files(config_path: &Path) -> Vec<(PathBuf, u16)> {
+    let prefix = PID_PREFIX;
+    let directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(port) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(".pid"))
+            .and_then(|port| port.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        found.push((entry.path(), port));
+    }
+    found.sort_by_key(|(_, port)| *port);
+    found
+}
+
+/// Stop every sidecar this config started.
+fn stop(config_path: &Path) -> Result<()> {
+    let files = pid_files(config_path);
+    if files.is_empty() {
+        anyhow::bail!(
+            "no sidecar is running for {}: no {PID_PREFIX}*.pid file beside it",
+            config_path.display()
+        );
+    }
+    let mut stopped = 0;
+    for (path, port) in files {
+        let Some(pid) = pid_file_owner(&path) else {
+            println!(
+                "port {port}: the process that wrote {} has ended",
+                path.display()
+            );
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
+        if running(pid) {
+            request_stop(pid)?;
+            // A process that has been asked to stop has not stopped yet. Removing the file
+            // before it is gone would leave a running server nobody can find.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while running(pid) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if running(pid) {
+                anyhow::bail!("process {pid} on port {port} did not stop within 10 seconds");
+            }
+            stopped += 1;
+            println!("stopped {pid} on port {port}");
+        } else {
+            println!("process {pid} on port {port} was already gone");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    println!("{stopped} sidecar(s) stopped");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn running(pid: u32) -> bool {
+    // Signal 0 asks the kernel whether the process exists without touching it.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn request_stop(pid: u32) -> Result<()> {
+    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if result != 0 {
+        anyhow::bail!(
+            "could not ask process {pid} to stop: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn running(pid: u32) -> bool {
+    // tasklist exits 0 whether or not the pid is there, so the answer is in the output.
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn request_stop(pid: u32) -> Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status()
+        .context("running taskkill")?;
+    if !status.success() {
+        anyhow::bail!("taskkill could not stop process {pid}");
+    }
+    Ok(())
 }
 
 fn say(
@@ -637,13 +1009,19 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
 fn init_tracing(config: &Config) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()));
+    // stderr, always. stdout belongs to the caller: in sidecar mode it carries the port
+    // line and nothing else, and a log line on that pipe would be read as the port.
     if config.log.format == "json" {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
     }
 }
 
