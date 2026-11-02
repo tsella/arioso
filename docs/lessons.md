@@ -30,6 +30,19 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**A fallback path that returns early is invisible in testing.** The partial-transcript
+path used `try_lock` and returned `None` when the engine was not yet loaded, so the first
+session after a restart produced no partials at all and later sessions worked. It looked
+like a timing quirk. Rule: when a second code path exists for speed (try instead of wait),
+it must still reach the same lazy initialization as the slow path, or its failure is a
+silent absence rather than an error.
+
+**A ratio computed in a summary is not a measurement.** The first draft of the streaming
+docs said the final landed 280 ms after the endpoint. The real arithmetic was 340 ms: the
+speech ends at 3.56 s of audio, the detector confirms 500 ms later at 4.06 s, and the
+final arrives at 4.42 s of wall clock. Rule: subtract the two numbers you actually have,
+in writing, before a latency figure reaches a doc.
+
 **A token stream without separators fails quietly.** Words inside one piece of text were
 concatenated with no space symbol, so the model read a sentence as one long word. It still
 sounded like speech, so listening did not expose it; reading the symbol list did. Rule:

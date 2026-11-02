@@ -42,8 +42,10 @@ Working today:
 
 Not built yet:
 
-- Speech to text over HTTP and WebSocket, and streaming partials (M2)
-- Silero voice activity detection
+- Silero voice activity detection, which the PRD names as the default over the energy
+  detector that ships
+- A streaming Zipformer model, so partials come from a streaming engine instead of
+  re-running Whisper on the buffer
 - A signed manifest
 
 ## Requirements
@@ -155,6 +157,32 @@ audio is resampled to 16 kHz and read by Whisper.
 $ arioso transcribe hello.wav
 The quick brown fox jumps over the lazy dog.
 ```
+
+`POST /v1/stt` takes the audio as the body and answers with the text and its length:
+
+```console
+$ curl -X POST --data-binary @hello.wav -H 'Content-Type: audio/wav' \
+    http://127.0.0.1:10101/v1/stt
+{"seconds":2.67,"text":"The quick brown fox jumps over the lazy dog."}
+```
+
+`GET /v1/stt/ws` streams. The client sends a start frame, then 16 kHz mono `s16le` PCM,
+and receives a final per utterance with its offsets. Partials arrive between them, when
+the engine is free:
+
+```text
+client → {"type":"start","sample_rate":16000}
+server → {"type":"ready","session":"6ae847c402bc","sources":["mic"]}
+client → <binary PCM frames>
+server → {"type":"partial","text":"The quick brown fox jump.","t":1.54}
+server → {"type":"final","text":"The quick brown fox jumps over the lazy dog.","start":0.84,"end":3.56}
+client → {"type":"cancel"}
+server → {"type":"cancelled"}
+```
+
+Utterances are cut by an energy voice activity detector, so a pause ends one and starts
+the next. The final lands about 340 ms after the endpoint on four cores: the detector
+confirms at 4.06 s of audio and the final arrives at 4.42 s of wall clock.
 
 The same dictionary that fixes a pronunciation on the way out is applied on the way in,
 so a term you taught the voice comes back spelled your way. That path is real but narrow:

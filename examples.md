@@ -356,7 +356,51 @@ wrong for it. The timing columns are the honest part.
 The high tier is the surprise: twice the time of medium, a 108.9 MiB file against 60.3,
 and nothing here shows it is better.
 
-## 13. Models
+## 13. Streaming a microphone
+
+`/v1/stt/ws` takes raw PCM and answers as it goes. This client streams a file in real
+time; a microphone does the same thing from a capture callback.
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    audio = open("hello.pcm", "rb").read()      # 16 kHz mono s16le
+    async with websockets.connect("ws://127.0.0.1:10101/v1/stt/ws") as socket:
+        await socket.send(json.dumps({"type": "start", "sample_rate": 16000}))
+        print(await socket.recv())               # ready
+        for index in range(0, len(audio), 3200): # 100 ms frames
+            await socket.send(audio[index:index + 3200])
+            await asyncio.sleep(0.1)
+        await socket.send(json.dumps({"type": "cancel"}))
+
+asyncio.run(main())
+```
+
+A session with 1 s of silence, 2.65 s of speech, then silence again, printed with the
+wall clock at each frame:
+
+```text
+ 0.02s <- {"session":"6ae847c402bc","sources":["mic"],"type":"ready"}
+ 2.16s <- {"t":0.64,"text":"the quick","type":"partial"}
+ 2.68s <- {"t":1.54,"text":"The quick brown fox jump.","type":"partial"}
+ 3.02s <- {"t":1.84,"text":"The quick brown fox jumps over.","type":"partial"}
+ 3.35s <- {"t":2.14,"text":"The quick brown fox jumps over the leaf.","type":"partial"}
+ 4.00s <- {"t":2.74,"text":"The quick brown fox jumps over the lazy dog.","type":"partial"}
+ 4.42s <- {"end":3.56,"start":0.84,"text":"The quick brown fox jumps over the lazy dog.","type":"final"}
+```
+
+Three things to read from those numbers. The first partial is late (2.16 s) because that
+session paid the model load; later sessions start partials at 1.68 s. Partials arrive
+about every 330 ms and improve as the buffer grows. The speech ends at 3.56 s of audio,
+the detector confirms the endpoint 500 ms later at 4.06 s, and the final arrives at
+4.42 s of wall clock: about 340 ms after the endpoint, against the PRD target of 700.
+
+Partials are best effort by design. Each one re-runs the batch engine on the buffer so
+far, so a partial that is still running when the utterance ends is dropped rather than
+delivered after its own final.
+
+## 14. Models
 
 ```console
 $ arioso models list
