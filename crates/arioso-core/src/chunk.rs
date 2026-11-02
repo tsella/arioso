@@ -36,9 +36,9 @@ const ABBREVIATIONS: [&str; 22] = [
 /// Split `text` into sentences, keeping the punctuation.
 ///
 /// A sentence ends after `!`, `?`, or a newline, and after `.` or `…` only when
-/// the next character is not a lowercase letter or a digit and the preceding
-/// word is neither a known abbreviation nor a single initial. That keeps
-/// `3.99`, `p.m.`, `Dr.`, and `U.S.A.` in one piece.
+/// the next character is not a digit and the preceding word is neither a known
+/// abbreviation nor a single letter. That keeps `3.99`, `p.m.`, `Dr.`, and
+/// `U.S.A.` in one piece, and still splits text typed without capitals.
 ///
 /// Closing quotes and brackets stay with their sentence, surrounding whitespace
 /// is trimmed, and empty pieces are dropped. This is the granularity streaming
@@ -89,7 +89,9 @@ fn closes_sentence(text: &str, index: usize, ch: char) -> bool {
         .find(|c| !c.is_whitespace())
     {
         None => true,
-        Some(next) if next.is_lowercase() || next.is_numeric() => false,
+        // 3.99, not 3. and 99.
+        Some(next) if next.is_numeric() => false,
+        // p.m., e.g., U.S.A. all end in a single letter.
         Some(_) => {
             let word = preceding_word(&text[..index]);
             word.chars().count() > 1 && !ABBREVIATIONS.contains(&word.to_lowercase().as_str())
@@ -228,6 +230,14 @@ mod sentence_tests {
         assert_eq!(
             sentences("see e.g. this one. Then stop."),
             vec!["see e.g. this one.", "Then stop."]
+        );
+    }
+
+    #[test]
+    fn text_without_capitals_still_splits() {
+        assert_eq!(
+            sentences("hello world. it costs $3.99 today. dr. smith agrees."),
+            vec!["hello world.", "it costs $3.99 today.", "dr. smith agrees."]
         );
     }
 
