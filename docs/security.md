@@ -83,9 +83,11 @@ openapi -> 404
 docs    -> 404
 info    -> 200
 ```
-- **No connection cap.** `server.limits.max_connections` parses and does nothing; the accept
-  loop belongs to `axum-server`. The header timeout and the rate limiter are the controls
-  that exist.
+- **Sockets are not capped; streaming sessions are.** `server.limits.max_connections`
+  bounds concurrent `/v1/tts/ws` and `/v1/stt/ws` sessions, which are the connections that
+  accumulate because they end when a document ends. A refused session gets `503
+  too_many_sessions` rather than waiting behind an unbounded queue. A cap on plain sockets
+  would need the accept loop, which `axum-server` owns.
 **A manifest name cannot leave the models directory.** A `name` of `../../etc/passwd`, an
 absolute path, or a name with a separator in it is refused at parse time, so a corrupted
 manifest cannot become an arbitrary file write. The manifest ships with the binary, so this

@@ -28,7 +28,10 @@ pub(crate) struct StreamRequest {
 
 /// Upgrade the connection and stream.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| run(socket, state))
+    let Some(permit) = state.open_session() else {
+        return crate::too_many_sessions();
+    };
+    ws.on_upgrade(move |socket| run(socket, state, permit))
 }
 
 /// Check a request and resolve the speed.
@@ -56,7 +59,14 @@ async fn first_message(socket: &mut WebSocket, limit: std::time::Duration) -> Op
     }
 }
 
-async fn run(mut socket: WebSocket, state: Arc<AppState>) {
+async fn run(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    // Held for the life of the socket and dropped with it, so the permit returns even if
+    // the client disappears mid-frame.
+    let _permit = permit;
     // A client that connects and says nothing must not hold the task open.
     let limit = std::time::Duration::from_millis(state.config().server.first_message_timeout_ms);
     let Some(first) = first_message(&mut socket, limit).await else {

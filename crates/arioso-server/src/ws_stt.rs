@@ -48,7 +48,10 @@ fn default_rate() -> u32 {
 
 /// Upgrade the connection and stream transcripts.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| run(socket, state))
+    let Some(permit) = state.open_session() else {
+        return crate::too_many_sessions();
+    };
+    ws.on_upgrade(move |socket| run(socket, state, permit))
 }
 
 /// Convert little-endian 16-bit PCM to samples.
@@ -76,7 +79,10 @@ async fn send(out: &mpsc::Sender<Message>, frame: serde_json::Value) {
     let _ = out.send(Message::Text(frame.to_string().into())).await;
 }
 
-async fn run(socket: WebSocket, state: Arc<AppState>) {
+async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::OwnedSemaphorePermit) {
+    // Held for the life of the socket and dropped with it, so the permit returns even if
+    // the client disappears mid-frame.
+    let _permit = permit;
     let (mut sink, mut stream) = socket.split();
     let (out, mut queued) = mpsc::channel::<Message>(QUEUE);
     let writer = tokio::spawn(async move {

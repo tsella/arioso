@@ -662,6 +662,21 @@ Notes on what this does and does not do:
 - This refuses work cheaply. It does not absorb a volumetric flood, and a reverse proxy is
   the tool for that.
 
+### Streaming sessions
+
+`server.limits.max_connections` bounds how many WebSocket sessions may be open at once.
+Measured with the limit at 1 and one silent session held open:
+
+```console
+$ python3 -c '...'
+second refused: 503
+```
+
+The refusal is a problem document with the code `too_many_sessions`. A queue would be
+kinder and worse: the caller would wait an unbounded time behind sessions that end when a
+document ends. A permit returns when the socket closes, including when the client
+disappears mid-frame.
+
 ### A client that never finishes asking
 
 `server.limits.header_timeout_ms` bounds how long a client may take to send its request

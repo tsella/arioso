@@ -84,6 +84,13 @@ pub struct AppState {
     limiter: RateLimiter,
     /// The bearer token, when one was configured and found in the environment.
     token: Option<String>,
+    /// Permits for long-lived streaming sessions.
+    ///
+    /// A socket that stays open for the length of a document is the resource that
+    /// accumulates: ordinary requests end, streams do not. `server.limits.max_connections`
+    /// bounds how many may be open at once, and a caller that finds none free is told so
+    /// rather than queued behind an unbounded wait.
+    sessions: Arc<tokio::sync::Semaphore>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -108,6 +115,9 @@ impl AppState {
         config_file: Option<&std::path::Path>,
     ) -> Result<Self, ServerError> {
         let models_dir = models_dir(&config);
+        let sessions = Arc::new(tokio::sync::Semaphore::new(
+            config.server.limits.max_connections,
+        ));
         let limiter = RateLimiter::new(
             config.server.limits.requests_per_second,
             config.server.limits.burst,
@@ -160,6 +170,7 @@ impl AppState {
             config_file,
             limiter,
             token,
+            sessions,
             manifest,
             models_dir,
         })
@@ -170,6 +181,11 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// A permit for one streaming session, or `None` when every permit is in use.
+    pub(crate) fn open_session(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.sessions).try_acquire_owned().ok()
+    }
+
     /// The bearer token this process requires, when one was configured.
     pub(crate) fn token(&self) -> Option<String> {
         self.token.clone()
@@ -945,6 +961,19 @@ async fn security_headers(
         axum::http::HeaderValue::from_static("DENY"),
     );
     response
+}
+
+/// Refuse a streaming session when every permit is in use.
+///
+/// A queue would be kinder and worse: the caller would wait an unbounded time behind
+/// sessions that end when a document ends. A refusal with a code lets the client decide.
+pub(crate) fn too_many_sessions() -> axum::response::Response {
+    ApiError::coded(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "too_many_sessions",
+        "every streaming session this server allows is in use; try again shortly",
+    )
+    .into_response()
 }
 
 /// Build the router.
@@ -2574,6 +2603,27 @@ mod tests {
             call(router(state.clone()), ask("/v1/info")).await.0,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn the_last_session_permit_is_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.server.limits.max_connections = 2;
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let first = state.open_session();
+        let second = state.open_session();
+        assert!(first.is_some() && second.is_some());
+        // The third finds nothing free rather than queueing behind the other two.
+        assert!(state.open_session().is_none());
+
+        // A session that ends returns its permit.
+        drop(first);
+        assert!(state.open_session().is_some());
     }
 
     #[tokio::test]
