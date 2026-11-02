@@ -183,11 +183,26 @@ fn download(config: &Config, id: &str) -> Result<()> {
 fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
-    let model = manifest
+    let voices: Vec<&ModelSpec> = manifest
         .models
         .iter()
-        .find(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
-        .context("the manifest holds no piper voice")?;
+        .filter(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
+        .collect();
+    let model = voices
+        .iter()
+        .find(|m| m.id == config.tts.voice || m.id.ends_with(&config.tts.voice))
+        .copied()
+        .with_context(|| {
+            let available = voices
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "no piper voice matches tts.voice {:?}; available: {available}",
+                config.tts.voice
+            )
+        })?;
     let file = |suffix: &str| {
         model
             .files
