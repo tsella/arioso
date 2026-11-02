@@ -662,6 +662,56 @@ pub async fn tls_config(
         })
 }
 
+/// Re-read the certificate pair when either file changes.
+///
+/// certbot renews on a timer. A renewal that needs a restart is a renewal that takes the
+/// service down the one time nobody is watching, so the pair is polled instead. The poll
+/// is a modification time check every thirty seconds: cheap enough to run forever, and
+/// far more predictable than an inotify watcher across the platforms this ships on.
+pub fn watch_certificates(
+    config: axum_server::tls_rustls::RustlsConfig,
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut seen = pair_stamp(&cert, &key);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let now = pair_stamp(&cert, &key);
+            if now == seen || now.is_none() {
+                continue;
+            }
+            match config.reload_from_pem_file(&cert, &key).await {
+                Ok(()) => {
+                    seen = now;
+                    tracing::info!(
+                        cert = %cert.display(),
+                        "reloaded the certificate"
+                    );
+                }
+                Err(error) => {
+                    // A half-written file during a renewal is normal; the next poll reads
+                    // it again. The old certificate keeps serving in the meantime.
+                    tracing::warn!(
+                        cert = %cert.display(),
+                        %error,
+                        "could not reload the certificate, keeping the one in use"
+                    );
+                }
+            }
+        }
+    })
+}
+
+/// The modification times of both files, or `None` when either is unreadable.
+fn pair_stamp(
+    cert: &std::path::Path,
+    key: &std::path::Path,
+) -> Option<(std::time::SystemTime, std::time::SystemTime)> {
+    let read = |path: &std::path::Path| std::fs::metadata(path).ok()?.modified().ok();
+    Some((read(cert)?, read(key)?))
+}
+
 /// Build the router.
 ///
 /// A disabled engine does not register its routes, so `stt.enabled: false` answers 404

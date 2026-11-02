@@ -231,6 +231,7 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
                 _ => anyhow::bail!("server.tls needs both cert and key"),
             };
             let config = arioso_server::tls_config(&cert, &key).await?;
+            let _reload = arioso_server::watch_certificates(config.clone(), cert, key);
             let addr: std::net::SocketAddr = bind
                 .parse()
                 .with_context(|| format!("server.bind {bind:?} is not an address"))?;

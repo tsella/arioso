@@ -588,6 +588,24 @@ The pair is re-read when either file's modification time changes, so a renewal t
 without a restart. A restart would work too, until the one time it is forgotten and the
 certificate expires while the service is up.
 
+Measured, with a running server and two generated pairs:
+
+```console
+$ echo | openssl s_client -connect 127.0.0.1:10197 2>/dev/null | openssl x509 -noout -subject
+subject=CN = first
+$ cp cert2.pem cert.pem; cp key2.pem key.pem
+$ sleep 40
+$ echo | openssl s_client -connect 127.0.0.1:10197 2>/dev/null | openssl x509 -noout -subject
+subject=CN = second
+```
+
+```console
+INFO arioso_server: reloaded the certificate cert=/tmp/arioso-tls/cert.pem
+```
+
+The poll runs every 30 seconds. A file caught half-written during a renewal logs a warning
+and keeps serving the certificate already in use, then succeeds on the next poll.
+
 ### What TLS does not do
 
 It encrypts the connection. It does not authenticate the caller, limit what they ask for,
