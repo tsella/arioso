@@ -123,13 +123,15 @@ impl PhonemeMap {
 
     /// Model input ids for a phoneme sequence.
     ///
-    /// Piper's convention: a begin symbol, then each known phoneme followed by
-    /// one pad, then an end symbol. Unknown phonemes are dropped rather than
-    /// padded, so a symbol the voice lacks cannot shift the alignment.
+    /// Piper's convention, as its `phonemes_to_ids` writes it: a begin symbol,
+    /// a pad, then each known phoneme followed by one pad, then an end symbol.
+    /// Unknown phonemes are dropped rather than padded, so a symbol the voice
+    /// lacks cannot shift the alignment.
     #[must_use]
     pub fn to_ids(&self, phonemes: &[&str]) -> Vec<u32> {
-        let mut ids = Vec::with_capacity(phonemes.len() * 2 + 2);
+        let mut ids = Vec::with_capacity(phonemes.len() * 2 + 3);
         ids.push(self.bos);
+        ids.push(self.pad);
         for phoneme in phonemes {
             if let Some(entry) = self.ids.get(*phoneme) {
                 ids.extend_from_slice(entry);

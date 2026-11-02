@@ -43,15 +43,15 @@ fn malformed_json_is_an_error() {
 fn ids_interleave_the_pad_and_are_bracketed() {
     let map = PhonemeMap::from_voice_config(MAP).expect("valid config");
     let ids = map.to_ids(&["h", "ə", "l", "oʊ"]);
-    // bos, then each phoneme followed by pad, then eos
-    assert_eq!(ids, vec![1, 20, 0, 59, 0, 55, 0, 71, 0, 2]);
+    // bos, pad, then each phoneme followed by pad, then eos
+    assert_eq!(ids, vec![1, 0, 20, 0, 59, 0, 55, 0, 71, 0, 2]);
 }
 
 #[test]
 fn unknown_phonemes_are_skipped_not_padded() {
     let map = PhonemeMap::from_voice_config(MAP).expect("valid config");
     let ids = map.to_ids(&["h", "x", "l"]);
-    assert_eq!(ids, vec![1, 20, 0, 55, 0, 2]);
+    assert_eq!(ids, vec![1, 0, 20, 0, 55, 0, 2]);
 }
 
 #[test]
@@ -59,5 +59,5 @@ fn a_phoneme_with_several_ids_keeps_them_in_order() {
     let map =
         PhonemeMap::from_voice_config(r#"{"phoneme_id_map":{"_":[0],"^":[1],"$":[2],"aɪ":[7,8]}}"#)
             .expect("valid config");
-    assert_eq!(map.to_ids(&["aɪ"]), vec![1, 7, 8, 0, 2]);
+    assert_eq!(map.to_ids(&["aɪ"]), vec![1, 0, 7, 8, 0, 2]);
 }
