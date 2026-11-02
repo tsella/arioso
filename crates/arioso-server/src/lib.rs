@@ -432,6 +432,20 @@ impl AppState {
         self.hear(engine, samples, rate)
     }
 
+    /// Load the transcription model without transcribing anything.
+    ///
+    /// The same slot the routes use, so warming is not a second engine that the first
+    /// real request would then have to replace.
+    pub(crate) fn warm_stt(&self) -> Result<(), String> {
+        let mut guard = self
+            .stt
+            .lock()
+            .map_err(|_| "the speech to text lock is poisoned".to_string())?;
+        self.ensure_engine(&mut guard)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// The engine, loaded on first use.
     fn ensure_engine<'a>(
         &'a self,
@@ -581,6 +595,25 @@ impl AppState {
         Ok((samples, rate))
     }
 
+    /// Load the configured voice without rendering anything.
+    ///
+    /// The first synthesis pays for the model load; a caller that knows it is about to
+    /// ask should be able to pay it earlier. Idempotent: a loaded voice is left alone.
+    pub(crate) fn warm_voice(&self) -> Result<(), String> {
+        let mut guard = self
+            .voice
+            .lock()
+            .map_err(|_| "the voice lock is poisoned".to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
+        let spec = self.voice_spec().map_err(|e| e.to_string())?;
+        let onnx = self.file_of(spec, ".onnx")?;
+        let config = self.file_of(spec, ".onnx.json")?;
+        *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
+        Ok(())
+    }
+
     /// Synthesize text one chunk at a time, handing each to `sink`.
     ///
     /// The sink runs while later chunks are still being synthesized, so a
@@ -685,6 +718,7 @@ impl ApiError {
         patch_config,
         start_download,
         delete_model,
+        warm_model,
         stop_server,
         abort_server,
         list_models,
@@ -1039,6 +1073,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}/download", post(start_download))
         .route("/v1/models/{id}", axum::routing::delete(delete_model))
+        .route("/v1/models/{id}/warm", post(warm_model))
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
         .route("/v1/voices", get(list_voices))
@@ -1835,6 +1870,96 @@ async fn delete_model(
         Json(serde_json::json!({ "id": id, "removed": removed })),
     )
         .into_response()
+}
+
+/// Load a model so the next request does not pay for the load.
+///
+/// Only the configured voice can be warmed: there is one voice slot, and loading a
+/// different model into it would change what the next request speaks. A model that is
+/// not installed is refused rather than fetched, because warming is not downloading.
+#[utoipa::path(
+    post,
+    path = "/v1/models/{id}/warm",
+    tag = "models",
+    summary = "Load a model without a request",
+    params(("id" = String, Path, description = "Model id")),
+    responses(
+        (status = 200, description = "The model is loaded", body = serde_json::Value),
+        (status = 404, description = "No such model", body = Problem),
+        (status = 409, description = "Not installed, or not the active voice", body = Problem)
+    )
+)]
+async fn warm_model(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(spec) = state.manifest.find(&id).cloned() else {
+        return ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "unknown_model",
+            format!("no model with id {id} in the catalog"),
+        )
+        .into_response();
+    };
+    if !state.is_installed(&spec) {
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "model_not_installed",
+            format!("{id} is not on disk; POST /v1/models/{id}/download first"),
+        )
+        .into_response();
+    }
+    if spec.kind == Kind::Tts {
+        let active = state.voice_spec().ok().map(|active| active.id.clone());
+        if active.as_deref() != Some(spec.id.as_str()) {
+            return ApiError::coded(
+                StatusCode::CONFLICT,
+                "not_active_voice",
+                "only the configured voice can be warmed; there is one voice slot",
+            )
+            .into_response();
+        }
+        return match state.warm_voice() {
+            Ok(()) => {
+                tracing::info!(model = %id, "model warmed");
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "id": id, "loaded": true })),
+                )
+                    .into_response()
+            }
+            Err(detail) => {
+                tracing::error!(model = %id, %detail, "could not warm the voice");
+                ApiError::coded(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "load_failed",
+                    "the voice could not be loaded; the server log has the detail",
+                )
+                .into_response()
+            }
+        };
+    }
+
+    // Speech to text loads one model, on first use, in the same slot the routes use.
+    match state.warm_stt() {
+        Ok(()) => {
+            tracing::info!(model = %id, "model warmed");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "id": id, "loaded": true })),
+            )
+                .into_response()
+        }
+        Err(detail) => {
+            tracing::error!(model = %id, %detail, "could not warm the speech engine");
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "load_failed",
+                "the engine could not be loaded; the server log has the detail",
+            )
+            .into_response()
+        }
+    }
 }
 
 /// Strings under one key of a manifest's free-form metadata.
@@ -2987,6 +3112,41 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["downloaded"], 40, "the running download was restarted");
+    }
+
+    #[tokio::test]
+    async fn warming_a_model_that_is_not_on_disk_is_refused() {
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/models/{id}/warm"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "model_not_installed");
+    }
+
+    #[tokio::test]
+    async fn warming_an_unknown_model_is_a_404() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/models/nope/warm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "unknown_model");
     }
 
     #[tokio::test]
