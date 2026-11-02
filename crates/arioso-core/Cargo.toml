@@ -1,6 +1,6 @@
 [package]
 name = "arioso-core"
-description = "Shared types and text handling for Arioso"
+description = "Shared types and text handling for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

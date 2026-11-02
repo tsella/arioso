@@ -319,7 +319,7 @@ sherpa-whisper-tiny-en             stt     98.8 MiB  MIT        installed
 ### The dictionary on the way back
 
 The reverse map compares sounds, not letters, because the engine never reproduces a
-respelling exactly. Measured, both directions synthesized by Arioso, with a dictionary
+respelling exactly. Measured, both directions synthesized by arioso, with a dictionary
 entry for the name:
 
 ```console

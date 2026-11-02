@@ -1,4 +1,4 @@
-//! HTTP surface for Arioso.
+//! HTTP surface for arioso.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

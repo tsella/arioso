@@ -1,4 +1,4 @@
-//! Shared text handling for Arioso.
+//! Shared text handling for arioso.
 
 pub mod chunk;
 pub mod dictionary;

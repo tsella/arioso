@@ -1,6 +1,6 @@
 [package]
 name = "arioso-config"
-description = "Configuration model for Arioso"
+description = "Configuration model for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use arioso_config::Config;
 
-/// Platform data directory for Arioso, before any config override.
+/// Platform data directory for arioso, before any config override.
 #[must_use]
 pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "windows") {

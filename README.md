@@ -1,11 +1,11 @@
-# Arioso
+# arioso
 
 [![ci](https://github.com/tsella/arioso/actions/workflows/ci.yml/badge.svg)](https://github.com/tsella/arioso/actions/workflows/ci.yml)
 
 Speech out of text, and text out of speech, on your own machine. No account, no API key,
 no audio leaving the box.
 
-Arioso is a Rust library and a single binary. It speaks with Piper voices and listens with
+arioso is a Rust library and a single binary. It speaks with Piper voices and listens with
 Whisper, streams both ways over WebSocket, and gives you a place to correct the
 pronunciation of your own names in both directions.
 
@@ -23,7 +23,7 @@ length moves by a few hundredths between runs, because the model samples noise.
 
 Cloud text to speech is good and fast, and it sends every sentence to someone else's
 server. That is fine for a shopping list and wrong for a support call, a medical note, or
-anything under a confidentiality agreement. Arioso keeps the sentence on the machine that
+anything under a confidentiality agreement. arioso keeps the sentence on the machine that
 read it.
 
 It is not a cloud service in a box. It runs a 63 MiB voice on the CPU, at about a twelfth

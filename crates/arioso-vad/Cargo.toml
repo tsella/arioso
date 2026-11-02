@@ -1,6 +1,6 @@
 [package]
 name = "arioso-vad"
-description = "Voice activity detection and utterance segmentation for Arioso"
+description = "Voice activity detection and utterance segmentation for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

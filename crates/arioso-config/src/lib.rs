@@ -1,4 +1,4 @@
-//! Configuration model for Arioso.
+//! Configuration model for arioso.
 //!
 //! Precedence, lowest to highest: compiled defaults, the JSON file, environment
 //! variables with the `ARIOSO_` prefix.
@@ -12,7 +12,7 @@ use thiserror::Error;
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Everything Arioso reads at startup.
+/// Everything arioso reads at startup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {

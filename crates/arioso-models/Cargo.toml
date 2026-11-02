@@ -1,6 +1,6 @@
 [package]
 name = "arioso-models"
-description = "Model manifest, cache layout, and resumable downloader for Arioso"
+description = "Model manifest, cache layout, and resumable downloader for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

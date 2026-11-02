@@ -1,4 +1,4 @@
-# Arioso: Product Requirements Document
+# arioso: Product Requirements Document
 
 Version 0.2 (draft for review) · 1 November 2026 · Owner: Tom Sella
 
@@ -6,7 +6,7 @@ Version 0.2 (draft for review) · 1 November 2026 · Owner: Tom Sella
 
 ## 1. Summary
 
-Arioso is a Rust library and standalone server that gives any application local
+arioso is a Rust library and standalone server that gives any application local
 text to speech and speech to text, on macOS, Linux, Windows, iOS, and Android,
 with no cloud dependency.
 
@@ -710,7 +710,7 @@ rule. Before this section the same command wrote a 44-byte WAV and warned.
 
 **Measured limit, found on the first round trip.** The reverse map in F14.9 matches a
 spoken form exactly, and real speech to text does not reproduce it exactly. Two runs, both
-synthesized by Arioso and read back by whisper tiny.en:
+synthesized by arioso and read back by whisper tiny.en:
 
 | Spoken form | Whisper wrote | Corrected |
 | --- | --- | --- |

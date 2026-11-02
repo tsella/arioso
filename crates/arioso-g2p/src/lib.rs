@@ -1,4 +1,4 @@
-//! Grapheme to phoneme conversion for Arioso.
+//! Grapheme to phoneme conversion for arioso.
 
 pub mod arpabet;
 pub mod cmudict;

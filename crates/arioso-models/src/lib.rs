@@ -1,4 +1,4 @@
-//! Model manifest, cache layout, and resumable downloads for Arioso.
+//! Model manifest, cache layout, and resumable downloads for arioso.
 
 pub mod cache;
 pub mod download;

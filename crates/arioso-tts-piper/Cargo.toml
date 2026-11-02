@@ -1,6 +1,6 @@
 [package]
 name = "arioso-tts-piper"
-description = "Piper voice inference for Arioso"
+description = "Piper voice inference for arioso"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
