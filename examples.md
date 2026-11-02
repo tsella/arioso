@@ -661,3 +661,22 @@ Notes on what this does and does not do:
   it the first thing a flood uses.
 - This refuses work cheaply. It does not absorb a volumetric flood, and a reverse proxy is
   the tool for that.
+
+### A client that never finishes asking
+
+`server.limits.header_timeout_ms` bounds how long a client may take to send its request
+headers. Without it, a socket that opens and sends one byte a minute holds a task for as
+long as it likes, which is the cheapest denial of service there is.
+
+Measured on the plain listener with a 2000 ms limit, sending a request line and two
+headers, then nothing:
+
+```console
+$ python3 -c 'import socket,time; s=socket.create_connection(("127.0.0.1",10196));
+s.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n"); t=time.time();
+print(s.recv(100), time.time()-t)'
+b'' 2.0007
+```
+
+A normal request on the same server still answers `200`, so the limit costs a slow client
+nothing it was not already spending.

@@ -109,6 +109,7 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "hyper-util",
  "serde_json",
  "tokio",
  "tracing",

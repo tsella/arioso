@@ -221,6 +221,7 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
     let bind = config.server.bind.clone();
 
     let tls = config.server.tls.clone();
+    let header_timeout = config.server.limits.header_timeout_ms;
 
     tokio::runtime::Runtime::new()?.block_on(async move {
         let router = arioso_server::router(state);
@@ -236,19 +237,32 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
                 .parse()
                 .with_context(|| format!("server.bind {bind:?} is not an address"))?;
             println!("listening on https://{bind}");
-            axum_server::bind_rustls(addr, config)
+            let mut server = axum_server::bind_rustls(addr, config);
+            // A client that opens a socket and never finishes its headers holds a task for
+            // as long as it likes. The timeout is the difference between a slow client and
+            // a cheap denial of service.
+            server
+                .http_builder()
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_millis(header_timeout));
+            server
                 .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         } else {
-            let listener = tokio::net::TcpListener::bind(&bind)
-                .await
-                .with_context(|| format!("binding {bind}"))?;
+            let addr: std::net::SocketAddr = bind
+                .parse()
+                .with_context(|| format!("server.bind {bind:?} is not an address"))?;
             println!("listening on http://{bind}");
-            axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await?;
+            let mut server = axum_server::bind(addr);
+            server
+                .http_builder()
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_millis(header_timeout));
+            server
+                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await?;
         }
         Ok::<(), anyhow::Error>(())
     })
