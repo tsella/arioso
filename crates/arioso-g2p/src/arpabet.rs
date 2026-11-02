@@ -4,9 +4,9 @@
 //! `EY` is `e` then `ɪ`, `CH` is `t` then `ʃ`. Stress is its own symbol, placed
 //! before the vowel it marks.
 //!
-//! Two choices are judgement calls, kept here so golden audio can settle them:
-//! `ER` is `ɚ` when unstressed and `ɜ` plus `ɹ` when stressed, and vowel length
-//! is not written, because CMUdict carries stress rather than duration.
+//! The table was checked against espeak-ng through Piper's own bridge, which is
+//! the phonemizer these voices were trained with. Two of its habits are copied:
+//! stressed `ER` is `ɜ` with no following `ɹ`, and unstressed `ER` is `ɚ`.
 
 /// Symbols for one ARPAbet token such as `AH0`.
 #[must_use]
@@ -61,7 +61,7 @@ fn symbols(base: &str, stress: Option<u8>) -> &'static [&'static str] {
         "DH" => &["ð"],
         "EH" => &["ɛ"],
         "ER" if stress == Some(0) => &["ɚ"],
-        "ER" => &["ɜ", "ɹ"],
+        "ER" => &["ɜ"],
         "EY" => &["e", "ɪ"],
         "F" => &["f"],
         "G" => &["ɡ"],
