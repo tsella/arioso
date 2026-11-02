@@ -1443,7 +1443,17 @@ async fn stop_server(State(state): State<Arc<AppState>>) -> Response {
         this when a stuck request must not be waited for.",
     responses((status = 202, description = "The process is ending"))
 )]
-async fn abort_server() -> Response {
+async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
+    if state.handle().is_none() {
+        // The same guard as stop, and for a sharper reason: an embedded router has no
+        // accept loop to end, so exiting here would kill the process that hosts it.
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "no_accept_loop",
+            "this process is not serving, so there is nothing to abort",
+        )
+        .into_response();
+    }
     tracing::warn!("aborting on request");
     // The response has to leave the socket before the socket closes, so the exit happens
     // in a task that runs after this one returns.
