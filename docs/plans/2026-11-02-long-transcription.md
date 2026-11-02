@@ -243,3 +243,79 @@ share is unmeasured rather than absent.
 
 Microphone audio, several speakers, overlapping speech, languages other than English, and
 streaming. Each is a different run, and the plan's original scope statement stands.
+
+## Second run: contemporary speech, and a larger model
+
+The first run used a novel from 1895 and the smallest model tier. Both are the hardest case
+and the weakest engine, so the 8.79 percent describes a corner. This run changes both.
+
+### Corpus
+
+*Hacker Public Radio*, episode 4001, "HPR Community News for November 2023", published
+under CC BY-SA. The first 5,761 words of the episode's transcript, 30,668 characters, read
+as written including the disfluencies: `um`, `uh`, `yeah`, and several speakers
+interrupting each other. This is how people actually talk, which is the point.
+
+One correction worth recording: the first attempt at contemporary text was Wikipedia. Its
+plaintext extracts carry LaTeX (`{\displaystyle ...}`) and citation markers, and the voice
+read that markup aloud, so the reference and the audio disagreed by construction. The run
+scored 18.53 percent and the number was meaningless. A corpus has to be checked for
+markup before it is spoken, not after.
+
+The episode's own transcript is the reference, and it is itself machine-generated. Its
+errors are baked into the ground truth here, which caps how low a real error rate can score
+and is a reason to read the absolute numbers as a comparison between models rather than as
+a statement about the engine alone.
+
+### Models
+
+`small.en` is not in the catalog; the catalog offers tiny and base. The three files
+(358 MiB) were fetched directly and added to a local manifest, with the SHA-256 of each file
+computed from the download rather than copied from a page.
+
+### Results
+
+Same audio, same voice, same windowing, two models:
+
+| model | WER | substitutions | insertions | deletions | wall clock | real time factor |
+| --- | --- | --- | --- | --- | --- | --- |
+| `base.en` | **6.99%** | 295 | 39 | 70 | 428 s | 0.26 |
+| `small.en` | 10.93% | 250 | 32 | 350 | 1,238 s | 0.75 |
+
+The larger model is worse by this measure, and the reason is visible in the columns: it
+makes 45 fewer substitutions and 280 more deletions. It is not mishearing more words; it is
+leaving more out. Its output is 5,464 tokens against the reference's 5,782 and base's
+5,751.
+
+What it drops is small words, not just fillers: `a` 12 times, `the` 10, `i` 9, `you` 9,
+`and` 8. Only 41 of its 350 deletions are disfluencies. Word error rate counts a dropped
+`the` the same as a wrong one, so the score follows the omissions.
+
+Per window the loss is small and even, which is why this is not a windowing artifact:
+three separate 29-second slices gave 110/110, 104/98 and 100/96 words for base and small.
+Uniformly a few words fewer, not a collapse at one boundary.
+
+Cost: 2.9 times the wall clock and 2.2 times the memory for a worse score on this corpus.
+
+### What the two runs say together
+
+| corpus | model | WER |
+| --- | --- | --- |
+| 1895 novel | `base.en` | 8.79% |
+| podcast, 2023 | `base.en` | 6.99% |
+| podcast, 2023 | `small.en` | 10.93% |
+| 1895 novel | `small.en` | not run |
+
+Contemporary speech scores better than the novel with the same engine, which is what the
+vocabulary analysis predicted. The larger model does not help on this audio, and a reader
+who wants fewer wrong words rather than fewer missing words might still prefer it: 250
+substitutions against 295.
+
+The missing cell is the honest gap. Without the novel through `small.en`, the interaction
+between corpus and model size is measured on one side only, and the claim "small.en is
+worse" is scoped to podcast speech rather than to the engine.
+
+A model that omits content is also a correctness risk beyond the score: a caller that
+transcribes a meeting and trusts the text cannot tell which sentences were skipped. If the
+larger tier is ever offered, the catalog should say what this run found rather than imply
+that bigger is better.
