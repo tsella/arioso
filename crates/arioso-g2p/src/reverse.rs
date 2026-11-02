@@ -17,6 +17,9 @@ use crate::{arpabet, cmudict::CmuDict, lts};
 /// How different two pronunciations may be and still count as the same words.
 const TOLERANCE: f32 = 0.4;
 
+/// Added to a span's score for each word more or fewer than the form has.
+const WORD_MISMATCH_PENALTY: f32 = 0.1;
+
 /// Shortest spoken form worth matching by sound. Below this, one edit is a quarter of
 /// the word and everything matches everything.
 const MIN_PHONEMES: usize = 4;
@@ -37,7 +40,7 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
     let mut forms: Vec<(Vec<&'static str>, usize, &str)> = Vec::new();
     for entry in user.entries() {
         for form in entry.forms() {
-            let phonemes = pronounce(form, cmu);
+            let phonemes = pronounce_phrase(form, cmu);
             let words = form.split_whitespace().count().max(1);
             if phonemes.len() >= MIN_PHONEMES {
                 forms.push((phonemes, words, entry.term.as_str()));
@@ -56,12 +59,14 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
 
     // Every candidate match, scored. The closest one wins its span, so a window that
     // happens to contain the form cannot beat the form itself just by coming first.
-    let mut candidates: Vec<(f32, usize, usize, &str)> = Vec::new();
+    // Every candidate span, scored. A span with the wrong number of words is not
+    // rejected, because the engine does split and merge words, but it carries a penalty
+    // so it only wins when nothing else fits. Without the penalty, "is a Rio so" beats
+    // "a Rio so" for the form "ah ree oh so" and eats a word that was really spoken.
+    let mut candidates: Vec<(f32, usize, usize, usize, &str)> = Vec::new();
     for (form, form_words, term) in &forms {
         let allowed = (form.len() as f32 * TOLERANCE).max(1.0);
         for index in 0..words.len() {
-            // A word may have been split or merged by the engine, so try one word
-            // either side of the form's length.
             for width in [*form_words, form_words.saturating_sub(1), form_words + 1] {
                 if width == 0 || index + width > words.len() {
                     continue;
@@ -73,24 +78,29 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
                 if heard.is_empty() {
                     continue;
                 }
-                let score = distance(form, &heard) as f32;
-                if score <= allowed {
-                    candidates.push((score / form.len() as f32, index, index + width, term));
+                let distance = distance(form, &heard) as f32;
+                if distance > allowed {
+                    continue;
                 }
+                let off_by = width.abs_diff(*form_words);
+                let score = distance / form.len() as f32 + off_by as f32 * WORD_MISMATCH_PENALTY;
+                candidates.push((score, off_by, index, index + width, term));
             }
         }
     }
     candidates.sort_by(|a, b| {
-        // Best score first; on a tie the longer span wins, because an exact match
-        // over two words explains more than an exact match over one of them.
+        // Score, then the span whose word count matches the form, then the longer one.
+        // The second key matters: "is a Rio so" and "a Rio so" can score the same, and
+        // picking the longer span swallows a word that was really spoken.
         a.0.total_cmp(&b.0)
-            .then((b.2 - b.1).cmp(&(a.2 - a.1)))
             .then(a.1.cmp(&b.1))
+            .then((b.3 - b.2).cmp(&(a.3 - a.2)))
+            .then(a.2.cmp(&b.2))
     });
 
     let mut taken = vec![false; words.len()];
     let mut replacements: Vec<(usize, usize, &str)> = Vec::new();
-    for (_, start, end, term) in candidates {
+    for (_, _, start, end, term) in candidates {
         if taken[start..end].iter().any(|used| *used) {
             continue;
         }
@@ -136,6 +146,19 @@ fn words(text: &str) -> Vec<(usize, usize)> {
     }
     if let Some(begin) = start {
         out.push((begin, text.len()));
+    }
+    out
+}
+
+/// The phonemes of a written form, word by word.
+///
+/// A form of several words must be pronounced the same way the transcript is: each
+/// word on its own. Smashing them together first sends the whole string to the spelling
+/// rules, which read "ah ree oh so" as the letters of one invented word.
+fn pronounce_phrase(text: &str, cmu: &CmuDict) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for word in text.split_whitespace() {
+        out.extend(pronounce(word, cmu));
     }
     out
 }
@@ -203,6 +226,15 @@ KUBERNETES  K UW2 B ER0 N EH1 T IY0 Z
 THE  DH AH0
 CAT  K AE1 T
 SAT  S AE1 T
+RIO  R IY1 OW0
+AH  AA1
+REE  R IY1
+OH  OW1
+SO  S OW1
+IT  IH1 T
+IS  IH1 Z
+THAT  DH AE1 T
+SPEAKS  S P IY1 K S
 ";
 
     fn cmu() -> CmuDict {
@@ -228,6 +260,16 @@ SAT  S AE1 T
         let dictionary = user(TOM);
         let out = correct(&dictionary, &cmu(), "Tonseller built it");
         assert_eq!(out, "Tom Sella built it");
+    }
+
+    #[test]
+    fn a_multi_word_form_is_pronounced_word_by_word() {
+        // Regression: the whole form used to go through the spelling rules as one
+        // string, so "oh ree" was read as the letters of "ohree" and never matched
+        // the two words the engine actually wrote.
+        let dictionary = user(r#"{"version":1,"entries":[{"term":"Oree","spoken":["oh ree"]}]}"#);
+        let out = correct(&dictionary, &cmu(), "the oh ree is here");
+        assert_eq!(out, "the Oree is here");
     }
 
     #[test]

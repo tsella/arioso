@@ -191,6 +191,44 @@
         "quality": "medium",
         "dataset": "CC BY 4.0 dataset"
       }
+    },
+    {
+      "id": "sherpa-whisper-base-en",
+      "kind": "stt",
+      "engine": "sherpa",
+      "mode": "batch",
+      "version": "2024.07",
+      "license": "MIT",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "base.en-encoder.int8.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/main/base.en-encoder.int8.onnx",
+          "sha256": "ef6b936f4c9b1d90a3b68634b60c4ed8576b26172b33c2535ec0e933c9edb823",
+          "size": 29120534
+        },
+        {
+          "name": "base.en-decoder.int8.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/main/base.en-decoder.int8.onnx",
+          "sha256": "f7162ad6db2dbef16cfaeaa7f945b9d7dd9c1b8d472f6aca82f2273d185e4d41",
+          "size": 130669978
+        },
+        {
+          "name": "base.en-tokens.txt",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/main/base.en-tokens.txt",
+          "sha256": "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930",
+          "size": 835554
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "languages": [
+          "en"
+        ],
+        "model_type": "whisper",
+        "quantization": "int8",
+        "license_note": "MIT, inherited from OpenAI Whisper"
+      }
     }
   ]
 }

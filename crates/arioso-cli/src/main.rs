@@ -499,6 +499,40 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     }
 }
 
+/// Load the speech to text model the config names.
+///
+/// The manifest names the three files, so a models directory holding more than one
+/// model still loads the right one. Without a manifest entry the loader falls back to
+/// searching, which refuses a directory holding files from two models.
+fn load_engine(
+    dir: &Path,
+    model: &str,
+    language: Option<&str>,
+    threads: usize,
+) -> Result<arioso_stt_sherpa::Whisper> {
+    let manifest_path = dir.join("manifest.json");
+    if let Ok(text) = std::fs::read_to_string(&manifest_path) {
+        if let Ok(manifest) = arioso_models::Manifest::parse(text.as_bytes()) {
+            if let Some(spec) = manifest.models.iter().find(|spec| spec.id == model) {
+                let file = |needle: &str| {
+                    spec.files
+                        .iter()
+                        .find(|f| f.name.contains(needle))
+                        .map(|f| dir.join(&f.name))
+                };
+                if let (Some(encoder), Some(decoder), Some(tokens)) =
+                    (file("encoder"), file("decoder"), file("tokens"))
+                {
+                    return Ok(arioso_stt_sherpa::Whisper::load_files(
+                        dir, &encoder, &decoder, &tokens, language, threads,
+                    )?);
+                }
+            }
+        }
+    }
+    Ok(arioso_stt_sherpa::Whisper::load(dir, language, threads)?)
+}
+
 /// Transcribe a file, with the user dictionary applied to the result.
 fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> Result<()> {
     if !config.stt.enabled {
@@ -517,14 +551,15 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
     // fight each other.
     let threads =
         std::thread::available_parallelism().map_or(4, |count| (count.get() / 2).clamp(1, 8));
-    let engine = arioso_stt_sherpa::Whisper::load(&dir, language, threads).with_context(|| {
-        format!(
-            "loading {} from {}. Run `arioso models download {}` if it is missing.",
-            config.stt.batch_model,
-            dir.display(),
-            config.stt.batch_model
-        )
-    })?;
+    let engine =
+        load_engine(&dir, &config.stt.batch_model, language, threads).with_context(|| {
+            format!(
+                "loading {} from {}. Run `arioso models download {}` if it is missing.",
+                config.stt.batch_model,
+                dir.display(),
+                config.stt.batch_model
+            )
+        })?;
     let transcript = engine.transcribe(&samples, rate)?;
 
     // The dictionary runs backwards as well: every spoken form maps to its term, so a

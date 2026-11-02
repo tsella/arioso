@@ -41,7 +41,33 @@ fn a_sentence_survives_the_round_trip() {
         .unwrap();
     assert!(!samples.is_empty(), "the voice said nothing");
 
-    let engine = Whisper::load(&dir, Some("en"), 2).unwrap();
+    // The directory may hold more than one model, so name the files from the manifest
+    // the way the server does.
+    let manifest =
+        arioso_models::Manifest::parse(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    let spec = manifest
+        .models
+        .iter()
+        .find(|spec| {
+            spec.kind == arioso_models::Kind::Stt && dir.join(&spec.files[0].name).exists()
+        })
+        .expect("a speech to text model in the directory");
+    let file = |needle: &str| {
+        spec.files
+            .iter()
+            .find(|f| f.name.contains(needle))
+            .map(|f| dir.join(&f.name))
+            .unwrap()
+    };
+    let engine = Whisper::load_files(
+        &dir,
+        &file("encoder"),
+        &file("decoder"),
+        &file("tokens"),
+        Some("en"),
+        2,
+    )
+    .unwrap();
     let transcript = engine.transcribe(&samples, voice.sample_rate()).unwrap();
     let heard = transcript.text.to_lowercase();
     let heard = heard.trim_end_matches('.');

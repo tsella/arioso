@@ -193,10 +193,29 @@ impl AppState {
             };
             let threads = std::thread::available_parallelism()
                 .map_or(4, |count| (count.get() / 2).clamp(1, 8));
-            *slot = Some(
-                arioso_stt_sherpa::Whisper::load(&self.models_dir, language, threads)
-                    .map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?,
-            );
+            // The manifest names the files, so a directory holding two models still
+            // loads the one the config asks for.
+            let file = |needle: &str| {
+                spec.files
+                    .iter()
+                    .find(|f| f.name.contains(needle))
+                    .map(|f| self.models_dir.join(&f.name))
+            };
+            let engine = match (file("encoder"), file("decoder"), file("tokens")) {
+                (Some(encoder), Some(decoder), Some(tokens)) => {
+                    arioso_stt_sherpa::Whisper::load_files(
+                        &self.models_dir,
+                        &encoder,
+                        &decoder,
+                        &tokens,
+                        language,
+                        threads,
+                    )
+                }
+                _ => arioso_stt_sherpa::Whisper::load(&self.models_dir, language, threads),
+            };
+            *slot =
+                Some(engine.map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?);
         }
         slot.as_ref()
             .ok_or_else(|| SttFailure::Engine("the engine failed to load".to_string()))
@@ -718,11 +737,13 @@ mod tests {
         let (status, body) = post_stt(state, "audio/wav", wav).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "model_not_installed");
+        // Named from the config, so the test does not pin the default model id.
         assert!(
             body["detail"]
                 .as_str()
                 .unwrap()
-                .contains("sherpa-whisper-tiny-en")
+                .contains(&Config::default().stt.batch_model),
+            "{body}"
         );
     }
 

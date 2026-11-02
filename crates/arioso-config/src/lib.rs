@@ -174,9 +174,11 @@ impl Default for Stt {
         Self {
             enabled: true,
             engine: "sherpa".into(),
-            // The only speech to text model in the catalog. The PRD named whisper
-            // base; tiny is 103 MiB against 208, and proves the path on a laptop.
-            batch_model: "sherpa-whisper-tiny-en".into(),
+            // Base, not tiny: measured on the dictionary round trip, tiny wrote
+            // "Tonseller built REO so" where base wrote "Tom Sella built a Rio so",
+            // and the phonetic correction then swallowed the word "built". The extra
+            // 57 MiB buys a transcript that is actually right.
+            batch_model: "sherpa-whisper-base-en".into(),
             stream_model: "sherpa-zipformer-en".into(),
             language: "auto".into(),
             partials: true,

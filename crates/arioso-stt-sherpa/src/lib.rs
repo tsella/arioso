@@ -27,6 +27,16 @@ pub enum SttError {
     /// The recognizer refused the configuration.
     #[error("the recognizer could not load {}", .0.display())]
     Load(PathBuf),
+    /// The directory holds files from more than one model.
+    #[error("{dir} holds files from more than one model: {encoder} and {decoder}", dir = .dir.display())]
+    Mixed {
+        /// Directory that was searched.
+        dir: PathBuf,
+        /// Encoder that was found.
+        encoder: String,
+        /// Decoder that was found.
+        decoder: String,
+    },
     /// There was no audio to transcribe.
     #[error("the audio is empty")]
     EmptyAudio,
@@ -74,7 +84,43 @@ impl Whisper {
             find(dir, "decoder", ".onnx").ok_or_else(|| not_a_model(dir, "a decoder *.onnx"))?;
         let tokens =
             find(dir, "tokens", ".txt").ok_or_else(|| not_a_model(dir, "a *tokens.txt"))?;
+        // A directory can hold more than one model, and the search picks each file on
+        // its own. A tiny encoder with a base decoder loads and then fails inside the
+        // graph, so refuse the pair rather than hand it to the engine.
+        let prefix = |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.split('-').next())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let (a, b, c) = (prefix(&encoder), prefix(&decoder), prefix(&tokens));
+        if a != b || b != c {
+            return Err(SttError::Mixed {
+                dir: dir.to_owned(),
+                encoder: encoder.display().to_string(),
+                decoder: decoder.display().to_string(),
+            });
+        }
+        Self::load_files(dir, &encoder, &decoder, &tokens, language, threads)
+    }
 
+    /// Load a named set of files, for a directory that holds more than one model.
+    ///
+    /// The manifest names the three files, so a caller that has it does not depend on
+    /// the directory holding only one model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SttError::Load`] when the recognizer refuses the configuration.
+    pub fn load_files(
+        dir: &Path,
+        encoder: &Path,
+        decoder: &Path,
+        tokens: &Path,
+        language: Option<&str>,
+        threads: usize,
+    ) -> Result<Self, SttError> {
         let config = OfflineRecognizerConfig {
             model_config: OfflineModelConfig {
                 whisper: OfflineWhisperModelConfig {
@@ -229,6 +275,16 @@ mod tests {
         let error = Whisper::load(dir.path(), Some("en"), 1).unwrap_err();
         assert!(matches!(error, SttError::NotAModel { .. }));
         assert!(error.to_string().contains("encoder"), "{error}");
+    }
+
+    #[test]
+    fn files_from_two_models_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiny.en-encoder.int8.onnx"), b"").unwrap();
+        std::fs::write(dir.path().join("base.en-decoder.int8.onnx"), b"").unwrap();
+        std::fs::write(dir.path().join("tiny.en-tokens.txt"), b"").unwrap();
+        let error = Whisper::load(dir.path(), Some("en"), 1).unwrap_err();
+        assert!(matches!(error, SttError::Mixed { .. }), "{error}");
     }
 
     #[test]

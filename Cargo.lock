@@ -183,6 +183,7 @@ version = "0.1.0"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
+ "arioso-models",
  "arioso-tts-piper",
  "sherpa-onnx",
  "tempfile",
