@@ -87,7 +87,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arioso-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arioso-config",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-g2p"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arioso-core",
  "serde_json",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-models"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arioso-config",
  "ed25519-dalek",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arioso-config",
  "arioso-core",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-stt-sherpa"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-tts-piper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-vad"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "assert-json-diff"
