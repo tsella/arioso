@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arioso_config::Config;
-use arioso_core::chunk_text;
+use arioso_core::{chunk_text, sentences};
 use arioso_g2p::{CmuDict, arpabet};
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_piper::{PiperVoice, wav};
@@ -16,8 +16,12 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod ws;
+
+pub use ws::handler as ws_handler;
+
 /// Longest text one synthesis request accepts.
-const MAX_TEXT_CHARS: usize = 4_000;
+pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
 /// Chunk size handed to the voice, in characters.
 const SYNTHESIS_CHUNK: usize = 300;
 
@@ -87,6 +91,29 @@ impl AppState {
 
     /// Synthesize text, loading the voice on first use.
     fn render(&self, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+        let mut rate = 0;
+        let mut samples = Vec::new();
+        self.render_stream(text, speed, |chunk, chunk_rate| {
+            rate = chunk_rate;
+            samples.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        if samples.is_empty() {
+            return Err("nothing to say: none of the words are in the dictionary".into());
+        }
+        Ok((samples, rate))
+    }
+
+    /// Synthesize text one chunk at a time, handing each to `sink`.
+    ///
+    /// The sink runs while later chunks are still being synthesized, so a
+    /// caller can send audio before the whole text is done.
+    pub(crate) fn render_stream(
+        &self,
+        text: &str,
+        speed: f32,
+        mut sink: impl FnMut(&[f32], u32) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut guard = self
             .voice
             .lock()
@@ -100,33 +127,32 @@ impl AppState {
         let voice = guard.as_mut().ok_or("voice failed to load")?;
         voice.set_speed(speed);
 
-        let mut samples = Vec::new();
-        for chunk in chunk_text(text, SYNTHESIS_CHUNK) {
-            let mut symbols: Vec<&str> = Vec::new();
-            for word in chunk
-                .split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
-            {
-                let cleaned: String = word
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == '\'')
-                    .collect::<String>()
-                    .to_lowercase();
-                if let Some(pronunciations) = self.dictionary.lookup(&cleaned) {
-                    if !symbols.is_empty() {
-                        symbols.push(" ");
+        for sentence in sentences(text) {
+            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+                let mut symbols: Vec<&str> = Vec::new();
+                for word in chunk.split(|c: char| {
+                    c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')
+                }) {
+                    let cleaned: String = word
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect::<String>()
+                        .to_lowercase();
+                    if let Some(pronunciations) = self.dictionary.lookup(&cleaned) {
+                        if !symbols.is_empty() {
+                            symbols.push(" ");
+                        }
+                        symbols.extend(arpabet::to_ipa(&pronunciations[0]));
                     }
-                    symbols.extend(arpabet::to_ipa(&pronunciations[0]));
                 }
+                if symbols.is_empty() {
+                    continue;
+                }
+                let audio = voice.synthesize(&symbols).map_err(|e| e.to_string())?;
+                sink(&audio, voice.sample_rate())?;
             }
-            if symbols.is_empty() {
-                continue;
-            }
-            samples.extend(voice.synthesize(&symbols).map_err(|e| e.to_string())?);
         }
-        if samples.is_empty() {
-            return Err("nothing to say: none of the words are in the dictionary".into());
-        }
-        Ok((samples, voice.sample_rate()))
+        Ok(())
     }
 }
 
@@ -191,6 +217,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(readyz))
         .route("/v1/models", get(list_models))
         .route("/v1/tts", post(synthesize))
+        .route("/v1/tts/ws", get(ws_handler))
         .with_state(state)
 }
 
