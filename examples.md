@@ -288,7 +288,50 @@ dictionary  4 entries from /tmp/dict-lts.json
 ok
 ```
 
-## 11. Models
+## 11. Read a file back
+
+Synthesize a sentence, then transcribe it. This is the whole loop in two commands.
+
+```console
+$ arioso say "the quick brown fox jumps over the lazy dog" --out round.wav
+wrote round.wav (2.67 s at 22050 Hz)
+
+$ arioso transcribe round.wav
+The quick brown fox jumps over the lazy dog.
+
+$ arioso transcribe round.wav --json
+{"seconds":2.67,"text":"The quick brown fox jumps over the lazy dog."}
+```
+
+The engine takes the rate from the file, so a 22.05 kHz voice recording needs no
+conversion. It took 1.58 s of wall clock to transcribe 2.67 s of audio, model load
+included, on four cores with no GPU.
+
+The catalog now holds both models:
+
+```console
+$ arioso models list
+id                                 kind        size  license    state
+piper-en_US-lessac-medium          tts     60.3 MiB  Blizzard-2013 installed
+sherpa-whisper-tiny-en             stt     98.8 MiB  MIT        installed
+```
+
+### The dictionary on the way back
+
+The reverse map needs the transcript to match the spoken form letter for letter, and it
+usually does not. Measured, both directions synthesized by Arioso:
+
+```console
+$ arioso say "Tom Sella built arioso for his own machine." --out dict.wav
+$ arioso transcribe dict.wav
+Tonseller built REO so for his own machine.
+```
+
+"Tonseller" is not "tom seller", so the entry does not fire. The same happened with
+"koober netties", which came back as "Cooper Netis". The fix is recorded in the PRD: match
+on phonemes, not letters.
+
+## 12. Models
 
 ```console
 $ arioso models list

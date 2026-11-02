@@ -36,12 +36,14 @@ Working today:
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
 - A user dictionary for names and jargon, reloaded without a restart
 - Spelling rules for words the dictionary does not hold, reported, never silent
+- Speech to text: Whisper through sherpa-onnx, batch, from a WAV file
 - `arioso doctor`, which says what is wrong before a request fails
 - 144 tests
 
 Not built yet:
 
-- Speech to text (M2, on sherpa-onnx)
+- Speech to text over HTTP and WebSocket, and streaming partials (M2)
+- Silero voice activity detection
 - A signed manifest
 
 ## Requirements
@@ -102,6 +104,7 @@ curl -s -X POST localhost:10101/v1/tts -H 'content-type: application/json' \
 | Command | What it does |
 | --- | --- |
 | `arioso say <text> [--out FILE] [--dict FILE]` | Write a WAV file |
+| `arioso transcribe <file.wav> [--json]` | Read a WAV file back as text |
 | `arioso serve` | Run the HTTP and WebSocket server |
 | `arioso normalize <text>` | Show what the voice will actually say |
 | `arioso doctor` | Check the config, the models, and the dictionary |
@@ -116,6 +119,22 @@ the expansion without synthesizing anything:
 $ arioso normalize "It costs \$3.99 on the 3rd at 14:30."
 It costs three dollars and ninety nine cents on the third at two thirty in the afternoon.
 ```
+
+## Speech to text
+
+`arioso transcribe` takes a WAV file, mono, 16-bit PCM or 32-bit float, at any rate. The
+audio is resampled to 16 kHz and read by Whisper.
+
+```console
+$ arioso transcribe hello.wav
+The quick brown fox jumps over the lazy dog.
+```
+
+The same dictionary that fixes a pronunciation on the way out is applied on the way in,
+so a term you taught the voice comes back spelled your way. That path is real but narrow:
+it matches a spoken form exactly, and Whisper rarely reproduces it letter for letter. The
+PRD records the measured pairs and the planned fix, which is to compare sounds rather than
+letters.
 
 ## HTTP
 
