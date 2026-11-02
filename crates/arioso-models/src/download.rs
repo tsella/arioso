@@ -59,6 +59,16 @@ pub enum DownloadError {
         /// Hash of what arrived.
         actual: String,
     },
+    /// There is not enough room on the target filesystem.
+    #[error("need {needed} bytes in {dir}, {available} available")]
+    InsufficientSpace {
+        /// Bytes required.
+        needed: u64,
+        /// Bytes free.
+        available: u64,
+        /// Directory that would receive the files.
+        dir: PathBuf,
+    },
     /// The byte count does not match the manifest.
     #[error("{file}: size mismatch, expected {expected} bytes, got {actual}")]
     Size {
@@ -108,6 +118,13 @@ impl Downloader {
     ) -> Result<Vec<PathBuf>, DownloadError> {
         tokio::fs::create_dir_all(dir).await?;
         let total: u64 = spec.files.iter().map(|f| f.size).sum();
+        let needed = spec
+            .files
+            .iter()
+            .map(|f| f.size.saturating_sub(existing_bytes(dir, &f.name)))
+            .sum::<u64>();
+        let available = fs4::available_space(dir)?;
+        ensure_space(needed, available, dir)?;
         let mut done = 0u64;
         let mut paths = Vec::with_capacity(spec.files.len());
         for file in &spec.files {
@@ -221,6 +238,33 @@ impl Downloader {
         });
         Ok(final_path)
     }
+}
+
+/// Bytes already on disk for `name`, counting both a finished file and a partial one.
+fn existing_bytes(dir: &Path, name: &str) -> u64 {
+    let finished = std::fs::metadata(dir.join(name))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let partial = std::fs::metadata(dir.join(format!("{name}.part")))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    finished.max(partial)
+}
+
+/// Refuse a download that cannot fit. Split out so it can be tested with numbers.
+///
+/// # Errors
+///
+/// Returns [`DownloadError::InsufficientSpace`] when `needed` exceeds `available`.
+pub fn ensure_space(needed: u64, available: u64, dir: &Path) -> Result<(), DownloadError> {
+    if needed > available {
+        return Err(DownloadError::InsufficientSpace {
+            needed,
+            available,
+            dir: dir.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// SHA-256 of a file, lowercase hex.
@@ -348,6 +392,44 @@ mod tests {
         assert!(!dir.path().join("voice.bin").exists());
     }
 
+    #[test]
+    fn space_check_compares_needed_with_available() {
+        let dir = Path::new("/models");
+        assert!(ensure_space(50, 50, dir).is_ok());
+        let err = ensure_space(51, 50, dir).unwrap_err();
+        assert!(matches!(
+            err,
+            DownloadError::InsufficientSpace {
+                needed: 51,
+                available: 50,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_model_that_cannot_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = spec("http://127.0.0.1:9/never".into(), b"x");
+        model.files[0].size = u64::MAX / 2;
+
+        // No mock is mounted: reaching the network would fail differently.
+        let err = Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DownloadError::InsufficientSpace { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no bytes written"
+        );
+    }
+
     #[tokio::test]
     async fn progress_covers_the_whole_model() {
         let server = MockServer::start().await;
@@ -381,7 +463,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(seen.iter().all(|p| p.total == total), "total must be the model size");
+        assert!(
+            seen.iter().all(|p| p.total == total),
+            "total must be the model size"
+        );
         assert_eq!(seen.last().unwrap().downloaded, total);
         assert!(seen.windows(2).all(|w| w[0].downloaded <= w[1].downloaded));
     }

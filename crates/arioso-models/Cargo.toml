@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 arioso-config.workspace = true
 ed25519-dalek.workspace = true
+fs4.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 reqwest.workspace = true
