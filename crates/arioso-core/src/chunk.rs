@@ -27,11 +27,21 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<&str> {
     chunks
 }
 
+/// Words after which a period does not end the sentence.
+const ABBREVIATIONS: [&str; 22] = [
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "mt", "vs", "etc", "no", "fig", "approx",
+    "inc", "ltd", "co", "dept", "univ", "vol", "pp", "cf",
+];
+
 /// Split `text` into sentences, keeping the punctuation.
 ///
-/// A sentence ends after `.`, `!`, `?`, or `…`, together with any closing
-/// quotes or brackets that follow, or at a newline. Surrounding whitespace is
-/// trimmed, and empty pieces are dropped. This is the granularity streaming
+/// A sentence ends after `!`, `?`, or a newline, and after `.` or `…` only when
+/// the next character is not a lowercase letter or a digit and the preceding
+/// word is neither a known abbreviation nor a single initial. That keeps
+/// `3.99`, `p.m.`, `Dr.`, and `U.S.A.` in one piece.
+///
+/// Closing quotes and brackets stay with their sentence, surrounding whitespace
+/// is trimmed, and empty pieces are dropped. This is the granularity streaming
 /// synthesis uses: the first sentence can be spoken before the second is read.
 #[must_use]
 pub fn sentences(text: &str) -> Vec<&str> {
@@ -41,7 +51,8 @@ pub fn sentences(text: &str) -> Vec<&str> {
     let mut chars = text.char_indices().peekable();
 
     while let Some((index, ch)) = chars.next() {
-        let ends = matches!(ch, '.' | '!' | '?' | '\u{2026}' | '\n');
+        let ends =
+            matches!(ch, '.' | '!' | '?' | '\u{2026}' | '\n') && closes_sentence(text, index, ch);
         if !ends {
             continue;
         }
@@ -66,6 +77,34 @@ pub fn sentences(text: &str) -> Vec<&str> {
         pieces.push(rest);
     }
     pieces
+}
+
+/// Whether the terminator at `index` ends the sentence.
+fn closes_sentence(text: &str, index: usize, ch: char) -> bool {
+    if matches!(ch, '!' | '?' | '\n') {
+        return true;
+    }
+    match text[index + ch.len_utf8()..]
+        .chars()
+        .find(|c| !c.is_whitespace())
+    {
+        None => true,
+        Some(next) if next.is_lowercase() || next.is_numeric() => false,
+        Some(_) => {
+            let word = preceding_word(&text[..index]);
+            word.chars().count() > 1 && !ABBREVIATIONS.contains(&word.to_lowercase().as_str())
+        }
+    }
+}
+
+/// The run of letters just before `text`'s end, lowercased by the caller.
+fn preceding_word(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_alphanumeric())
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    &text[start..]
 }
 
 /// Byte length of the longest acceptable prefix of `s`.
@@ -154,6 +193,42 @@ mod sentence_tests {
     fn runs_of_terminators_stay_together() {
         assert_eq!(sentences("Hello... World."), vec!["Hello...", "World."]);
         assert_eq!(sentences("Wait!? Yes."), vec!["Wait!?", "Yes."]);
+    }
+
+    #[test]
+    fn decimals_do_not_end_a_sentence() {
+        assert_eq!(
+            sentences("It cost $3.99. Cheap!"),
+            vec!["It cost $3.99.", "Cheap!"]
+        );
+    }
+
+    #[test]
+    fn abbreviations_do_not_end_a_sentence() {
+        assert_eq!(
+            sentences("Dr. Smith arrived at 3.5 p.m. today."),
+            vec!["Dr. Smith arrived at 3.5 p.m. today."]
+        );
+        assert_eq!(
+            sentences("Mr. Jones met Mrs. Lee."),
+            vec!["Mr. Jones met Mrs. Lee."]
+        );
+    }
+
+    #[test]
+    fn initials_do_not_end_a_sentence() {
+        assert_eq!(
+            sentences("The U.S.A. is large. Yes."),
+            vec!["The U.S.A. is large.", "Yes."]
+        );
+    }
+
+    #[test]
+    fn a_lowercase_start_continues_the_sentence() {
+        assert_eq!(
+            sentences("see e.g. this one. Then stop."),
+            vec!["see e.g. this one.", "Then stop."]
+        );
     }
 
     #[test]
