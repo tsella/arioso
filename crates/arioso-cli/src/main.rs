@@ -206,6 +206,7 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
         }
     } else {
         println!("manifest    absent at {}", manifest.display());
+        println!("            copy models/manifest.json there, then run `arioso models list`");
     }
 
     if problems > 0 {
