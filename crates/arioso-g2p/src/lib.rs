@@ -3,6 +3,7 @@
 pub mod arpabet;
 pub mod cmudict;
 pub mod lts;
+pub mod reverse;
 
 use std::collections::HashMap;
 

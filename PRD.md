@@ -719,10 +719,29 @@ synthesized by Arioso and read back by whisper tiny.en:
 | `sell a` | `cell a` | no |
 
 So the reverse map only fires when the transcript matches the written form letter for
-letter, which on this evidence is rare. The fix is to compare sounds rather than letters:
-pronounce both sides with CMUdict and the F15 rules, then allow a small edit distance on
-the phoneme sequence. That reuses machinery that already exists, and it is the next task
-in M2 rather than a change to this section.
+letter, which on this evidence is rare. The fix, now built, compares sounds: both sides
+are pronounced with CMUdict and the F15 rules, and a phoneme edit distance within 40 % of
+the form's length counts as the same words. The closest match wins its span, and the
+longer span wins a tie.
+
+Re-measured after the change, same recordings:
+
+| Spoken form | Whisper wrote | Corrected to |
+| --- | --- | --- |
+| `tom seller` | `Tonseller` | `Tom Sella` |
+| `koober netties` | `Cooper Netis` | `Kubernetes` |
+| `sell a` | `cell a` | `Sella` |
+| `ah ree oh so` | `REO so` | still `REO so` |
+
+The last row is the limit of the method: a three-letter string is pronounced by the F15
+rules as letters sound inside a word, not as the letters are named, so "REO" and "ah ree
+oh so" do not come close enough. Spelling out initialisms before comparison would fix it
+and is not built.
+
+Known risk, accepted: a spoken form made of ordinary English words rewrites those words
+wherever they appear. An entry that says `sell a` will turn "we sell a car" into "we Sella
+car". That follows from the user writing that form down, and the dictionary is the place
+to correct it.
 
 ## 9. Non-functional requirements
 

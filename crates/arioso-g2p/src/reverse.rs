@@ -1,0 +1,287 @@
+//! Correct a transcript by sound.
+//!
+//! The dictionary maps a written term to the forms a voice can say. Running it backwards
+//! is supposed to give the term back, but speech to text does not reproduce a respelling
+//! letter for letter: it writes "Tonseller" for "tom seller" and "Cooper Netis" for
+//! "koober netties". An exact match never fires on that.
+//!
+//! So the comparison is on phonemes. Both sides are pronounced, with the dictionary and
+//! then the spelling rules, and a near miss counts as a match. It is a guess, and a
+//! spoken form made of ordinary English words will rewrite those words when they appear;
+//! that risk is stated in the PRD rather than hidden.
+
+use arioso_core::UserDictionary;
+
+use crate::{arpabet, cmudict::CmuDict, lts};
+
+/// How different two pronunciations may be and still count as the same words.
+const TOLERANCE: f32 = 0.4;
+
+/// Shortest spoken form worth matching by sound. Below this, one edit is a quarter of
+/// the word and everything matches everything.
+const MIN_PHONEMES: usize = 4;
+
+/// Replace spoken forms in `text` with the term they belong to.
+///
+/// An exact match is taken first, because the user wrote that form down. Only when no
+/// exact match covers a span does the phonetic comparison run.
+#[must_use]
+pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
+    let words = words(text);
+    if words.is_empty() || user.entries().is_empty() {
+        return text.to_owned();
+    }
+
+    // Every (term, pronunciation) pair, longest pronunciation first so the most
+    // specific entry wins a contested span.
+    let mut forms: Vec<(Vec<&'static str>, usize, &str)> = Vec::new();
+    for entry in user.entries() {
+        for form in entry.forms() {
+            let phonemes = pronounce(form, cmu);
+            let words = form.split_whitespace().count().max(1);
+            if phonemes.len() >= MIN_PHONEMES {
+                forms.push((phonemes, words, entry.term.as_str()));
+            }
+        }
+    }
+    forms.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    if forms.is_empty() {
+        return text.to_owned();
+    }
+
+    let spoken: Vec<Vec<&'static str>> = words
+        .iter()
+        .map(|word| pronounce(&text[word.0..word.1], cmu))
+        .collect();
+
+    // Every candidate match, scored. The closest one wins its span, so a window that
+    // happens to contain the form cannot beat the form itself just by coming first.
+    let mut candidates: Vec<(f32, usize, usize, &str)> = Vec::new();
+    for (form, form_words, term) in &forms {
+        let allowed = (form.len() as f32 * TOLERANCE).max(1.0);
+        for index in 0..words.len() {
+            // A word may have been split or merged by the engine, so try one word
+            // either side of the form's length.
+            for width in [*form_words, form_words.saturating_sub(1), form_words + 1] {
+                if width == 0 || index + width > words.len() {
+                    continue;
+                }
+                let mut heard: Vec<&'static str> = Vec::new();
+                for slot in &spoken[index..index + width] {
+                    heard.extend_from_slice(slot);
+                }
+                if heard.is_empty() {
+                    continue;
+                }
+                let score = distance(form, &heard) as f32;
+                if score <= allowed {
+                    candidates.push((score / form.len() as f32, index, index + width, term));
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| {
+        // Best score first; on a tie the longer span wins, because an exact match
+        // over two words explains more than an exact match over one of them.
+        a.0.total_cmp(&b.0)
+            .then((b.2 - b.1).cmp(&(a.2 - a.1)))
+            .then(a.1.cmp(&b.1))
+    });
+
+    let mut taken = vec![false; words.len()];
+    let mut replacements: Vec<(usize, usize, &str)> = Vec::new();
+    for (_, start, end, term) in candidates {
+        if taken[start..end].iter().any(|used| *used) {
+            continue;
+        }
+        for used in &mut taken[start..end] {
+            *used = true;
+        }
+        replacements.push((words[start].0, words[end - 1].1, term));
+    }
+
+    if replacements.is_empty() {
+        return text.to_owned();
+    }
+    replacements.sort_by_key(|(start, _, _)| *start);
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end, term) in replacements {
+        if start < cursor {
+            continue;
+        }
+        out.push_str(&text[cursor..start]);
+        out.push_str(term);
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+/// Byte ranges of the words in `text`.
+fn words(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        let is_word = ch.is_alphanumeric() || ch == '\'';
+        match (is_word, start) {
+            (true, None) => start = Some(index),
+            (false, Some(begin)) => {
+                out.push((begin, index));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        out.push((begin, text.len()));
+    }
+    out
+}
+
+/// The phonemes of a word, without stress: the dictionary first, then the rules.
+fn pronounce(word: &str, cmu: &CmuDict) -> Vec<&'static str> {
+    let cleaned: String = word
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_lowercase();
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+    if let Some(pronunciations) = cmu.lookup(&cleaned) {
+        if let Some(first) = pronunciations.first() {
+            return strip_stress(&arpabet::to_ipa(first));
+        }
+    }
+    let tokens = lts::to_arpabet(&cleaned);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    strip_stress(&arpabet::to_ipa(&tokens.join(" ")))
+}
+
+/// Drop the stress marks: this comparison is about sounds, not emphasis.
+fn strip_stress(symbols: &[&'static str]) -> Vec<&'static str> {
+    symbols
+        .iter()
+        .copied()
+        .filter(|symbol| !matches!(*symbol, "\u{2c8}" | "\u{2cc}"))
+        .collect()
+}
+
+/// Levenshtein distance between two phoneme sequences.
+fn distance(a: &[&str], b: &[&str]) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for (i, left) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right) in b.iter().enumerate() {
+            let cost = usize::from(left != right);
+            current[j + 1] = (previous[j] + cost)
+                .min(previous[j + 1] + 1)
+                .min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DICT: &str = "\
+TOM  T AA1 M
+SELLER  S EH1 L ER0
+SELL  S EH1 L
+A  AH0
+CELL  S EH1 L
+COOPER  K UW1 P ER0
+KUBERNETES  K UW2 B ER0 N EH1 T IY0 Z
+THE  DH AH0
+CAT  K AE1 T
+SAT  S AE1 T
+";
+
+    fn cmu() -> CmuDict {
+        CmuDict::parse(DICT)
+    }
+
+    fn user(json: &str) -> UserDictionary {
+        UserDictionary::parse(json).unwrap()
+    }
+
+    const TOM: &str = r#"{"version":1,"entries":[{"term":"Tom Sella","spoken":["tom seller"]}]}"#;
+
+    #[test]
+    fn an_exact_spoken_form_is_replaced() {
+        let dictionary = user(TOM);
+        let out = correct(&dictionary, &cmu(), "I met tom seller yesterday");
+        assert_eq!(out, "I met Tom Sella yesterday");
+    }
+
+    #[test]
+    fn a_word_the_engine_merged_still_matches() {
+        // Measured: whisper wrote this for "tom seller".
+        let dictionary = user(TOM);
+        let out = correct(&dictionary, &cmu(), "Tonseller built it");
+        assert_eq!(out, "Tom Sella built it");
+    }
+
+    #[test]
+    fn a_word_the_engine_respelled_still_matches() {
+        let dictionary =
+            user(r#"{"version":1,"entries":[{"term":"Kubernetes","spoken":["koober netties"]}]}"#);
+        // "Cooper Netis" is what whisper wrote for "koober netties".
+        let out = correct(&dictionary, &cmu(), "We run Cooper Netis here");
+        assert_eq!(out, "We run Kubernetes here");
+    }
+
+    #[test]
+    fn a_split_word_still_matches() {
+        let dictionary = user(r#"{"version":1,"entries":[{"term":"Sella","spoken":["sell a"]}]}"#);
+        let out = correct(&dictionary, &cmu(), "ask cell a about it");
+        assert_eq!(out, "ask Sella about it");
+    }
+
+    #[test]
+    fn unrelated_text_is_untouched() {
+        let dictionary = user(TOM);
+        let text = "the cat sat on the mat";
+        assert_eq!(correct(&dictionary, &cmu(), text), text);
+    }
+
+    #[test]
+    fn a_short_form_is_not_matched_by_sound() {
+        // "cat" is under the minimum length, so only an exact hit would fire, and
+        // "bat" is not it.
+        let dictionary = user(r#"{"version":1,"entries":[{"term":"Kat","spoken":["cat"]}]}"#);
+        let out = correct(&dictionary, &cmu(), "the bat sat");
+        assert_eq!(out, "the bat sat");
+    }
+
+    #[test]
+    fn an_empty_dictionary_changes_nothing() {
+        let out = correct(&UserDictionary::empty(), &cmu(), "hello there");
+        assert_eq!(out, "hello there");
+    }
+
+    #[test]
+    fn punctuation_around_a_match_survives() {
+        let dictionary = user(TOM);
+        let out = correct(&dictionary, &cmu(), "Thanks, tom seller!");
+        assert_eq!(out, "Thanks, Tom Sella!");
+    }
+
+    #[test]
+    fn a_word_outside_the_dictionary_is_pronounced_by_rule() {
+        // "zorbansky" is in neither the tiny dictionary nor CMUdict, so the rules
+        // decide its sound; the entry that says it must still match.
+        let dictionary =
+            user(r#"{"version":1,"entries":[{"term":"Zorbansky","spoken":["zorbansky"]}]}"#);
+        let out = correct(&dictionary, &cmu(), "call zorbansky now");
+        assert_eq!(out, "call Zorbansky now");
+    }
+}

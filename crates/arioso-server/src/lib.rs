@@ -176,9 +176,11 @@ impl AppState {
             .transcribe(&samples, rate)
             .map_err(|e| SttFailure::Engine(e.to_string()))?;
 
-        // The dictionary runs backwards as well.
+        // The dictionary runs backwards as well, compared by sound rather than by
+        // letters, because the engine writes "Tonseller" for "tom seller".
         let user = self.user_dictionary();
-        let text = user.dictionary.correct(&transcript.text);
+        let text =
+            arioso_g2p::reverse::correct(&user.dictionary, &self.dictionary, &transcript.text);
         Ok((text, seconds))
     }
 

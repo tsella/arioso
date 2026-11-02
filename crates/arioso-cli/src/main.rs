@@ -537,7 +537,13 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
             return Err(error).with_context(|| format!("reading {}", user_path.display()));
         }
     };
-    let text = user.correct(&transcript.text);
+    // The correction compares sounds, so it needs the same pronunciation source the
+    // voice uses.
+    let dict_path = dir.join("cmudict.dict");
+    let dict_text = std::fs::read_to_string(&dict_path)
+        .with_context(|| format!("reading {}", dict_path.display()))?;
+    let dictionary = CmuDict::parse(&dict_text);
+    let text = arioso_g2p::reverse::correct(&user, &dictionary, &transcript.text);
 
     if json {
         let seconds = if rate == 0 {
