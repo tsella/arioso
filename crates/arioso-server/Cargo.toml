@@ -1,0 +1,30 @@
+[package]
+name = "arioso-server"
+description = "HTTP surface for Arioso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+arioso-config.workspace = true
+arioso-core.workspace = true
+arioso-g2p.workspace = true
+arioso-models.workspace = true
+arioso-tts-piper.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
