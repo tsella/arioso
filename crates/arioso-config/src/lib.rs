@@ -74,6 +74,18 @@ pub struct Server {
     /// on a directly exposed server lets one caller spend another's budget.
     #[serde(default)]
     pub trust_forwarded_for: bool,
+    /// Whether to serve the API document and the Swagger UI at `/docs`.
+    ///
+    /// On by default because it is the fastest way to learn the API. A deployment that
+    /// does not want to publish its own surface turns it off: a document that names every
+    /// route is a map, and a map is the first thing a scanner wants.
+    #[serde(default = "yes")]
+    pub docs: bool,
+}
+
+/// The default for a boolean that is on unless the document says otherwise.
+fn yes() -> bool {
+    true
 }
 
 /// Transport security. Absent means plain HTTP, which is right on loopback.
@@ -132,6 +144,7 @@ impl Default for Server {
             tls: Tls::default(),
             limits: Limits::default(),
             trust_forwarded_for: false,
+            docs: true,
         }
     }
 }

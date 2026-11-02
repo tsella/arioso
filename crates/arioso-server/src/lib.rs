@@ -959,10 +959,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
         .route("/v1/voices", get(list_voices))
-        .route("/v1/config", get(get_config).patch(patch_config))
-        // The Swagger UI serves the document at the URL it is given, so this registers
-        // /openapi.json as well as /docs. An explicit route beside it is a collision.
-        .merge(utoipa_swagger_ui::SwaggerUi::new("/docs").url("/openapi.json", document(&state)));
+        .route("/v1/config", get(get_config).patch(patch_config));
+
+    // The Swagger UI serves the document at the URL it is given, so this registers
+    // /openapi.json as well as /docs. An explicit route beside it is a collision.
+    //
+    // A document that names every route is a map, and a map is the first thing a scanner
+    // wants. `server.docs: false` leaves it out entirely, so the paths answer 404 rather
+    // than 401 and the surface is not described to anyone.
+    if state.config().server.docs {
+        router = router.merge(
+            utoipa_swagger_ui::SwaggerUi::new("/docs").url("/openapi.json", document(&state)),
+        );
+    }
 
     if state.config().tts.enabled {
         router = router
@@ -2538,6 +2547,32 @@ mod tests {
                 .await
                 .0,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn the_api_document_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.server.docs = false;
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let ask = |path: &str| Request::builder().uri(path).body(Body::empty()).unwrap();
+        // Not described and not served: 404, not 401, so a scanner learns nothing.
+        for path in ["/openapi.json", "/docs", "/docs/"] {
+            assert_eq!(
+                call(router(state.clone()), ask(path)).await.0,
+                StatusCode::NOT_FOUND,
+                "{path} was still served"
+            );
+        }
+        // The rest of the surface is unchanged.
+        assert_eq!(
+            call(router(state.clone()), ask("/v1/info")).await.0,
+            StatusCode::OK
         );
     }
 

@@ -17,7 +17,8 @@
       "max_connections": 512,
       "header_timeout_ms": 10000
     },
-    "trust_forwarded_for": false
+    "trust_forwarded_for": false,
+    "docs": true
   },
   "tts": {
     "enabled": true,

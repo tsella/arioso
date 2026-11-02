@@ -73,8 +73,16 @@ x-frame-options: DENY
 
 These are known and not fixed. They are listed so nobody assumes they were.
 
-- **The API document is served whenever the server runs.** Behind a token now, but a
-  deployment may want `/docs` off entirely. There is no switch for it yet.
+**The API document can be turned off.** `server.docs: false` leaves `/docs` and
+`/openapi.json` unregistered, so they answer 404 rather than 401: a scanner that is refused
+knows the route exists, and one that gets 404 does not. Measured:
+
+```console
+$ arioso --config nodocs.json serve
+openapi -> 404
+docs    -> 404
+info    -> 200
+```
 - **No connection cap.** `server.limits.max_connections` parses and does nothing; the accept
   loop belongs to `axum-server`. The header timeout and the rate limiter are the controls
   that exist.
