@@ -216,15 +216,23 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .iter()
         .filter(|model| state.is_installed(model))
         .count();
+    // Readiness is about the voice this server will actually load, not about
+    // any model being present.
+    let voice = state.voice_spec().ok().map(|spec| spec.id.clone());
+    let voice_installed = state
+        .voice_spec()
+        .is_ok_and(|spec| state.is_installed(spec));
     let voice_loaded = state
         .voice
         .lock()
         .map(|guard| guard.is_some())
         .unwrap_or(false);
     Json(serde_json::json!({
-        "status": if installed > 0 { "ready" } else { "no_models" },
-        "models_installed": installed,
+        "status": if voice_installed { "ready" } else { "voice_missing" },
+        "voice": voice,
+        "voice_installed": voice_installed,
         "voice_loaded": voice_loaded,
+        "models_installed": installed,
     }))
 }
 
@@ -349,6 +357,24 @@ mod tests {
         assert_eq!(first["id"], "piper-en_US-lessac-medium");
         assert_eq!(first["kind"], "tts");
         assert_eq!(first["installed"], false);
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_a_missing_voice() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "voice_missing");
+        assert_eq!(json["voice"], "piper-en_US-lessac-medium");
+        assert_eq!(json["voice_installed"], false);
     }
 
     #[tokio::test]
