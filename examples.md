@@ -273,9 +273,9 @@ wrote spoken.wav (4.01 s at 22050 Hz)
 2 word(s) not in the dictionary, spoken by spelling rules: arioso, zorbansky
 ```
 
-Before the rules landed, the same command wrote a shorter file and dropped both words.
-The reading of "zorbansky" is a guess, and a dictionary entry replaces it with the
-correct one.
+Before the rules landed, both words were dropped from the sentence: the same command
+reported them as skipped and said nothing in their place. The reading of "zorbansky" is a
+guess, and a dictionary entry replaces it with the correct one.
 
 `doctor` makes the same distinction for every entry, so a typo in a respelling does not
 hide behind the rules:
