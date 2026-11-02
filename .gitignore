@@ -1,0 +1,4 @@
+/target
+*.part
+.env
+.DS_Store

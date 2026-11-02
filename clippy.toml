@@ -1,0 +1,9 @@
+# Arioso/Hermes adjusted clippy config. Based on BeautifulRust lints/clippy.toml
+# (MIT). Upstream sets max-fn-params-bools = 0, a total ban; here a single bool is
+# allowed and only multi-flag signatures trip fn_params_excessive_bools.
+
+max-fn-params-bools = 1
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
