@@ -140,7 +140,33 @@ Against 5,849 reference words. The most frequent substitutions are spelling, not
 | 3 | colour | color |
 
 Fifty-two of the 437 substitutions are British against American spelling of four words.
-Excluding them, the rate is 8.0 percent.
+
+That framing was wrong, and the number with it. A spelling variant is not a listening
+error: Whisper heard `traveller` correctly and spelled it in its own variety of English.
+Scored with variants folded, the run reads:
+
+| scoring | word error rate |
+| --- | --- |
+| plain string comparison | 8.79% |
+| digits and number words folded | 8.62% |
+| the above, plus British/American spelling folded | 7.49% |
+
+Sixty-four of the substitution pairs are pure spelling. The fold removes 76 substitutions
+in total, because folding a word changes the alignment around it, not only that pair.
+
+A dictionary can also settle the spelling instead of merely scoring around it. An entry
+whose spoken form is the word itself makes the reverse pass prefer that spelling:
+
+```json
+{"term": "traveller", "spoken": ["traveller"]}
+{"term": "grey", "spoken": ["grey"]}
+```
+
+Measured on the first thirty-second chunk of this run, the same audio that transcribed
+`time-traveler` and `gray eyes` transcribed `time-traveller` and `grey eyes` once that file
+was configured as `tts.dictionary`. The entry must carry `spoken`, not `phonemes`: the
+reverse pass pronounces each spoken form and compares sounds, so a `phonemes` entry gives
+it ARPAbet symbols to pronounce as words and it matches nothing.
 
 ### Verdict against the criteria written before the run
 

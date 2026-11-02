@@ -216,6 +216,20 @@ file to add names without editing the shipped one.
 Dictionary entries win over the letter-to-sound rules, and the rules win over a guess. If a
 word is pronounced wrong, add it to the dictionary rather than editing the text.
 
+The same file runs backwards on transcripts. An entry whose spoken form is the word itself
+settles the spelling the transcriber chooses, which is how you get one variety of English
+out of a model trained on both:
+
+```json
+{"term": "traveller", "spoken": ["traveller"]}
+{"term": "grey", "spoken": ["grey"]}
+```
+
+Measured: without that file the same audio transcribed `time-traveler` and `gray eyes`; with
+it, `time-traveller` and `grey eyes`. The entry must carry `spoken`. A `phonemes` entry is
+right for speaking and useless here, because the reverse pass pronounces each spoken form
+and compares sounds, so ARPAbet symbols reach it as words to pronounce and match nothing.
+
 ## Test that the voice says the right thing
 
 ```bash
