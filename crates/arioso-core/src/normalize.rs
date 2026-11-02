@@ -113,6 +113,23 @@ pub fn normalize_with(text: &str, options: Options) -> String {
                     index = scanned.end + 1;
                     continue;
                 }
+                // A bare hour followed by a marker is a time: "7 pm", "9pm".
+                // Without this, "9pm" came out as one unpronounceable token.
+                if scanned.fraction.is_empty()
+                    && !scanned.separated
+                    && (1..=12).contains(&scanned.whole)
+                {
+                    if let Some((pm, after)) = scan_marker(&chars, scanned.end) {
+                        let hour = if pm {
+                            scanned.whole % 12 + 12
+                        } else {
+                            scanned.whole % 12
+                        };
+                        out.push_str(&clock(hour, 0, options));
+                        index = after;
+                        continue;
+                    }
+                }
                 out.push_str(&number(&scanned));
                 index = scanned.end;
                 continue;
@@ -436,28 +453,33 @@ fn scan_marker(chars: &[char], start: usize) -> Option<(bool, usize)> {
         index += 1;
     }
 
-    let rest: String = chars.iter().skip(index).take(4).collect();
-    let lower = rest.to_lowercase();
-    let (pm, length) = if lower.starts_with("a.m.") {
-        (false, 4)
-    } else if lower.starts_with("p.m.") {
-        (true, 4)
-    } else if lower.starts_with("am") {
-        (false, 2)
-    } else if lower.starts_with("pm") {
-        (true, 2)
-    } else {
-        return None;
+    // a, am, a.m, a.m. and the same with p. The closing dot is optional, so
+    // "7:45 P.M" at the end of a line still counts.
+    let pm = match chars.get(index)?.to_ascii_lowercase() {
+        'a' => false,
+        'p' => true,
+        _ => return None,
     };
-
-    // "7:45 amps" is a word, not a marker.
+    let mut cursor = index + 1;
+    if chars.get(cursor) == Some(&'.') {
+        cursor += 1;
+    }
     if chars
-        .get(index + length)
-        .is_some_and(|ch| ch.is_alphanumeric())
+        .get(cursor)
+        .is_none_or(|ch| ch.to_ascii_lowercase() != 'm')
     {
         return None;
     }
-    Some((pm, index + length))
+    cursor += 1;
+    if chars.get(cursor) == Some(&'.') {
+        cursor += 1;
+    }
+
+    // "7:45 amps" is a word, not a marker.
+    if chars.get(cursor).is_some_and(|ch| ch.is_alphanumeric()) {
+        return None;
+    }
+    Some((pm, cursor))
 }
 
 #[cfg(test)]
@@ -524,6 +546,38 @@ mod tests {
         assert_eq!(normalize("12:30 am"), "twelve thirty in the morning");
         assert_eq!(normalize("12:30 pm"), "twelve thirty in the afternoon");
         assert_eq!(normalize("9:05 P.M."), "nine oh five in the evening");
+        assert_eq!(normalize("9:05 P.M"), "nine oh five in the evening");
+        assert_eq!(normalize("9:05 p.m"), "nine oh five in the evening");
+        assert_eq!(normalize("9:05 aM"), "nine oh five in the morning");
+    }
+
+    #[test]
+    fn a_bare_hour_with_a_marker_is_a_time() {
+        assert_eq!(normalize("at 7 pm"), "at seven o'clock in the evening");
+        assert_eq!(normalize("9pm"), "nine o'clock in the evening");
+        assert_eq!(
+            normalize("the 3 pm train"),
+            "the three o'clock in the afternoon train"
+        );
+        assert_eq!(
+            normalize("meet at 12 am"),
+            "meet at twelve o'clock in the morning"
+        );
+        assert_eq!(
+            normalize("meet at 12 pm"),
+            "meet at twelve o'clock in the afternoon"
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_hour_shaped_keeps_its_marker() {
+        // Not 1 to 12, or carrying a separator, so it is a quantity.
+        assert_eq!(normalize("2026 pm"), "twenty twenty six pm");
+        assert_eq!(
+            normalize("1,234 pm"),
+            "one thousand two hundred thirty four pm"
+        );
+        assert_eq!(normalize("3.5 pm"), "three point five pm");
     }
 
     #[test]
