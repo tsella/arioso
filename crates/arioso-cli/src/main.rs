@@ -471,7 +471,9 @@ fn hold_pid_file(path: &Path) -> Result<std::fs::File> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        // Not truncated here on purpose: the file is emptied after the lock, so a process
+        // that loses the race cannot wipe the winner's contents.
+        .truncate(false)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -480,6 +482,10 @@ fn hold_pid_file(path: &Path) -> Result<std::fs::File> {
             path.display()
         );
     }
+    // Truncated only once the lock is held. Truncating at open would let a second process
+    // empty the winner's file while it runs, and `stop` would then read nothing.
+    file.set_len(0)
+        .with_context(|| format!("emptying {}", path.display()))?;
     writeln!(file, "{}", std::process::id())
         .with_context(|| format!("writing {}", path.display()))?;
     // The lock lives as long as this handle, which the caller keeps until the server ends.
