@@ -9,7 +9,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{AppState, MAX_TEXT_CHARS};
+use crate::AppState;
 
 /// Chunks queued between synthesis and the socket.
 ///
@@ -35,13 +35,17 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -
 }
 
 /// Check a request and resolve the speed.
-fn prepare(request: &StreamRequest, default_speed: f32) -> Result<(String, f32), String> {
+fn prepare(
+    request: &StreamRequest,
+    default_speed: f32,
+    max_text_chars: usize,
+) -> Result<(String, f32), String> {
     let text = request.text.trim();
     if text.is_empty() {
         return Err("text must not be empty".into());
     }
-    if text.chars().count() > MAX_TEXT_CHARS {
-        return Err(format!("text is longer than {MAX_TEXT_CHARS} characters"));
+    if text.chars().count() > max_text_chars {
+        return Err(format!("text is longer than {max_text_chars} characters"));
     }
     let speed = request.speed.unwrap_or(default_speed);
     if !(0.5..=2.0).contains(&speed) {
@@ -92,7 +96,12 @@ async fn run(
         }
     };
 
-    let (text, speed) = match prepare(&request, state.config().tts.speed) {
+    let config = state.config();
+    let (text, speed) = match prepare(
+        &request,
+        config.tts.speed,
+        config.server.limits.max_text_chars,
+    ) {
         Ok(pair) => pair,
         Err(detail) => {
             let frame = json!({"type": "error", "detail": detail});
@@ -168,30 +177,30 @@ mod tests {
 
     #[test]
     fn empty_text_is_refused() {
-        assert!(prepare(&request("   ", None), 1.0).is_err());
+        assert!(prepare(&request("   ", None), 1.0, 4_000).is_err());
     }
 
     #[test]
     fn long_text_is_refused() {
-        let text = "a".repeat(MAX_TEXT_CHARS + 1);
-        let error = prepare(&request(&text, None), 1.0).unwrap_err();
+        let text = "a".repeat(4_001);
+        let error = prepare(&request(&text, None), 1.0, 4_000).unwrap_err();
         assert!(error.contains("longer than"));
     }
 
     #[test]
     fn speed_defaults_to_the_config() {
-        let (_, speed) = prepare(&request("hello", None), 0.8).unwrap();
+        let (_, speed) = prepare(&request("hello", None), 0.8, 4_000).unwrap();
         assert!((speed - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]
     fn speed_outside_the_range_is_refused() {
-        assert!(prepare(&request("hello", Some(3.0)), 1.0).is_err());
+        assert!(prepare(&request("hello", Some(3.0)), 1.0, 4_000).is_err());
     }
 
     #[test]
     fn text_is_trimmed() {
-        let (text, _) = prepare(&request("  hello  ", None), 1.0).unwrap();
+        let (text, _) = prepare(&request("  hello  ", None), 1.0, 4_000).unwrap();
         assert_eq!(text, "hello");
     }
 }
