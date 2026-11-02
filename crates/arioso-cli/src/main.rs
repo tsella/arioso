@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use arioso_config::Config;
-use arioso_models::{Downloader, Manifest, Progress, models_dir};
+use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -107,7 +107,7 @@ fn list_models(config: &Config) -> Result<()> {
         "id", "kind", "size", "license"
     );
     for model in &manifest.models {
-        let installed = model.files.iter().all(|f| dir.join(&f.name).exists());
+        let installed = model_installed(model, &dir);
         let state = if installed { "installed" } else { "missing" };
         println!(
             "{:<34} {:<5} {:>10}  {:<10} {}",
@@ -192,7 +192,7 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
                 let installed = m
                     .models
                     .iter()
-                    .filter(|spec| spec.files.iter().all(|f| dir.join(&f.name).exists()))
+                    .filter(|spec| model_installed(spec, &dir))
                     .count();
                 println!(
                     "manifest    {} models, {installed} installed",
@@ -227,6 +227,15 @@ fn init_tracing(config: &Config) {
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
+}
+
+/// A model counts as installed only when every file is present at the right size.
+fn model_installed(model: &ModelSpec, dir: &Path) -> bool {
+    model.files.iter().all(|file| {
+        std::fs::metadata(dir.join(&file.name))
+            .map(|meta| meta.len() == file.size)
+            .unwrap_or(false)
+    })
 }
 
 fn human_bytes(bytes: u64) -> String {
