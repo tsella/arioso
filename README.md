@@ -183,8 +183,9 @@ server → {"type":"cancelled"}
 ```
 
 Utterances are cut by an energy voice activity detector, so a pause ends one and starts
-the next. The final lands about 340 ms after the endpoint on four cores: the detector
-confirms at 4.06 s of audio and the final arrives at 4.42 s of wall clock.
+the next. The final lands about 660 ms after the endpoint on four cores with whisper
+base, and about 340 ms with tiny: the detector confirms at 4.06 s of audio, and the final
+arrives at 4.72 s of wall clock with base.
 
 The same dictionary that fixes a pronunciation on the way out is applied on the way in,
 so a term you taught the voice comes back spelled your way. That path is real but narrow:
