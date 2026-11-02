@@ -15,7 +15,9 @@
       "requests_per_second": 50,
       "burst": 100,
       "max_connections": 512,
-      "header_timeout_ms": 10000
+      "header_timeout_ms": 10000,
+      "max_text_chars": 4000,
+      "shutdown_grace_ms": 5000
     },
     "trust_forwarded_for": false,
     "docs": true,

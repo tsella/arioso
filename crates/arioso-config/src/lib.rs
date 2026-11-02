@@ -132,6 +132,12 @@ pub struct Limits {
     ///
     /// Without this, a socket that opens and sends one byte a minute holds a slot.
     pub header_timeout_ms: u64,
+    /// Longest text one synthesis request accepts, in characters.
+    ///
+    /// One request renders the whole text into memory before the reply is written, so this
+    /// bounds the work and the memory of a single call. A client with more text sends it in
+    /// pieces, or streams it over the WebSocket, which sends a frame per sentence.
+    pub max_text_chars: usize,
     /// How long a graceful stop waits for in-flight work before ending it.
     ///
     /// A stop that waits forever is not a stop, and one that ends immediately drops
@@ -143,6 +149,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            max_text_chars: 4_000,
             requests_per_second: 50,
             burst: 100,
             max_connections: 512,
@@ -686,6 +693,12 @@ impl Config {
                 message: "a rate of 0 refuses every request, which is not a limit".into(),
             });
         }
+        if self.server.limits.max_text_chars == 0 {
+            return Err(ConfigError::Invalid {
+                path: "server.limits.max_text_chars".into(),
+                message: "a limit of 0 refuses every synthesis request".into(),
+            });
+        }
         if self.server.limits.max_connections == 0 {
             return Err(ConfigError::Invalid {
                 path: "server.limits.max_connections".into(),
@@ -1032,6 +1045,15 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("server.bind"), "{err}");
         assert!(err.to_string().contains("localhost"), "{err}");
+    }
+
+    #[test]
+    fn the_text_limit_has_a_default_and_refuses_zero() {
+        assert_eq!(Limits::default().max_text_chars, 4_000);
+        let mut config = Config::default();
+        config.server.limits.max_text_chars = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_text_chars"), "{err}");
     }
 
     #[test]

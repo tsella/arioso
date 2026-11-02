@@ -23,9 +23,6 @@ mod ws_stt;
 pub use ws::handler as ws_handler;
 pub use ws_stt::handler as stt_ws_handler;
 
-/// Longest text one synthesis request accepts.
-pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
-
 /// Why the server could not start.
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -1099,8 +1096,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route("/v1/tts/ws", get(ws_handler));
     }
     if state.config().stt.enabled {
-        // The body is audio, so the default 2 MiB limit is too small.
-        let limit = MAX_AUDIO_BYTES;
+        // The body is audio, so the default 2 MiB limit is too small. The limit follows
+        // stt.max_audio_s: a config that allows an hour of audio and then refuses the body
+        // at ten minutes is two limits that disagree, and the one the user can set is the
+        // one that does not decide.
+        let limit = max_audio_bytes(state.config().stt.max_audio_s);
         router = router.route(
             "/v1/stt",
             post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
@@ -1124,8 +1124,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Largest audio body accepted: 16-bit mono at 48 kHz for the longest allowed audio.
-const MAX_AUDIO_BYTES: usize = 48_000 * 2 * 600;
+/// Largest audio body accepted, for audio that may last `max_audio_s` seconds.
+///
+/// 16-bit mono at 48 kHz, the widest form the transcriber accepts. Saturating, because a
+/// config may name a duration no allocation can hold and a refused request is better than
+/// an overflow.
+fn max_audio_bytes(max_audio_s: u32) -> usize {
+    48_000usize
+        .saturating_mul(2)
+        .saturating_mul(max_audio_s as usize)
+}
 
 #[utoipa::path(
     get,
@@ -2021,10 +2029,11 @@ async fn synthesize(
             "text must not be empty",
         ));
     }
-    if text.chars().count() > MAX_TEXT_CHARS {
+    let max_text_chars = state.config().server.limits.max_text_chars;
+    if text.chars().count() > max_text_chars {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("text is longer than {MAX_TEXT_CHARS} characters"),
+            format!("text is longer than {max_text_chars} characters"),
         ));
     }
     let speed = request.speed.unwrap_or(state.config().tts.speed);
@@ -3147,6 +3156,16 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "unknown_model");
+    }
+
+    #[test]
+    fn the_audio_body_limit_follows_the_configured_duration() {
+        // The default, ten minutes, is what the old constant said.
+        assert_eq!(max_audio_bytes(600), 48_000 * 2 * 600);
+        // A config that allows an hour must accept an hour of 48 kHz mono.
+        assert_eq!(max_audio_bytes(3600), 48_000 * 2 * 3600);
+        // A duration no allocation can hold must saturate rather than wrap.
+        assert!(max_audio_bytes(u32::MAX) >= 48_000 * 2 * 600);
     }
 
     #[tokio::test]
