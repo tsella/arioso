@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "server": {
+    "bind": "127.0.0.1:10101",
+    "auth": {
+      "mode": "none",
+      "token_env": "ARIOSO_TOKEN"
+    },
+    "first_message_timeout_ms": 10000
+  },
+  "tts": {
+    "enabled": true,
+    "engine": "piper",
+    "voice": "en_US-lessac-medium",
+    "speed": 1.0,
+    "format": "wav",
+    "dictionary": null,
+    "time_of_day": true
+  },
+  "stt": {
+    "enabled": true,
+    "engine": "sherpa",
+    "batch_model": "sherpa-whisper-base-en",
+    "stream_model": "sherpa-zipformer-en",
+    "language": "auto",
+    "partials": true,
+    "partial_interval_ms": 300,
+    "stability_window_ms": 200,
+    "word_timestamps": false,
+    "max_audio_s": 600,
+    "capture": {
+      "mode": "separate",
+      "sources": [
+        "mic"
+      ],
+      "loopback_device": null
+    }
+  },
+  "vad": {
+    "engine": "silero",
+    "threshold": 0.5,
+    "frame_ms": 32,
+    "min_speech_ms": 250,
+    "min_silence_ms": 700,
+    "padding_ms": 200,
+    "max_segment_ms": 30000
+  },
+  "audio": {
+    "output": "api",
+    "device": null,
+    "queue_ms": 2000
+  },
+  "models": {
+    "dir": null,
+    "mirror": null,
+    "max_concurrent_downloads": 2,
+    "auto_download": []
+  },
+  "log": {
+    "level": "info",
+    "format": "pretty",
+    "file": null,
+    "log_text": false
+  }
+}
