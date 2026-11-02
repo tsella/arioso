@@ -421,8 +421,9 @@ fn detach(config_path: &Path) -> Result<()> {
 /// A sidecar reports the port it got, so a taken port is not a failure: it is a reason to
 /// take another. Anywhere else a taken port is an error the operator must see.
 fn bind_listener(bind: &str, may_choose_port: bool) -> Result<std::net::TcpListener> {
-    let addr: std::net::SocketAddr = bind
-        .parse()
+    // The same resolution the config validated, so the socket takes the address the
+    // rules were applied to.
+    let addr = arioso_config::bind_address(bind)
         .with_context(|| format!("server.bind {bind:?} is not an address"))?;
     // Tokio refuses to register a blocking socket, and this one is handed straight to it.
     let prepare = |listener: std::net::TcpListener| -> Result<std::net::TcpListener> {

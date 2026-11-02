@@ -449,6 +449,44 @@ pub enum ConfigError {
     },
 }
 
+/// The address a bind string means.
+///
+/// `localhost` is an alias for 127.0.0.1: the loopback the rest of this project means
+/// when it says loopback, so a config that names it gets the same answers as one that
+/// spells the address out. Resolving here rather than at the socket makes the rules that
+/// ask "is this loopback" answer for the address the socket will take, and it picks IPv4
+/// so the port a caller is told is the port that answers.
+///
+/// A name that is not `localhost` is refused. The loopback rules cannot be applied to a
+/// name without a resolver, and a guard that skips what it cannot read is not a guard.
+pub fn bind_address(bind: &str) -> Result<SocketAddr, ConfigError> {
+    if let Ok(address) = bind.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    let unusable = |message: String| ConfigError::Invalid {
+        path: "server.bind".into(),
+        message,
+    };
+    let Some((host, port)) = bind.rsplit_once(':') else {
+        return Err(unusable(format!(
+            "server.bind {bind} is not an address; write an IP address and a port, for \
+             example 127.0.0.1:10101 or localhost:10101"
+        )));
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return format!("127.0.0.1:{port}").parse().map_err(|_| {
+            unusable(format!(
+                "server.bind {bind} has a port this machine cannot read; the port must be a \
+                 number from 0 to 65535"
+            ))
+        });
+    }
+    Err(unusable(format!(
+        "server.bind {bind} names a host, and only localhost can be checked without a \
+         resolver. Write an IP address, for example 127.0.0.1:{port} or 0.0.0.0:{port}"
+    )))
+}
+
 impl Config {
     /// Load a config file, falling back to defaults when the file is absent.
     ///
@@ -600,40 +638,33 @@ impl Config {
         // A sidecar exists to serve the process that started it. Reaching beyond this
         // machine is a different product with a different threat model, and it is refused
         // here so nobody ships the one while believing they have the other.
-        if self.server.sidecar {
-            match self.server.bind.parse::<SocketAddr>() {
-                Ok(address) if address.ip().is_loopback() => {}
-                _ => {
-                    return Err(ConfigError::Invalid {
-                        path: "server.sidecar".into(),
-                        message: format!(
-                            "server.sidecar needs a loopback bind, and server.bind is {}. A \
-                             sidecar serves the process that started it; bind 127.0.0.1, or \
-                             turn server.sidecar off and configure a token.",
-                            self.server.bind
-                        ),
-                    });
-                }
-            }
+        // Resolved once, so every rule below answers for the address the socket will
+        // actually take rather than for the string a person typed.
+        let bind = bind_address(&self.server.bind)?;
+        if self.server.sidecar && !bind.ip().is_loopback() {
+            return Err(ConfigError::Invalid {
+                path: "server.sidecar".into(),
+                message: format!(
+                    "server.sidecar needs a loopback bind, and server.bind is {}. A sidecar \
+                     serves the process that started it; bind 127.0.0.1 or localhost, or turn \
+                     server.sidecar off and configure a token.",
+                    self.server.bind
+                ),
+            });
         }
         // A server on a loopback address is reachable by this machine only. Any other
         // bind is reachable by whoever can route to it, and without a token that is
         // everyone. Refusing is the difference between a control and a comment in a log.
-        if self.server.auth.mode == "none" {
-            if let Ok(address) = self.server.bind.parse::<SocketAddr>() {
-                if !address.ip().is_loopback() {
-                    return Err(ConfigError::Invalid {
-                        path: "server.auth.mode".into(),
-                        message: format!(
-                            "server.bind {} is not a loopback address, so this server would \
-                             answer anyone who can reach it. Set server.auth.mode to \
-                             \"bearer\" and put the token in {}. Bind 127.0.0.1 to keep it \
-                             on this machine.",
-                            self.server.bind, self.server.auth.token_env
-                        ),
-                    });
-                }
-            }
+        if self.server.auth.mode == "none" && !bind.ip().is_loopback() {
+            return Err(ConfigError::Invalid {
+                path: "server.auth.mode".into(),
+                message: format!(
+                    "server.bind {} is not a loopback address, so this server would answer \
+                     anyone who can reach it. Set server.auth.mode to \"bearer\" and put the \
+                     token in {}. Bind 127.0.0.1 or localhost to keep it on this machine.",
+                    self.server.bind, self.server.auth.token_env
+                ),
+            });
         }
         if self.server.tls.cert.is_some() != self.server.tls.key.is_some() {
             return Err(ConfigError::Invalid {
@@ -661,13 +692,6 @@ impl Config {
                 message: "a cap of 0 refuses every connection".into(),
             });
         }
-        self.server
-            .bind
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::Invalid {
-                path: "server.bind".into(),
-                message: e.to_string(),
-            })?;
         if !(100..=600_000).contains(&self.server.first_message_timeout_ms) {
             return Err(ConfigError::Invalid {
                 path: "server.first_message_timeout_ms".into(),
@@ -966,6 +990,48 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("brust"), "{error}");
+    }
+
+    #[test]
+    fn localhost_is_the_loopback_for_every_rule() {
+        let mut config = Config::default();
+        config.server.bind = "localhost:10101".into();
+        config.server.sidecar = true;
+        config
+            .validate()
+            .expect("localhost is loopback, so a sidecar may bind it");
+
+        let mut config = Config::default();
+        config.server.bind = "localhost:10101".into();
+        config.server.auth.mode = "none".into();
+        config
+            .validate()
+            .expect("localhost is loopback, so no token is needed");
+    }
+
+    #[test]
+    fn localhost_resolves_to_the_ipv4_loopback() {
+        assert_eq!(
+            bind_address("localhost:10101").unwrap().to_string(),
+            "127.0.0.1:10101"
+        );
+        // Host names are compared without regard to case.
+        assert_eq!(
+            bind_address("LOCALHOST:9").unwrap().to_string(),
+            "127.0.0.1:9"
+        );
+    }
+
+    #[test]
+    fn a_bind_the_rules_cannot_read_is_refused_rather_than_skipped() {
+        // Before this, a name that did not parse fell past the token guard entirely, so a
+        // public hostname with no token loaded and then bound.
+        let mut config = Config::default();
+        config.server.bind = "myhost.lan:10101".into();
+        config.server.auth.mode = "none".into();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("server.bind"), "{err}");
+        assert!(err.to_string().contains("localhost"), "{err}");
     }
 
     #[test]
