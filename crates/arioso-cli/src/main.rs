@@ -37,6 +37,11 @@ enum Command {
     Doctor,
     /// Serve the HTTP API.
     Serve,
+    /// Show how text is expanded before it reaches the voice.
+    Normalize {
+        /// Text to expand.
+        text: String,
+    },
     /// Synthesize text to a WAV file.
     Say {
         /// Text to speak.
@@ -87,6 +92,10 @@ fn main() -> Result<()> {
         Command::Doctor => doctor(&config, &config_path),
         Command::Say { text, out, dict } => say(&config, &text, out, dict),
         Command::Serve => serve(config),
+        Command::Normalize { text } => {
+            println!("{}", arioso_core::normalize(&text));
+            Ok(())
+        }
         Command::Config { command } => match command {
             ConfigCommand::Schema => {
                 println!("{}", serde_json::to_string_pretty(&Config::json_schema())?);
