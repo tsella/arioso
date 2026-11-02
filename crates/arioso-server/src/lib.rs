@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::io::Write as _;
 use thiserror::Error;
 
 mod ws;
@@ -91,6 +92,11 @@ pub struct AppState {
     /// bounds how many may be open at once, and a caller that finds none free is told so
     /// rather than queued behind an unbounded wait.
     sessions: Arc<tokio::sync::Semaphore>,
+    /// The accept loop's handle, once the server is running.
+    ///
+    /// Set by whoever starts the server, because the server library does not own the
+    /// listener. Absent in tests, where there is no accept loop to stop.
+    handle: std::sync::OnceLock<axum_server::Handle<std::net::SocketAddr>>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -171,6 +177,7 @@ impl AppState {
             limiter,
             token,
             sessions,
+            handle: std::sync::OnceLock::new(),
             manifest,
             models_dir,
         })
@@ -181,6 +188,16 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// The accept loop's handle, when this process is serving.
+    pub(crate) fn handle(&self) -> Option<&axum_server::Handle<std::net::SocketAddr>> {
+        self.handle.get()
+    }
+
+    /// Give the state the accept loop's handle, so a route can stop the server.
+    pub fn attach_handle(&self, handle: axum_server::Handle<std::net::SocketAddr>) {
+        let _ = self.handle.set(handle);
+    }
+
     /// A permit for one streaming session, or `None` when every permit is in use.
     pub(crate) fn open_session(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(&self.sessions).try_acquire_owned().ok()
@@ -635,6 +652,8 @@ impl ApiError {
         list_voices,
         get_config,
         patch_config,
+        stop_server,
+        abort_server,
         list_models,
         synthesize,
         transcribe_audio
@@ -988,7 +1007,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
         .route("/v1/voices", get(list_voices))
-        .route("/v1/config", get(get_config).patch(patch_config));
+        .route("/v1/config", get(get_config).patch(patch_config))
+        .route("/v1/stop", post(stop_server))
+        .route("/v1/abort", post(abort_server));
 
     // The Swagger UI serves the document at the URL it is given, so this registers
     // /openapi.json as well as /docs. An explicit route beside it is a collision.
@@ -1370,6 +1391,72 @@ fn config_json(config: &Config) -> serde_json::Value {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// Stop the server gracefully.
+///
+/// Stops accepting, lets in-flight requests finish, and ends the process when they do or
+/// when the grace period expires. A caller that wants the work kept uses this one.
+#[utoipa::path(
+    post,
+    path = "/v1/stop",
+    tag = "lifecycle",
+    summary = "Stop gracefully",
+    description = "Stops accepting new connections, lets in-flight requests finish, and \
+        ends the process when they do or when `server.limits.shutdown_grace_ms` expires. \
+        A streaming session is ended, because it has no natural end.",
+    responses(
+        (status = 202, description = "The stop has begun"),
+        (status = 409, description = "This process is not serving", body = Problem)
+    )
+)]
+async fn stop_server(State(state): State<Arc<AppState>>) -> Response {
+    let grace = state.config().server.limits.shutdown_grace_ms;
+    let Some(handle) = state.handle() else {
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "no_accept_loop",
+            "this process is not serving, so there is nothing to stop",
+        )
+        .into_response();
+    };
+    tracing::info!(grace_ms = grace, "stopping on request");
+    handle.graceful_shutdown(Some(std::time::Duration::from_millis(grace)));
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "stopping": true, "grace_ms": grace })),
+    )
+        .into_response()
+}
+
+/// Stop now.
+///
+/// Answers first, so the caller is not left holding a connection that is about to vanish,
+/// then ends the process. Work in flight is dropped on purpose: a caller that wanted it
+/// kept would have asked to stop.
+#[utoipa::path(
+    post,
+    path = "/v1/abort",
+    tag = "lifecycle",
+    summary = "Stop immediately",
+    description = "Answers, flushes, and ends the process. In-flight work is dropped. Use \
+        this when a stuck request must not be waited for.",
+    responses((status = 202, description = "The process is ending"))
+)]
+async fn abort_server() -> Response {
+    tracing::warn!("aborting on request");
+    // The response has to leave the socket before the socket closes, so the exit happens
+    // in a task that runs after this one returns.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "aborting": true })),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
