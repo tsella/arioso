@@ -487,9 +487,9 @@ fn scan_marker(chars: &[char], start: usize) -> Option<(bool, usize)> {
     if chars.get(cursor) == Some(&'.') {
         cursor += 1;
     }
-    if chars
+    if !chars
         .get(cursor)
-        .is_none_or(|ch| ch.to_ascii_lowercase() != 'm')
+        .is_some_and(|ch| ch.eq_ignore_ascii_case(&'m'))
     {
         return None;
     }
