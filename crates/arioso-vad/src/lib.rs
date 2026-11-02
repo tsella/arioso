@@ -202,13 +202,6 @@ impl Segmenter {
             self.preroll.drain(..excess);
         }
     }
-
-    fn utterance_ms(&self, samples: usize) -> u32 {
-        if self.rate == 0 {
-            return 0;
-        }
-        u32::try_from(samples as u64 * 1000 / u64::from(self.rate)).unwrap_or(u32::MAX)
-    }
 }
 
 /// Root mean square of a frame.
