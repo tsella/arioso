@@ -419,3 +419,47 @@ interrupted download resumes from the partial file. SHA-256 is checked before a 
 used, never after. The
 license column is there because the default voice is research only; see the license
 section of the README before shipping anything.
+
+## 15. The API surface
+
+Start the server, then read what it can do instead of guessing. This run had
+`stt.enabled: false`, which is why one engine answers.
+
+```console
+$ arioso serve &
+$ curl -sS http://127.0.0.1:10101/v1/info
+{"version":"0.1.0","target":"x86_64-linux","engines":["piper"]}
+```
+
+```console
+$ curl -sS http://127.0.0.1:10101/v1/engines
+{"engines":[{"id":"piper","kind":"tts","streaming":true,"languages":["en-GB","en-US"],"models":5,"loaded":false}]}
+```
+
+```console
+$ curl -sS 'http://127.0.0.1:10101/v1/voices?language=en_GB'
+{"voices":[{"id":"piper-en_GB-alba-medium","engine":"piper","license":"CC-BY-4.0","commercial_use":true,"sample_rate":22050,"quality":"medium","languages":["en-GB"],"installed":true,"active":false}]}
+```
+
+The filter is a prefix and ignores the separator, so `en` finds both `en_US` and `en_GB`,
+and `en_GB` and `en-GB` find the same voice.
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' -d '{"persist":true,"tts":{"speed":1.6}}'
+$ curl -sS http://127.0.0.1:10101/v1/config | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["tts"]["speed"])'
+1.6
+```
+
+Restart the server and the number is still 1.6, because `persist` wrote the file. Without
+it the change holds until the process exits.
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' -d '{"tts":{"engine":"kokoro"}}'
+{"code":"invalid_value","detail":"tts.engine kokoro is not built into this binary; the engines here are piper","status":422,"title":"Unprocessable Entity","type":"about:blank"}
+```
+
+`/docs` renders the same surface as a page, and `/openapi.json` is the document for a
+client generator.

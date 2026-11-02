@@ -126,3 +126,38 @@ port or `ps -p <pid>` instead.
 
 **Backgrounding with `&` is refused by the terminal tool.** Use the background
 option and poll, or the call is rejected outright.
+
+## The server surface
+
+**A JSON `Value` is not a faithful echo of an `f32`.** Round-tripping a config through
+`serde_json::to_value` turns `1.4` into `1.399999976158142`, because the value stores an
+`f64` and the `f32` formatter never runs. A test comparing the two fails on a change that
+is correct. Serialise to text first and parse that when a number has to come back the way
+the file writes it.
+
+**A test can pin the wrong name and still pass.** The active-voice marker compared the
+config's bare `en_US-lessac-medium` to a catalog id `piper-en_US-lessac-medium`, so it
+marked nothing and every voice looked inactive. The fixture agreed with the bug because it
+asserted against the same bare name. Assert against what the code resolves to, not against
+the input it was given.
+
+**A document generated from handlers describes routes the server may not register.** With
+`stt.enabled: false` the route is absent and the document still promised `/v1/stt`, which
+sends a client to a 404. Cut the document to what the router actually built.
+
+**`to_value` on a struct with an `f32` and a test on the same value.** Two symptoms, one
+cause: the assertion is right and the serialisation path is wrong.
+
+## Shielding a readme
+
+**A badge is a claim.** Four is enough: ci, license, platforms, and what the product
+uniquely does. Platforms names only what the CI matrix runs, because a badge claiming iOS
+and Android promises what the repo cannot yet back. "No cloud" would be false while the
+downloader reaches the network; "inference local" is true. Check the badge URL returns 200
+before committing it, or the readme ships a broken image.
+
+**An example written from a real run finds what a test suite missed.** `?language=en_GB`
+returned nothing while the catalog said `en-GB`: the voice ids use an underscore and the
+manifest a hyphen, so a prefix match on the raw string failed for every real client
+query. The unit tests passed because they asked for `en`. Write the example output by
+running the command, then read the answer.

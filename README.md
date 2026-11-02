@@ -207,11 +207,59 @@ letters.
 | --- | --- | --- |
 | `/healthz` | GET | `ok`, once the process is up |
 | `/readyz` | GET | The voice, whether it is installed, and the dictionary state |
+| `/v1/info` | GET | Version, target, and the engines built into this binary |
+| `/v1/engines` | GET | What each engine can do, and whether one is loaded |
 | `/v1/models` | GET | Every model in the manifest, with size and license |
+| `/v1/voices` | GET | Voices with licence, rate, and which one is active |
+| `/v1/config` | GET, PATCH | The config; a patch changes it without a restart |
 | `/v1/tts` | POST | `audio/wav` for `{"text": "...", "speed": 1.0}` |
 | `/v1/tts/ws` | GET | Upgrade to WebSocket, then one PCM frame per sentence |
+| `/v1/stt` | POST | A transcript for a WAV body |
+| `/v1/stt/ws` | GET | Upgrade to WebSocket, then partial and final transcripts |
+| `/docs` | GET | Swagger UI over the document below |
+| `/openapi.json` | GET | The OpenAPI 3.1 document |
+
+The document is generated from the handlers, so a route cannot exist without appearing in
+it. A route belonging to a disabled engine is left out, because it is not registered.
 
 Errors use RFC 9457 problem details, with `status`, `title`, and `detail`.
+
+### Changing the config while it runs
+
+`PATCH /v1/config` changes only the fields you name:
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' \
+    -d '{"persist": true, "tts": {"speed": 1.6}}'
+```
+
+`persist` writes the file, so the change survives a restart. An unknown field is refused,
+so a typo cannot look like success:
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' -d '{"tts": {"speeed": 1.2}}'
+Failed to deserialize the JSON body into the target type: tts.speeed: unknown field
+`speeed`, expected one of `enabled`, `engine`, `voice`, `speed`, `format`, `time_of_day`
+at line 1 column 16
+```
+
+That one is axum's rejection and answers in plain text with 422. A value the schema
+accepts but the server cannot use answers in the problem-details shape instead.
+
+Validation runs on the whole resulting config before anything is applied, so a patch that
+names one bad value changes none of its good ones. An engine this binary cannot serve is
+refused with the name of the one it can:
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' -d '{"tts": {"engine": "kokoro"}}'
+{"code":"invalid_value","detail":"tts.engine kokoro is not built into this binary;
+the engines here are piper","status":422,...}
+```
+
+Kokoro is M4. Until then the switch mechanism works and has one destination.
 
 The WebSocket stream sends a `start` frame with the sample rate, one binary frame per
 sentence, and an `end` frame with the counts. Audio starts before the last sentence is
