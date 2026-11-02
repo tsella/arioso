@@ -47,7 +47,7 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
             }
         }
     }
-    forms.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    forms.sort_by_key(|form| std::cmp::Reverse(form.0.len()));
     if forms.is_empty() {
         return text.to_owned();
     }

@@ -18,6 +18,26 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The Piper engine links a native ONNX Runtime, and the vendored copy is
+      # gitignored, so CI fetches the release build into the same place.
+      - name: onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.22.0
+          case "${{ runner.os }}" in
+            Linux)   archive="onnxruntime-linux-x64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
+            macOS)   archive="onnxruntime-osx-arm64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
+            Windows) archive="onnxruntime-win-x64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.zip" ;;
+          esac
+          mkdir -p vendor
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            curl -sSL -o "$RUNNER_TEMP/$archive.zip" "$url"
+            unzip -q "$RUNNER_TEMP/$archive.zip" -d vendor
+          else
+            curl -sSL "$url" | tar -xz -C vendor
+          fi
+          mv "vendor/$archive" vendor/onnxruntime
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace
