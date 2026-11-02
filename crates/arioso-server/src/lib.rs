@@ -103,9 +103,9 @@ impl AppState {
         let mut samples = Vec::new();
         for chunk in chunk_text(text, SYNTHESIS_CHUNK) {
             let mut symbols: Vec<&str> = Vec::new();
-            for word in chunk.split(|c: char| {
-                c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')
-            }) {
+            for word in chunk
+                .split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
+            {
                 let cleaned: String = word
                     .chars()
                     .filter(|c| c.is_alphanumeric() || *c == '\'')
@@ -139,7 +139,10 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(status: StatusCode, detail: impl Into<String>) -> Self {
-        Self { status, detail: detail.into() }
+        Self {
+            status,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -303,7 +306,13 @@ mod tests {
     async fn call(app: Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes().to_vec();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
         (status, body)
     }
 
@@ -312,7 +321,10 @@ mod tests {
         let (state, _dir) = state();
         let (status, body) = call(
             router(state),
-            Request::builder().uri("/healthz").body(Body::empty()).unwrap(),
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -324,7 +336,10 @@ mod tests {
         let (state, _dir) = state();
         let (status, body) = call(
             router(state),
-            Request::builder().uri("/v1/models").body(Body::empty()).unwrap(),
+            Request::builder()
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::OK);

@@ -79,7 +79,9 @@ impl PiperVoice {
         let sample_rate = u32::try_from(raw_rate)
             .ok()
             .filter(|rate| (8_000..=48_000).contains(rate))
-            .ok_or_else(|| PiperError::Config(format!("audio.sample_rate {raw_rate} is out of range")))?;
+            .ok_or_else(|| {
+                PiperError::Config(format!("audio.sample_rate {raw_rate} is out of range"))
+            })?;
         let scale = |key: &str, fallback: f32| -> f32 {
             document
                 .pointer(&format!("/inference/{key}"))
