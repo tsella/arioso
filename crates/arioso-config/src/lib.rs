@@ -174,7 +174,9 @@ impl Default for Stt {
         Self {
             enabled: true,
             engine: "sherpa".into(),
-            batch_model: "sherpa-whisper-base".into(),
+            // The only speech to text model in the catalog. The PRD named whisper
+            // base; tiny is 103 MiB against 208, and proves the path on a laptop.
+            batch_model: "sherpa-whisper-tiny-en".into(),
             stream_model: "sherpa-zipformer-en".into(),
             language: "auto".into(),
             partials: true,

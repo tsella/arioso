@@ -708,6 +708,22 @@ those words are skipped and named, which leaves a hole in the sentence.
 Acceptance: `arioso say "zorbansky"` produces audio, and reports the word as pronounced by
 rule. Before this section the same command wrote a 44-byte WAV and warned.
 
+**Measured limit, found on the first round trip.** The reverse map in F14.9 matches a
+spoken form exactly, and real speech to text does not reproduce it exactly. Two runs, both
+synthesized by Arioso and read back by whisper tiny.en:
+
+| Spoken form | Whisper wrote | Corrected |
+| --- | --- | --- |
+| `tom seller` | `Tonseller` | no |
+| `koober netties` | `Cooper Netis` | no |
+| `sell a` | `cell a` | no |
+
+So the reverse map only fires when the transcript matches the written form letter for
+letter, which on this evidence is rare. The fix is to compare sounds rather than letters:
+pronounce both sides with CMUdict and the F15 rules, then allow a small edit distance on
+the phoneme sequence. That reuses machinery that already exists, and it is the next task
+in M2 rather than a change to this section.
+
 ## 9. Non-functional requirements
 
 | Area | Target |

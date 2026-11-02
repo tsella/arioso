@@ -18,6 +18,7 @@ arioso-config.workspace = true
 arioso-core.workspace = true
 arioso-g2p.workspace = true
 arioso-server.workspace = true
+arioso-stt-sherpa.workspace = true
 arioso-tts-piper.workspace = true
 arioso-models.workspace = true
 clap.workspace = true

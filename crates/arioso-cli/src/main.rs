@@ -53,6 +53,14 @@ enum Command {
         #[arg(long)]
         dict: Option<PathBuf>,
     },
+    /// Transcribe a WAV file to text.
+    Transcribe {
+        /// Audio file. Mono, 16-bit PCM or 32-bit float, any rate.
+        file: PathBuf,
+        /// Print JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print or export configuration.
     Config {
         #[command(subcommand)]
@@ -91,6 +99,7 @@ fn main() -> Result<()> {
         },
         Command::Doctor => doctor(&config, &config_path),
         Command::Say { text, out, dict } => say(&config, &config_path, &text, out, dict),
+        Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
         Command::Normalize { text } => {
             println!(
@@ -488,6 +497,58 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
         );
         Ok(1)
     }
+}
+
+/// Transcribe a file, with the user dictionary applied to the result.
+fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> Result<()> {
+    if !config.stt.enabled {
+        bail!("speech to text is off in the config (stt.enabled)");
+    }
+    let dir = models_dir(config);
+    let (samples, rate) =
+        arioso_tts_piper::wav::read(file).with_context(|| format!("reading {}", file.display()))?;
+
+    let language = if config.stt.language == "auto" {
+        None
+    } else {
+        Some(config.stt.language.as_str())
+    };
+    let engine = arioso_stt_sherpa::Whisper::load(&dir, language, 4).with_context(|| {
+        format!(
+            "loading {} from {}. Run `arioso models download {}` if it is missing.",
+            config.stt.batch_model,
+            dir.display(),
+            config.stt.batch_model
+        )
+    })?;
+    let transcript = engine.transcribe(&samples, rate)?;
+
+    // The dictionary runs backwards as well: every spoken form maps to its term, so a
+    // transcript comes back spelled the way the user writes it.
+    let user_path = config.dictionary_path(Some(config_path));
+    let user = match arioso_core::UserDictionary::load(&user_path) {
+        Ok(dictionary) => dictionary,
+        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::empty(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", user_path.display()));
+        }
+    };
+    let text = user.correct(&transcript.text);
+
+    if json {
+        let seconds = if rate == 0 {
+            0.0
+        } else {
+            samples.len() as f64 / f64::from(rate)
+        };
+        println!(
+            "{}",
+            serde_json::json!({ "text": text, "seconds": (seconds * 100.0).round() / 100.0 })
+        );
+    } else {
+        println!("{text}");
+    }
+    Ok(())
 }
 
 fn init_tracing(config: &Config) {
