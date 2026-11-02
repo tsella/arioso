@@ -759,3 +759,28 @@ purpose; a caller that wanted it kept would have asked to stop.
 
 `SIGTERM` and Ctrl-C take the same graceful path, so a service manager stopping the process
 and a caller posting `/v1/stop` get the same behaviour.
+
+## 20. Fetching and removing a model
+
+The catalog says what exists. These two routes change what exists.
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/models/nope/download
+{"code":"unknown_model","detail":"no model with id nope in the catalog","status":404,
+"title":"Not Found","type":"about:blank"}
+```
+
+A known id answers `202` and fetches in a background task, because a model is tens of
+megabytes and a caller that waits for it holds a connection open for the whole download.
+Asking again while it runs reports the download in flight rather than starting a second.
+
+Removing a model deletes the files the manifest names and nothing else:
+
+```console
+$ curl -sS -X DELETE http://127.0.0.1:10194/v1/models/piper-en_US-lessac-medium
+{"id":"piper-en_US-lessac-medium","removed":[]}
+```
+
+An empty list means the files were already absent, which is the state the caller asked
+for. While a download is running the answer is `409 download_in_progress`: removing a
+half-written set leaves a model the catalog calls installed and the engine cannot load.
