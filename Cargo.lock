@@ -92,6 +92,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arioso-g2p"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "arioso-models"
 version = "0.1.0"
 dependencies = [
