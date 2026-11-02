@@ -1,5 +1,8 @@
 # AGENTS.md
 
+If you want to use this library or binary rather than change it, read
+[IMPLEMENTATION.md](IMPLEMENTATION.md) first. This file is for working on the repository.
+
 Guidance for an agent working in this repository. Read this file before you change code.
 
 ## What arioso is
@@ -129,6 +132,47 @@ the exact expected phonemes.
 **Add an engine.** New crate implementing the same trait as `arioso-tts-piper`, wire it
 into `arioso-server` behind a config value, keep the license permissive or gate it behind
 a feature. Add the model entries.
+
+## Submitting a pull request
+
+The remote is named `upstream` (github.com/tsella/arioso), and `main` is the branch.
+`origin` does not exist here; a command that says `origin` is a copy from another
+repository.
+
+```bash
+git switch -c fix/pid-file-lock        # a name that says what the change does
+# … change, test, commit …
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+git push upstream HEAD:refs/heads/fix/pid-file-lock
+gh pr create --repo tsella/arioso --base main \
+  --head fix/pid-file-lock \
+  --title "fix(cli): lock the PID file before emptying it" \
+  --body-file /tmp/pr.md
+```
+
+Before you push, rebase onto the current `main` and make the history readable: one commit
+per logical change, each of which builds. A reviewer reads commits, not only the final
+tree.
+
+The body answers four questions, in this order:
+
+1. **What changed.** The behaviour a user sees, in one paragraph.
+2. **Why.** The defect or the need. A test that failed, an output that was wrong, an issue.
+3. **How it was verified.** The commands you ran and what they printed. Not "tests pass";
+   the command and its result, including the live call when the change is a route.
+4. **What is not covered.** The gap you know about, stated plainly. A reviewer who finds it
+   themselves trusts the rest less.
+
+Keep one behaviour per pull request. A PR that fixes a bug and renames a module cannot be
+reviewed as either.
+
+Never rewrite published history, force-push `main`, or amend a commit that others may have
+pulled, without asking first. The gate is a local promise; CI repeats it on three operating
+systems, and a red CI run is answered by reading the failing job, not by re-running it.
+
+The same rules about this machine's internals apply to a PR: no host names, no ports of
+other services, no home paths, no personal data in the title, the body, or the diff.
 
 ## Rules that are not negotiable here
 
