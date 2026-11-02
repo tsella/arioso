@@ -18,7 +18,8 @@
       "header_timeout_ms": 10000
     },
     "trust_forwarded_for": false,
-    "docs": true
+    "docs": true,
+    "sidecar": false
   },
   "tts": {
     "enabled": true,

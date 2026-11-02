@@ -81,6 +81,14 @@ pub struct Server {
     /// route is a map, and a map is the first thing a scanner wants.
     #[serde(default = "yes")]
     pub docs: bool,
+    /// Whether `arioso serve` detaches and hands its port to the caller.
+    ///
+    /// For a caller that wants a server, not a shell: an application spawns arioso, reads
+    /// one line from stdout, and talks HTTP. The child prints `START {port}` and nothing
+    /// else; logs and errors go to stderr so the port can be read from a pipe without
+    /// parsing.
+    #[serde(default)]
+    pub sidecar: bool,
 }
 
 /// The default for a boolean that is on unless the document says otherwise.
@@ -107,8 +115,12 @@ impl Tls {
 }
 
 /// What one client may ask for, and how long it may take to ask.
+///
+/// `default` and `deny_unknown_fields` together: a tunable added in a later version must
+/// not stop a config file written by an earlier one from loading, and a misspelled field
+/// must still be refused rather than silently ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct Limits {
     /// Requests per second a single client address may make.
     pub requests_per_second: u32,
@@ -120,6 +132,12 @@ pub struct Limits {
     ///
     /// Without this, a socket that opens and sends one byte a minute holds a slot.
     pub header_timeout_ms: u64,
+    /// How long a graceful stop waits for in-flight work before ending it.
+    ///
+    /// A stop that waits forever is not a stop, and one that ends immediately drops
+    /// responses that were nearly written. The default is long enough for a synthesis that
+    /// has started and short enough that a stuck client cannot hold the process open.
+    pub shutdown_grace_ms: u64,
 }
 
 impl Default for Limits {
@@ -129,6 +147,7 @@ impl Default for Limits {
             burst: 100,
             max_connections: 512,
             header_timeout_ms: 10_000,
+            shutdown_grace_ms: 5_000,
         }
     }
 }
@@ -145,6 +164,7 @@ impl Default for Server {
             limits: Limits::default(),
             trust_forwarded_for: false,
             docs: true,
+            sidecar: false,
         }
     }
 }
@@ -577,6 +597,25 @@ impl Config {
                 supported: SCHEMA_VERSION,
             });
         }
+        // A sidecar exists to serve the process that started it. Reaching beyond this
+        // machine is a different product with a different threat model, and it is refused
+        // here so nobody ships the one while believing they have the other.
+        if self.server.sidecar {
+            match self.server.bind.parse::<SocketAddr>() {
+                Ok(address) if address.ip().is_loopback() => {}
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        path: "server.sidecar".into(),
+                        message: format!(
+                            "server.sidecar needs a loopback bind, and server.bind is {}. A \
+                             sidecar serves the process that started it; bind 127.0.0.1, or \
+                             turn server.sidecar off and configure a token.",
+                            self.server.bind
+                        ),
+                    });
+                }
+            }
+        }
         // A server on a loopback address is reachable by this machine only. Any other
         // bind is reachable by whoever can route to it, and without a token that is
         // everyone. Refusing is the difference between a control and a comment in a log.
@@ -876,6 +915,57 @@ mod tests {
             let error = config.validate().unwrap_err().to_string();
             assert!(error.contains(field), "{field} must be named: {error}");
         }
+    }
+
+    #[test]
+    fn a_sidecar_needs_a_loopback_bind() {
+        let mut config = Config::default();
+        config.server.sidecar = true;
+        assert!(config.validate().is_ok(), "the default bind is loopback");
+
+        config.server.bind = "0.0.0.0:10101".into();
+        config.server.auth.mode = "bearer".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("server.sidecar"),
+            "the refusal should name the option: {error}"
+        );
+    }
+
+    #[test]
+    fn sidecar_is_off_unless_the_document_says_otherwise() {
+        assert!(!Config::default().server.sidecar);
+        let config = Config::from_json(
+            r#"{"schema_version":1,"server":{"sidecar":true}}"#,
+            std::path::Path::new("t.json"),
+        )
+        .unwrap();
+        assert!(config.server.sidecar);
+    }
+
+    #[test]
+    fn a_limit_block_may_name_one_field() {
+        // A config written before a tunable existed still loads, and takes the default
+        // for what it does not mention.
+        let config = Config::from_json(
+            r#"{"schema_version":1,"server":{"limits":{"burst":9}}}"#,
+            std::path::Path::new("t.json"),
+        )
+        .unwrap();
+        assert_eq!(config.server.limits.burst, 9);
+        assert_eq!(
+            config.server.limits.shutdown_grace_ms,
+            Limits::default().shutdown_grace_ms
+        );
+
+        // A misspelled field is still an error, not a silently ignored default.
+        let error = Config::from_json(
+            r#"{"schema_version":1,"server":{"limits":{"brust":9}}}"#,
+            std::path::Path::new("t.json"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("brust"), "{error}");
     }
 
     #[test]
