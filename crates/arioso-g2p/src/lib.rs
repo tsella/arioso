@@ -97,6 +97,15 @@ impl PhonemeMap {
         self.pad
     }
 
+    /// Id of the word separator, when the voice maps one.
+    ///
+    /// espeak emits it between words; a caller that joins words without it
+    /// produces one unbroken phoneme run.
+    #[must_use]
+    pub fn space(&self) -> Option<u32> {
+        self.ids.get(" ").and_then(|entry| entry.first().copied())
+    }
+
     /// Id of the beginning-of-sequence symbol.
     #[must_use]
     pub fn bos(&self) -> u32 {

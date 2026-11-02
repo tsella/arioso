@@ -29,6 +29,15 @@ fn control_symbols_are_exposed() {
 }
 
 #[test]
+fn the_word_separator_is_exposed() {
+    let map = PhonemeMap::from_voice_config(MAP).expect("valid config");
+    assert_eq!(map.space(), Some(3));
+    let without = PhonemeMap::from_voice_config(r#"{"phoneme_id_map":{"_":[0],"^":[1],"$":[2]}}"#)
+        .expect("valid config");
+    assert_eq!(without.space(), None);
+}
+
+#[test]
 fn a_missing_control_symbol_is_an_error() {
     let err = PhonemeMap::from_voice_config(r#"{"phoneme_id_map":{"h":[20]}}"#).unwrap_err();
     assert!(err.to_string().contains('_'), "{err}");
