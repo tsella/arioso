@@ -8,7 +8,7 @@ use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -492,6 +492,7 @@ impl ApiError {
         readyz,
         info,
         list_engines,
+        list_voices,
         list_models,
         synthesize,
         transcribe_audio
@@ -588,6 +589,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/info", get(info))
         .route("/v1/engines", get(list_engines))
+        .route("/v1/voices", get(list_voices))
         // The Swagger UI serves the document at the URL it is given, so this registers
         // /openapi.json as well as /docs. An explicit route beside it is a collision.
         .merge(
@@ -688,6 +690,44 @@ pub struct EngineListView {
     pub engines: Vec<EngineView>,
 }
 
+/// One voice as reported by `GET /v1/voices`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VoiceView {
+    /// Id to put in `tts.voice`.
+    pub id: String,
+    /// Engine that speaks it.
+    pub engine: String,
+    /// SPDX id of the voice's licence, which differs per voice.
+    pub license: String,
+    /// Whether the licence allows commercial use.
+    pub commercial_use: bool,
+    /// Rate the voice speaks at, from the manifest.
+    pub sample_rate: Option<u64>,
+    /// Quality tier the voice was trained at, where the manifest records one.
+    pub quality: Option<String>,
+    /// Languages the voice speaks.
+    pub languages: Vec<String>,
+    /// Whether its files are on disk.
+    pub installed: bool,
+    /// Whether this is the voice the server would load now.
+    pub active: bool,
+}
+
+/// Response body for `GET /v1/voices`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VoiceListView {
+    /// Every voice the catalog holds, after filtering.
+    pub voices: Vec<VoiceView>,
+}
+
+/// Query for `GET /v1/voices`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct VoicesQuery {
+    /// Keep only voices that speak this language, matched as a prefix so `en` finds
+    /// `en_US`.
+    pub language: Option<String>,
+}
+
 /// Response body for `GET /v1/models`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ModelListView {
@@ -770,6 +810,79 @@ async fn list_engines(State(state): State<Arc<AppState>>) -> Json<EngineListView
     Json(EngineListView {
         engines: state.engines(),
     })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/voices",
+    tag = "voices",
+    summary = "The voices the catalog holds",
+    description = "Marked with the active one, so a client can render a picker \
+        without a second call.",
+    params(VoicesQuery),
+    responses((status = 200, body = VoiceListView))
+)]
+async fn list_voices(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<VoicesQuery>,
+) -> Json<VoiceListView> {
+    // Resolve the way the loader does: the config may name the voice by its bare name,
+    // so comparing the raw string to a catalog id marks nothing active.
+    let active = state.voice_spec().ok().map(|spec| spec.id.clone());
+    let wanted = query
+        .language
+        .as_deref()
+        .map(str::to_lowercase)
+        .filter(|language| !language.is_empty());
+
+    let voices = state
+        .manifest
+        .models
+        .iter()
+        .filter(|model| model.kind == arioso_models::Kind::Tts)
+        .filter_map(|model| {
+            let languages = meta_strings(&model.meta, "languages");
+            if let Some(wanted) = &wanted {
+                let speaks = languages
+                    .iter()
+                    .any(|language| language.to_lowercase().starts_with(wanted.as_str()));
+                if !speaks {
+                    return None;
+                }
+            }
+            Some(VoiceView {
+                id: model.id.clone(),
+                engine: model.engine.clone(),
+                license: model.license.clone(),
+                commercial_use: model.commercial_use,
+                sample_rate: model
+                    .meta
+                    .get("sample_rate")
+                    .and_then(serde_json::Value::as_u64),
+                quality: model
+                    .meta
+                    .get("quality")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                languages,
+                installed: state.is_installed(model),
+                active: active.as_ref() == Some(&model.id),
+            })
+        })
+        .collect();
+    Json(VoiceListView { voices })
+}
+
+/// Strings under one key of a manifest's free-form metadata.
+fn meta_strings(meta: &serde_json::Value, key: &str) -> Vec<String> {
+    meta.get(key)
+        .and_then(|value| value.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[utoipa::path(
@@ -996,6 +1109,7 @@ mod tests {
             "/readyz",
             "/v1/info",
             "/v1/engines",
+            "/v1/voices",
             "/v1/models",
             "/v1/tts",
             "/v1/stt",
@@ -1075,6 +1189,73 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let engines = body["engines"].as_array().unwrap();
         assert!(engines.iter().all(|e| e["kind"] != "stt"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn voices_are_listed_and_the_active_one_is_marked() {
+        let (state, _dir) = state();
+        // The config names the voice by its bare name; the catalog answers with an id.
+        let active = state.voice_spec().unwrap().id.clone();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/voices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let voices = body["voices"].as_array().unwrap();
+        assert!(voices.len() >= 5, "the catalog holds five voices: {body}");
+        let marked: Vec<_> = voices
+            .iter()
+            .filter(|voice| voice["active"] == true)
+            .collect();
+        assert_eq!(marked.len(), 1, "exactly one voice is active: {body}");
+        assert_eq!(marked[0]["id"], active);
+        // A voice carries the licence a client needs to know about before shipping it.
+        assert!(voices.iter().all(|voice| voice["license"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn voices_are_filtered_by_language_prefix() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/voices?language=en")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let voices = body["voices"].as_array().unwrap();
+        assert!(!voices.is_empty(), "en must match en_US: {body}");
+        assert!(voices.iter().all(|voice| {
+            voice["languages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l.as_str().unwrap().starts_with("en"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_language_nobody_speaks_returns_no_voices() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/voices?language=zz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["voices"].as_array().unwrap().is_empty(), "{body}");
     }
 
     #[tokio::test]
