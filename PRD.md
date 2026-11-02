@@ -427,7 +427,7 @@ HTTP, JSON, versioned under `/v1`.
 | POST | `/v1/models/{id}/download` | Start or resume download |
 | DELETE | `/v1/models/{id}` | Remove from disk |
 | GET | `/v1/models/events` | SSE stream of download and load progress (not built) |
-| POST | `/v1/models/{id}/warm` | Load a model without waiting for a request (not built) |
+| POST | `/v1/models/{id}/warm` | Load a model without waiting for a request |
 | POST | `/v1/stop` | Stop gracefully: drain in-flight work, then exit |
 | POST | `/v1/abort` | Stop now: flush, drop in-flight work, exit |
 | GET | `/v1/engines` | Capabilities per engine: streaming, languages, voice count, loaded |

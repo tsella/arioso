@@ -784,3 +784,24 @@ $ curl -sS -X DELETE http://127.0.0.1:10194/v1/models/piper-en_US-lessac-medium
 An empty list means the files were already absent, which is the state the caller asked
 for. While a download is running the answer is `409 download_in_progress`: removing a
 half-written set leaves a model the catalog calls installed and the engine cannot load.
+
+### Warming a model
+
+The first synthesis pays for the model load. A caller that knows it is about to ask can
+pay it earlier:
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/models/piper-en_US-lessac-medium/warm
+{"id":"piper-en_US-lessac-medium","loaded":true}
+```
+
+Only the configured voice can be warmed, because there is one voice slot and loading a
+different model into it would change what the next request speaks. A model that is not on
+disk is refused rather than fetched:
+
+```console
+$ curl -sS -X POST http://127.0.0.1:10194/v1/models/piper-en_US-lessac-medium/warm
+{"code":"model_not_installed","detail":"piper-en_US-lessac-medium is not on disk;
+POST /v1/models/piper-en_US-lessac-medium/download first","status":409,
+"title":"Conflict","type":"about:blank"}
+```
