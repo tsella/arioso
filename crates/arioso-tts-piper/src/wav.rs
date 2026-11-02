@@ -30,6 +30,14 @@ pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
 
+    out.extend_from_slice(&pcm_s16le(samples));
+    out
+}
+
+/// Samples as little-endian 16-bit PCM, without a container.
+#[must_use]
+pub fn pcm_s16le(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 2);
     for &sample in samples {
         let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
         out.extend_from_slice(&scaled.to_le_bytes());
@@ -66,6 +74,13 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -i16::MAX);
+    }
+
+    #[test]
+    fn pcm_matches_the_file_payload() {
+        let samples = [0.0, 0.5, -0.5];
+        let wav = to_bytes(&samples, 16_000);
+        assert_eq!(&wav[44..], pcm_s16le(&samples).as_slice());
     }
 
     #[test]
