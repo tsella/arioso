@@ -172,7 +172,9 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
     if let Some((pattern, phonemes)) = PAIRS.iter().find(|(pattern, _)| rest.starts_with(pattern)) {
         let needs_start = matches!(*pattern, "kn" | "wr" | "gn" | "ps");
         let needs_end = *pattern == "mb";
-        if (!needs_start || at_start) && (!needs_end || ends_at(2)) {
+        // "or" before another r is two sounds, not one: sorry, carry, hurry.
+        let before_r = pattern.ends_with('r') && rest[2..].starts_with('r');
+        if (!needs_start || at_start) && (!needs_end || ends_at(2)) && !before_r {
             out.extend_from_slice(phonemes);
             return 2;
         }
@@ -304,6 +306,13 @@ mod tests {
         assert_eq!(say("play"), "P L EY1");
         assert_eq!(say("coin"), "K OY1 N");
         assert_eq!(say("boat"), "B OW1 T");
+    }
+
+    #[test]
+    fn a_doubled_r_does_not_get_a_r_coloured_vowel() {
+        assert_eq!(say("sorry"), "S AA1 R IY0");
+        assert_eq!(say("carry"), "K AE1 R IY0");
+        assert_eq!(say("hurry"), "HH AH1 R IY0");
     }
 
     #[test]

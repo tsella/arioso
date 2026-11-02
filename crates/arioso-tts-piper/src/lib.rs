@@ -325,8 +325,8 @@ fn text_symbols(
         if cleaned.is_empty() {
             continue;
         }
-        match dictionary.lookup(&cleaned) {
-            Some(pronunciations) => symbols.extend(arpabet::to_ipa(&pronunciations[0])),
+        let spoken: Vec<&'static str> = match dictionary.lookup(&cleaned) {
+            Some(pronunciations) => arpabet::to_ipa(&pronunciations[0]),
             None => {
                 // Not in the dictionary, so spell it out. A guessed word is heard
                 // and named; a skipped one leaves a hole.
@@ -339,10 +339,19 @@ fn text_symbols(
                     report.missing.push(cleaned);
                 } else {
                     report.guessed.push(cleaned);
-                    symbols.extend(guessed);
                 }
+                guessed
             }
+        };
+        if spoken.is_empty() {
+            continue;
         }
+        if !symbols.is_empty() {
+            // Words need the space symbol between them: the voice was trained with
+            // word boundaries, and without them the sequence reads as one long word.
+            symbols.push(" ");
+        }
+        symbols.extend(spoken);
     }
     symbols
 }
@@ -373,4 +382,67 @@ pub fn form_symbols(
         return None;
     }
     Some(symbols)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tiny dictionary, so the symbol path can be checked without a model.
+    const TWO_WORDS: &str = "hello HH AH0 L OW1\nworld W ER1 L D\n";
+
+    #[test]
+    fn words_are_separated_by_the_space_symbol() {
+        let dictionary = CmuDict::parse(TWO_WORDS);
+        let mut report = RenderReport::default();
+        let symbols = text_symbols(
+            "hello world",
+            &dictionary,
+            &mut report,
+            arioso_core::NormalizeOptions::default(),
+            true,
+        );
+        assert_eq!(
+            symbols.iter().filter(|symbol| **symbol == " ").count(),
+            1,
+            "one boundary between two words: {symbols:?}"
+        );
+        assert!(report.missing.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_word_nothing_can_say_leaves_no_empty_boundary() {
+        let dictionary = CmuDict::parse(TWO_WORDS);
+        let mut report = RenderReport::default();
+        let symbols = text_symbols(
+            "hello 123 world",
+            &dictionary,
+            &mut report,
+            arioso_core::NormalizeOptions::default(),
+            false,
+        );
+        assert!(
+            !symbols
+                .windows(2)
+                .any(|pair| pair[0] == " " && pair[1] == " "),
+            "no doubled space: {symbols:?}"
+        );
+        assert_eq!(symbols.last().copied(), Some("d"), "no trailing space");
+    }
+
+    #[test]
+    fn a_word_outside_the_dictionary_is_guessed_when_rules_are_allowed() {
+        let dictionary = CmuDict::parse(TWO_WORDS);
+        let mut report = RenderReport::default();
+        let symbols = text_symbols(
+            "zorbansky",
+            &dictionary,
+            &mut report,
+            arioso_core::NormalizeOptions::default(),
+            true,
+        );
+        assert!(!symbols.is_empty());
+        assert_eq!(report.guessed, vec!["zorbansky".to_string()]);
+        assert!(report.missing.is_empty());
+    }
 }
