@@ -564,6 +564,25 @@ impl Config {
                 supported: SCHEMA_VERSION,
             });
         }
+        // A server on a loopback address is reachable by this machine only. Any other
+        // bind is reachable by whoever can route to it, and without a token that is
+        // everyone. Refusing is the difference between a control and a comment in a log.
+        if self.server.auth.mode == "none" {
+            if let Ok(address) = self.server.bind.parse::<SocketAddr>() {
+                if !address.ip().is_loopback() {
+                    return Err(ConfigError::Invalid {
+                        path: "server.auth.mode".into(),
+                        message: format!(
+                            "server.bind {} is not a loopback address, so this server would \
+                             answer anyone who can reach it. Set server.auth.mode to \
+                             \"bearer\" and put the token in {}. Bind 127.0.0.1 to keep it \
+                             on this machine.",
+                            self.server.bind, self.server.auth.token_env
+                        ),
+                    });
+                }
+            }
+        }
         if self.server.tls.cert.is_some() != self.server.tls.key.is_some() {
             return Err(ConfigError::Invalid {
                 path: "server.tls".into(),
@@ -810,6 +829,19 @@ mod tests {
         let schema = serde_json::to_value(Config::json_schema()).unwrap();
         assert_eq!(schema["title"], "Config");
         assert!(schema["properties"]["server"].is_object());
+    }
+
+    #[test]
+    fn a_public_bind_without_a_token_is_refused() {
+        let mut config = Config::default();
+        config.server.bind = "0.0.0.0:10101".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("server.auth.mode"), "{error}");
+        assert!(error.contains("ARIOSO_TOKEN"), "{error}");
+
+        // The same address with a token is allowed.
+        config.server.auth.mode = "bearer".into();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

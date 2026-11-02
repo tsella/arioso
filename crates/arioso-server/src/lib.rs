@@ -45,6 +45,12 @@ pub enum ServerError {
     /// The user dictionary could not be used.
     #[error("user dictionary: {0}")]
     UserDictionary(#[from] arioso_core::DictError),
+    /// A bearer token was configured but the environment does not hold one.
+    #[error("server.auth.mode is bearer but the environment variable {variable} is empty or unset")]
+    Auth {
+        /// Environment variable that should hold the token.
+        variable: String,
+    },
     /// The certificate or key could not be read, or they do not match.
     #[error("reading the certificate {cert} and the key {key}: {source}")]
     Tls {
@@ -76,6 +82,8 @@ pub struct AppState {
     config_file: Option<std::path::PathBuf>,
     /// Per-client request budgets, from `server.limits`.
     limiter: RateLimiter,
+    /// The bearer token, when one was configured and found in the environment.
+    token: Option<String>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -104,6 +112,23 @@ impl AppState {
             config.server.limits.requests_per_second,
             config.server.limits.burst,
         );
+        // The token lives in the environment, never in the document. Asking for a bearer
+        // token and finding none is a startup failure: a server that thinks it is
+        // protected and is not is worse than one that refuses to start.
+        let token = if config.server.auth.mode == "bearer" {
+            let value =
+                std::env::var(&config.server.auth.token_env).map_err(|_| ServerError::Auth {
+                    variable: config.server.auth.token_env.clone(),
+                })?;
+            if value.trim().is_empty() {
+                return Err(ServerError::Auth {
+                    variable: config.server.auth.token_env.clone(),
+                });
+            }
+            Some(value)
+        } else {
+            None
+        };
         let config_file = config_file.map(std::path::Path::to_path_buf);
         let path = models_dir.join("cmudict.dict");
         let text = std::fs::read_to_string(&path)
@@ -134,6 +159,7 @@ impl AppState {
             config: std::sync::RwLock::new(config),
             config_file,
             limiter,
+            token,
             manifest,
             models_dir,
         })
@@ -144,6 +170,11 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// The bearer token this process requires, when one was configured.
+    pub(crate) fn token(&self) -> Option<String> {
+        self.token.clone()
+    }
+
     /// The address a request is charged to.
     ///
     /// `X-Forwarded-For` is only believed when `server.trust_forwarded_for` is on, because
@@ -831,6 +862,67 @@ async fn rate_limit(
     next.run(request).await
 }
 
+/// Compare two byte strings without returning early on the first difference.
+///
+/// A token check that returns as soon as a byte differs tells the caller how much of the
+/// guess was right, which turns one secret into a series of cheap questions.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+/// Require the bearer token when one is configured.
+///
+/// `/healthz` is the only route that answers without a token: a liveness probe has to work
+/// before the operator has read the config, and it reveals nothing but the fact that the
+/// process is alive. Everything else, including the config document and the API docs,
+/// needs the token.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(expected) = state.token() else {
+        return next.run(request).await;
+    };
+    if request.uri().path() == "/healthz" {
+        return next.run(request).await;
+    }
+    let presented = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+        return next.run(request).await;
+    }
+    tracing::debug!(
+        path = %request.uri().path(),
+        presented = !presented.is_empty(),
+        "refused a request without the token"
+    );
+    let mut response = ApiError::coded(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "this server needs a bearer token in the Authorization header",
+    )
+    .into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str("Bearer realm=\"arioso\"") {
+        response
+            .headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
 /// Build the router.
 ///
 /// A disabled engine does not register its routes, so `stt.enabled: false` answers 404
@@ -870,6 +962,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
         ))
         .with_state(state)
 }
@@ -2357,6 +2453,61 @@ mod tests {
         assert_eq!(
             call(router(state.clone()), ask("198.51.100.9")).await.0,
             StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_token_is_required_and_healthz_is_not() {
+        // Edition 2024 marks the environment as unsafe to mutate because another thread
+        // may be reading it. This test owns the variable's only use, and the name is
+        // unique to it.
+        unsafe { std::env::set_var("ARIOSO_TEST_TOKEN_AUTH", "s3cret-token") };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.server.auth.mode = "bearer".into();
+        config.server.auth.token_env = "ARIOSO_TEST_TOKEN_AUTH".into();
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let ask = |path: &str, token: Option<&str>| {
+            let mut request = Request::builder().uri(path);
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            request.body(Body::empty()).unwrap()
+        };
+
+        // No token, a wrong token, and the right one.
+        assert_eq!(
+            call(router(state.clone()), ask("/v1/info", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(router(state.clone()), ask("/v1/info", Some("wrong")))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(router(state.clone()), ask("/v1/info", Some("s3cret-token")))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        // A liveness probe answers without the token, and reveals only that it is alive.
+        assert_eq!(
+            call(router(state.clone()), ask("/healthz", None)).await.0,
+            StatusCode::OK
+        );
+        // The docs are behind the token like everything else.
+        assert_eq!(
+            call(router(state.clone()), ask("/openapi.json", None))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
         );
     }
 

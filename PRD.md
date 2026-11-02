@@ -799,6 +799,22 @@ and cannot do about a flood.
   the network's problem and is out of scope: what this server promises is to refuse work
   cheaply, not to absorb a flood. The README says so rather than implying otherwise.
 
+### F17. Authentication and exposure
+
+- F17.1 `server.auth.mode = "bearer"` requires `Authorization: Bearer <token>` on every
+  route. The token is read from the environment variable named by `server.auth.token_env`,
+  never from the document.
+- F17.2 A bearer mode with no token in the environment is a startup failure. A server that
+  believes it is protected and is not is worse than one that refuses to start.
+- F17.3 `/healthz` answers without a token. A liveness probe must work before the operator
+  has read the config, and it reveals only that the process is alive.
+- F17.4 The comparison is constant time, so a caller cannot learn the token one byte at a
+  time from response timing.
+- F17.5 A non-loopback `server.bind` without a token is refused at validation, and the
+  error names the exact fix. Exposure is a decision, not a typo.
+- F17.6 A refusal carries `WWW-Authenticate: Bearer realm="arioso"` and the problem code
+  `unauthorized`.
+
 ## 9. Non-functional requirements
 
 | Area | Target |
