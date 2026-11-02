@@ -1,6 +1,5 @@
 //! Writing mono 16-bit PCM WAV files.
 
-use std::io::Write;
 use std::path::Path;
 
 /// Write `samples` (nominally -1.0 to 1.0) as a mono 16-bit PCM WAV file.
@@ -9,28 +8,33 @@ use std::path::Path;
 ///
 /// Returns the underlying I/O error.
 pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    std::fs::write(path, to_bytes(samples, sample_rate))
+}
 
-    out.write_all(b"RIFF")?;
-    out.write_all(&(36 + data_len).to_le_bytes())?;
-    out.write_all(b"WAVEfmt ")?;
-    out.write_all(&16u32.to_le_bytes())?;
-    out.write_all(&1u16.to_le_bytes())?; // PCM
-    out.write_all(&1u16.to_le_bytes())?; // mono
-    out.write_all(&sample_rate.to_le_bytes())?;
-    out.write_all(&(sample_rate * 2).to_le_bytes())?; // byte rate
-    out.write_all(&2u16.to_le_bytes())?; // block align
-    out.write_all(&16u16.to_le_bytes())?; // bits per sample
-    out.write_all(b"data")?;
-    out.write_all(&data_len.to_le_bytes())?;
+/// The same audio as an in-memory WAV, for HTTP responses.
+#[must_use]
+pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
 
     for &sample in samples {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let scaled = (clamped * f32::from(i16::MAX)).round() as i16;
-        out.write_all(&scaled.to_le_bytes())?;
+        let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+        out.extend_from_slice(&scaled.to_le_bytes());
     }
-    out.flush()
+    out
 }
 
 #[cfg(test)]
@@ -62,5 +66,14 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -i16::MAX);
+    }
+
+    #[test]
+    fn bytes_match_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.wav");
+        let samples = [0.0, 0.25, -0.25];
+        write_wav(&path, &samples, 16_000).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), to_bytes(&samples, 16_000));
     }
 }
