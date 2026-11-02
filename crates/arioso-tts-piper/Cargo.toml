@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+arioso-core.workspace = true
 arioso-g2p.workspace = true
 ort.workspace = true
 serde_json.workspace = true

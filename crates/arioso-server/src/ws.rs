@@ -83,7 +83,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
     });
 
     let mut chunks = 0usize;
-    let mut frames = 0usize;
+    let mut total_samples = 0usize;
     while let Some((samples, rate)) = receiver.recv().await {
         if chunks == 0 {
             let start = json!({"type": "start", "sample_rate": rate, "format": "pcm_s16le"});
@@ -96,7 +96,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
             }
         }
         chunks += 1;
-        frames += samples.len();
+        total_samples += samples.len();
         if socket
             .send(Message::Binary(wav::pcm_s16le(&samples).into()))
             .await
@@ -120,7 +120,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
         None => json!({
             "type": "end",
             "chunks": chunks,
-            "samples": frames,
+            "samples": total_samples,
         }),
     };
     let _ = socket.send(Message::Text(frame.to_string().into())).await;

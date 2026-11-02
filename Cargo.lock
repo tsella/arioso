@@ -157,6 +157,7 @@ dependencies = [
 name = "arioso-tts-piper"
 version = "0.1.0"
 dependencies = [
+ "arioso-core",
  "arioso-g2p",
  "ort",
  "serde_json",

@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arioso_config::Config;
-use arioso_core::{chunk_text, sentences};
-use arioso_g2p::{CmuDict, arpabet};
+use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
-use arioso_tts_piper::{PiperVoice, wav};
+use arioso_tts_piper::{PiperError, PiperVoice, wav};
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -22,8 +21,6 @@ pub use ws::handler as ws_handler;
 
 /// Longest text one synthesis request accepts.
 pub(crate) const MAX_TEXT_CHARS: usize = 4_000;
-/// Chunk size handed to the voice, in characters.
-const SYNTHESIS_CHUNK: usize = 300;
 
 /// Why the server could not start.
 #[derive(Debug, Error)]
@@ -81,6 +78,15 @@ impl AppState {
             .ok_or_else(|| ServerError::NoVoice(self.config.tts.voice.clone()))
     }
 
+    /// Whether every file of `spec` is present at the recorded size.
+    fn is_installed(&self, spec: &ModelSpec) -> bool {
+        spec.files.iter().all(|file| {
+            std::fs::metadata(self.models_dir.join(&file.name))
+                .map(|meta| meta.len() == file.size)
+                .unwrap_or(false)
+        })
+    }
+
     fn file_of(&self, spec: &ModelSpec, suffix: &str) -> Result<PathBuf, String> {
         spec.files
             .iter()
@@ -125,33 +131,11 @@ impl AppState {
             *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
-        voice.set_speed(speed);
-
-        for sentence in sentences(text) {
-            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
-                let mut symbols: Vec<&str> = Vec::new();
-                for word in chunk.split(|c: char| {
-                    c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')
-                }) {
-                    let cleaned: String = word
-                        .chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '\'')
-                        .collect::<String>()
-                        .to_lowercase();
-                    if let Some(pronunciations) = self.dictionary.lookup(&cleaned) {
-                        if !symbols.is_empty() {
-                            symbols.push(" ");
-                        }
-                        symbols.extend(arpabet::to_ipa(&pronunciations[0]));
-                    }
-                }
-                if symbols.is_empty() {
-                    continue;
-                }
-                let audio = voice.synthesize(&symbols).map_err(|e| e.to_string())?;
-                sink(&audio, voice.sample_rate())?;
-            }
-        }
+        voice
+            .render(text, &self.dictionary, speed, |audio, rate| {
+                sink(audio, rate).map_err(PiperError::Consumer)
+            })
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
@@ -230,13 +214,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .manifest
         .models
         .iter()
-        .filter(|m| {
-            m.files.iter().all(|f| {
-                std::fs::metadata(state.models_dir.join(&f.name))
-                    .map(|meta| meta.len() == f.size)
-                    .unwrap_or(false)
-            })
-        })
+        .filter(|model| state.is_installed(model))
         .count();
     let voice_loaded = state
         .voice
@@ -260,11 +238,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
             kind: format!("{:?}", m.kind).to_lowercase(),
             engine: m.engine.clone(),
             license: m.license.clone(),
-            installed: m.files.iter().all(|f| {
-                std::fs::metadata(state.models_dir.join(&f.name))
-                    .map(|meta| meta.len() == f.size)
-                    .unwrap_or(false)
-            }),
+            installed: state.is_installed(m),
             bytes: m.total_size(),
         })
         .collect();

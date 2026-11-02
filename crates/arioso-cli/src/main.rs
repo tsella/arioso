@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use arioso_config::Config;
-use arioso_core::chunk_text;
-use arioso_g2p::{CmuDict, arpabet};
+use arioso_g2p::CmuDict;
 use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
 use arioso_tts_piper::{PiperVoice, wav::write_wav};
 use clap::{Parser, Subcommand};
@@ -239,35 +238,11 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
     let dictionary = CmuDict::parse(&dict_text);
 
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
-    voice.set_speed(config.tts.speed);
     let mut samples: Vec<f32> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-
-    for chunk in chunk_text(text, 300) {
-        let mut symbols: Vec<&str> = Vec::new();
-        for word in
-            chunk.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
-        {
-            let cleaned: String = word
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '\'')
-                .collect::<String>()
-                .to_lowercase();
-            match dictionary.lookup(&cleaned) {
-                Some(pronunciations) => {
-                    if !symbols.is_empty() {
-                        symbols.push(" ");
-                    }
-                    symbols.extend(arpabet::to_ipa(&pronunciations[0]));
-                }
-                None => missing.push(cleaned),
-            }
-        }
-        if symbols.is_empty() {
-            continue;
-        }
-        samples.extend(voice.synthesize(&symbols)?);
-    }
+    let missing = voice.render(text, &dictionary, config.tts.speed, |audio, _| {
+        samples.extend_from_slice(audio);
+        Ok(())
+    })?;
 
     if samples.is_empty() {
         bail!("nothing to say: none of the words are in the dictionary");

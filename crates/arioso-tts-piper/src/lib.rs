@@ -5,7 +5,8 @@
 
 use std::path::Path;
 
-use arioso_g2p::PhonemeMap;
+use arioso_core::{chunk_text, sentences};
+use arioso_g2p::{CmuDict, PhonemeMap, arpabet};
 use ort::session::Session;
 use ort::value::Tensor;
 use thiserror::Error;
@@ -35,7 +36,13 @@ pub enum PiperError {
     /// The model produced no output tensor.
     #[error("model returned no audio")]
     NoOutput,
+    /// The caller stopped accepting audio.
+    #[error("{0}")]
+    Consumer(String),
 }
+
+/// Longest piece of text handed to the model, in characters.
+pub const SYNTHESIS_CHUNK: usize = 300;
 
 /// A loaded Piper voice.
 pub struct PiperVoice {
@@ -117,6 +124,61 @@ impl PiperVoice {
     #[must_use]
     pub fn symbols(&self) -> usize {
         self.map.len()
+    }
+
+    /// Speak `text`, handing each piece of audio to `sink` as it is ready.
+    ///
+    /// The text is split into sentences, then capped by [`SYNTHESIS_CHUNK`].
+    /// Words missing from `dictionary` are skipped and returned, so the caller
+    /// can report them. One implementation serves both the CLI and the server;
+    /// splitting it would let their output drift apart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiperError`] when synthesis fails or `sink` refuses audio.
+    pub fn render(
+        &mut self,
+        text: &str,
+        dictionary: &CmuDict,
+        speed: f32,
+        mut sink: impl FnMut(&[f32], u32) -> Result<(), PiperError>,
+    ) -> Result<Vec<String>, PiperError> {
+        self.set_speed(speed);
+        let rate = self.sample_rate();
+        let mut missing = Vec::new();
+
+        for sentence in sentences(text) {
+            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+                let mut symbols: Vec<&str> = Vec::new();
+                for word in chunk.split(|c: char| {
+                    c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')
+                }) {
+                    let cleaned: String = word
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect::<String>()
+                        .to_lowercase();
+                    if cleaned.is_empty() {
+                        continue;
+                    }
+                    match dictionary.lookup(&cleaned) {
+                        Some(pronunciations) => {
+                            if !symbols.is_empty() {
+                                symbols.push(" ");
+                            }
+                            symbols.extend(arpabet::to_ipa(&pronunciations[0]));
+                        }
+                        None => missing.push(cleaned),
+                    }
+                }
+                if symbols.is_empty() {
+                    continue;
+                }
+                let audio = self.synthesize(&symbols)?;
+                sink(&audio, rate)?;
+            }
+        }
+        Ok(missing)
     }
 
     /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.
