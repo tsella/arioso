@@ -74,7 +74,7 @@ on every platform it ships to.
 
 ## 7. Architecture
 
-### 8.1 Workspace layout
+### 7.1 Workspace layout
 
 ```
 arioso/
@@ -99,7 +99,7 @@ arioso/
 `arioso-cli` is a thin wrapper: parse flags, load config, start `arioso-server`,
 or run one-shot commands (`arioso say`, `arioso transcribe file.wav`).
 
-### 8.2 Core traits
+### 7.2 Core traits
 
 ```rust
 pub trait TtsEngine: Send + Sync {
@@ -134,7 +134,7 @@ pub trait Vad: Send + Sync {
 sample rate, and the text span it covers, so a caller can do word highlighting
 without a second request.
 
-### 8.3 Audio I/O backends
+### 7.3 Audio I/O backends
 
 Playback uses `cpal`, which covers macOS, Linux, Windows, iOS, and Android with one
 API. Capture differs per platform, so it lives behind the capture trait:
@@ -144,7 +144,7 @@ API. Capture differs per platform, so it lives behind the capture trait:
   loopback on Windows.
 - macOS, Linux, iOS, Android: `cpal` input only in v1.
 
-### 8.4 Pipeline
+### 7.4 Pipeline
 
 TTS: text → normalize → G2P → phoneme IDs → engine inference → PCM chunks →
 resample → API sink or device sink.
@@ -260,6 +260,8 @@ ready`, or `failed { reason }`.
   accepts text fragments and returns audio frames plus a timing event.
 - F3.7 Output is deterministic for a fixed voice, speed, and engine version.
 - F3.8 Unsupported voice or language returns 422 with the list of valid values.
+- F3.9 Text passes through normalization and the user dictionary before phonemization.
+  See F14.
 
 ### F4. Speech to text
 
@@ -291,6 +293,8 @@ because it runs batch models and natively streaming models behind the same C API
 - F4.9 Translation to English is available for Whisper models and off by default.
 - F4.10 On Windows the input can be two sources at once, mic plus what the machine
   is playing. See F13. Every other platform captures the microphone only in v1.
+- F4.11 Finals pass through the user dictionary in reverse, so a term the user taught
+  the system comes back spelled their way. See F14.7.
 
 ### F5. Voice activity detection
 
@@ -595,6 +599,61 @@ the speakers. Transcribing only the mic loses half the conversation.
   that actually opened, because a caller needs to know when one failed.
 - F13.11 CPU cost is two engine sessions, not one. The semaphore in F11 accounts
   for it, and `separate` mode takes two permits.
+
+### F14. Text normalization and the user dictionary
+
+What a caller writes is rarely what should be spoken. Digits, currency, dates, and
+proper nouns need a deterministic transform before the phonemizer sees them, and the
+user needs a way to correct the result without waiting for a release.
+
+Order of operations, both directions:
+
+- Text to speech: sentence split, then user dictionary, then normalization, then
+  CMUdict, then letter-to-sound, then phonemes.
+- Speech to text: transcript, then user dictionary in reverse, then the corrected text.
+
+- F14.1 Normalization covers cardinals, currency, ordinals, times, dates, years,
+  percentages, and a short list of abbreviations. `$3.99` becomes
+  `three dollars ninety nine cents`; `2026` becomes `twenty twenty six`; `3rd`
+  becomes `third`.
+- F14.2 Normalization is language-specific. English ships in v1; every other language
+  passes through unchanged until its rules exist.
+- F14.3 Every expansion is inspectable without listening: `arioso normalize "<text>"`
+  prints the expanded text, and the server exposes the same result.
+- F14.4 The user dictionary is a `dictionary.json` file beside `config.json`, with the
+  path overridable in config and by environment variable.
+- F14.5 One written `term` maps to a list of `spoken` forms, tried in order. The first
+  form the active voice can render wins. If none can, the term falls back to
+  normalization and CMUdict, and `arioso doctor` reports the entry as unusable for
+  that voice.
+- F14.6 An entry may carry `phonemes` in ARPAbet, which takes precedence over `spoken`.
+  ARPAbet is voice-independent and is mapped to the voice's symbol set at render time,
+  so one entry serves every voice.
+- F14.7 Speech to text uses the same file in reverse: every `spoken` form and every
+  `phonemes` entry maps back to `term`, so a transcript containing `ah ree oh so`
+  becomes `arioso`. Correction applies to finals, not to provisional partials.
+- F14.8 Matching covers single words and multi-word phrases, longest match first,
+  case-insensitive by default, with `case_sensitive` per entry. Matching is on word
+  boundaries, so `cat` does not match inside `category`.
+- F14.9 Precedence is user dictionary, then normalization, then built-in dictionary,
+  then letter-to-sound. An entry that shadows a normalization rule is allowed and
+  logged at debug level.
+- F14.10 The file reloads when it changes, checked at request start, so a correction
+  needs no restart. A malformed file keeps the last good copy and reports the parse
+  error in `/readyz` as a warning; it never takes the server down.
+- F14.11 The file carries a schema version. Unknown fields are rejected, so a typo
+  fails loudly instead of being silently ignored.
+- F14.12 Validation: duplicate terms rejected, empty `spoken` forms rejected, phrases
+  capped in length, and every error names the offending entry.
+
+Assumptions taken without asking, all reversible:
+
+- A pronunciation is written as plain respelling, with optional ARPAbet for precision.
+  IPA is not accepted in v1.
+- The dictionary is a separate file, not a section of `config.json`.
+- The speech to text side is defined and implemented as a pure function now, and wired
+  to the engine when M2 lands.
+- Matching covers phrases as well as words, longest first, case-insensitive by default.
 
 ## 9. Non-functional requirements
 
