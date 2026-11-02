@@ -120,6 +120,32 @@ $ arioso normalize "It costs \$3.99 on the 3rd at 14:30."
 It costs three dollars and ninety nine cents on the third at two thirty in the afternoon.
 ```
 
+## Voices
+
+Four voices beyond the default, all verified by SHA-256 against the manifest:
+
+| id | tier | rate | licence | commercial |
+| --- | --- | --- | --- | --- |
+| `piper-en_US-lessac-medium` | medium | 22.05 kHz | Blizzard-2013 | no |
+| `piper-en_US-ljspeech-high` | high | 22.05 kHz | public domain | yes |
+| `piper-en_US-joe-medium` | medium | 22.05 kHz | CC0 | yes |
+| `piper-en_US-kathleen-low` | low | 16 kHz | CC0 | yes |
+| `piper-en_GB-alba-medium` | medium | 22.05 kHz | CC BY 4.0 | yes |
+
+Pick one with `ARIOSO_TTS_VOICE` or `tts.voice`. Measured on four cores with no GPU, same
+sentence, model load included:
+
+| voice | wall clock | audio | real time factor |
+| --- | --- | --- | --- |
+| `en_US-kathleen-low` | 2.40 s | 5.38 s | 0.45 |
+| `en_US-joe-medium` | 2.47 s | 4.92 s | 0.50 |
+| `en_GB-alba-medium` | 2.47 s | 4.83 s | 0.51 |
+| `en_US-lessac-medium` | 2.53 s | 5.03 s | 0.50 |
+| `en_US-ljspeech-high` | 5.77 s | 5.83 s | 0.99 |
+
+The high tier costs twice the time of medium and is not twice the voice. The low tier is
+the fastest and the smallest file, at 16 kHz.
+
 ## Speech to text
 
 `arioso transcribe` takes a WAV file, mono, 16-bit PCM or 32-bit float, at any rate. The

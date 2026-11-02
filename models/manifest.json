@@ -67,6 +67,130 @@
         "quantization": "int8",
         "license_note": "MIT, inherited from OpenAI Whisper"
       }
+    },
+    {
+      "id": "piper-en_US-ljspeech-high",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2023.11",
+      "license": "public-domain",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "en_US-ljspeech-high.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx",
+          "sha256": "5d4f08ba6a2a48c44592eed3ce56bf85e9de3dd4e20df90541ae68a8310c029a",
+          "size": 114199011
+        },
+        {
+          "name": "en_US-ljspeech-high.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json",
+          "sha256": "7e1f4634af596d83cca997fb7a931ba80b70f8a316a2655ee69c55365e0ace14",
+          "size": 4970
+        }
+      ],
+      "meta": {
+        "sample_rate": 22050,
+        "languages": [
+          "en-US"
+        ],
+        "num_speakers": 1,
+        "quality": "high",
+        "dataset": "LJ Speech, public domain"
+      }
+    },
+    {
+      "id": "piper-en_US-joe-medium",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2023.11",
+      "license": "CC0-1.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "en_US-joe-medium.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx",
+          "sha256": "58afce0321b8d9c46d7cdf9c16500cc55a793b4220212dba6b70fb788b3baf06",
+          "size": 63201294
+        },
+        {
+          "name": "en_US-joe-medium.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json",
+          "sha256": "3d6d5410b3795cb1950595247ef8f06190719e6fdbfa3a2356d8ec368e1aad33",
+          "size": 4794
+        }
+      ],
+      "meta": {
+        "sample_rate": 22050,
+        "languages": [
+          "en-US"
+        ],
+        "num_speakers": 1,
+        "quality": "medium",
+        "dataset": "voice-datasets, CC0"
+      }
+    },
+    {
+      "id": "piper-en_US-kathleen-low",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2023.11",
+      "license": "CC0-1.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "en_US-kathleen-low.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kathleen/low/en_US-kathleen-low.onnx",
+          "sha256": "87adf17f5326bc0782282147a8b9788406236245f0f9b0e68dacb651bc1de8b6",
+          "size": 63104526
+        },
+        {
+          "name": "en_US-kathleen-low.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kathleen/low/en_US-kathleen-low.onnx.json",
+          "sha256": "39ebab88416edce0f63781754651788620cb97b9bb73ddf3c01f28e29a648feb",
+          "size": 4169
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "languages": [
+          "en-US"
+        ],
+        "num_speakers": 1,
+        "quality": "low",
+        "dataset": "dataset-voice-kathleen, CC0"
+      }
+    },
+    {
+      "id": "piper-en_GB-alba-medium",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2023.11",
+      "license": "CC-BY-4.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "en_GB-alba-medium.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alba/medium/en_GB-alba-medium.onnx",
+          "sha256": "401369c4a81d09fdd86c32c5c864440811dbdcc66466cde2d64f7133a66ad03b",
+          "size": 63201294
+        },
+        {
+          "name": "en_GB-alba-medium.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alba/medium/en_GB-alba-medium.onnx.json",
+          "sha256": "aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4",
+          "size": 4888
+        }
+      ],
+      "meta": {
+        "sample_rate": 22050,
+        "languages": [
+          "en-GB"
+        ],
+        "num_speakers": 1,
+        "quality": "medium",
+        "dataset": "CC BY 4.0 dataset"
+      }
     }
   ]
 }
