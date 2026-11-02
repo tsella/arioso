@@ -62,6 +62,8 @@ pub struct Server {
 impl Default for Server {
     fn default() -> Self {
         Self {
+            // 10101 is IANA-registered to a defunct 2002 service and unused in
+            // practice.
             bind: "127.0.0.1:10101".into(),
             auth: Auth::default(),
         }
