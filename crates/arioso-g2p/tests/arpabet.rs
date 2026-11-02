@@ -24,6 +24,30 @@ fn secondary_stress_uses_the_weaker_mark() {
     assert_eq!(ipa[ipa.len() - 1], "i");
 }
 
+/// Reference output from espeak-ng through Piper's own bridge, for en-us.
+/// Only words where CMUdict and espeak agree on the phonemes themselves.
+const REFERENCE: &[(&str, &[&str])] = &[
+    ("HH AH0 L OW1", &["h", "ə", "l", "ˈ", "o", "ʊ"]),
+    ("W ER1 L D", &["w", "ˈ", "ɜ", "ː", "l", "d"]),
+    ("S IY1", &["s", "ˈ", "i", "ː"]),
+    ("T UW1", &["t", "ˈ", "u", "ː"]),
+    ("L AO1", &["l", "ˈ", "ɔ", "ː"]),
+    ("K AA1 R", &["k", "ˈ", "ɑ", "ː", "ɹ"]),
+    ("D EY1", &["d", "ˈ", "e", "ɪ"]),
+    ("K AH1 P", &["k", "ˈ", "ʌ", "p"]),
+    ("B UH1 K", &["b", "ˈ", "ʊ", "k"]),
+    ("F AA1 DH ER0", &["f", "ˈ", "ɑ", "ː", "ð", "ɚ"]),
+    ("N EY1 SH AH0 N", &["n", "ˈ", "e", "ɪ", "ʃ", "ə", "n"]),
+    ("B ER1 D", &["b", "ˈ", "ɜ", "ː", "d"]),
+];
+
+#[test]
+fn matches_the_espeak_reference() {
+    for (arpabet, expected) in REFERENCE {
+        assert_eq!(to_ipa(arpabet), expected.to_vec(), "{arpabet}");
+    }
+}
+
 #[test]
 fn unknown_phonemes_are_dropped() {
     assert_eq!(to_ipa("HH XX L"), vec!["h", "l"]);

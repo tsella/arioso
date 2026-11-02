@@ -19,7 +19,16 @@ pub fn phoneme_to_ipa(token: &str) -> Vec<&'static str> {
         }
     }
     symbols_out.extend_from_slice(symbols(base, stress));
+    if is_long(base, stress) {
+        symbols_out.push("ː");
+    }
     symbols_out
+}
+
+/// espeak lengthens the tense vowels when they carry stress, and leaves the lax
+/// ones alone: `see` is `s ˈ i ː`, `happy` is `h ˈ æ p i`.
+fn is_long(base: &str, stress: Option<u8>) -> bool {
+    matches!(stress, Some(1) | Some(2)) && matches!(base, "AA" | "AO" | "IY" | "UW" | "ER")
 }
 
 /// Symbols for a whole pronunciation such as `HH AH0 L OW1`.
