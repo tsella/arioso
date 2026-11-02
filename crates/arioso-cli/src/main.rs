@@ -205,6 +205,7 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
     let dictionary = CmuDict::parse(&dict_text);
 
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
+    voice.set_speed(config.tts.speed);
     let mut samples: Vec<f32> = Vec::new();
     let mut missing = 0usize;
 

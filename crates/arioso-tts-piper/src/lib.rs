@@ -43,6 +43,8 @@ pub struct PiperVoice {
     map: PhonemeMap,
     sample_rate: u32,
     scales: [f32; 3],
+    /// The voice's own length scale, before a speed multiplier.
+    length_scale: f32,
 }
 
 impl std::fmt::Debug for PiperVoice {
@@ -80,9 +82,10 @@ impl PiperVoice {
                 .and_then(serde_json::Value::as_f64)
                 .map_or(fallback, |v| v as f32)
         };
+        let length_scale = scale("length_scale", 1.0);
         let scales = [
             scale("noise_scale", 0.667),
-            scale("length_scale", 1.0),
+            length_scale,
             scale("noise_w", 0.8),
         ];
 
@@ -94,6 +97,7 @@ impl PiperVoice {
             map,
             sample_rate: u32::try_from(sample_rate).unwrap_or(22_050),
             scales,
+            length_scale,
         })
     }
 
@@ -107,6 +111,14 @@ impl PiperVoice {
     #[must_use]
     pub fn symbols(&self) -> usize {
         self.map.len()
+    }
+
+    /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.
+    ///
+    /// Piper slows speech by lengthening the acoustic time axis, so the scale
+    /// is divided by the speed.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.scales[1] = self.length_scale / speed;
     }
 
     /// The phoneme table, for callers that build sequences themselves.
