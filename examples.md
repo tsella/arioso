@@ -463,3 +463,49 @@ $ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
 
 `/docs` renders the same surface as a page, and `/openapi.json` is the document for a
 client generator.
+
+## 16. Watching it work
+
+The server logs to stderr, and the config decides the level and the shape. The default is
+`info` in human form:
+
+```console
+$ arioso serve
+listening on http://127.0.0.1:10101
+2026-11-02T10:13:37.803882Z  INFO arioso_server: reloaded the user dictionary entries=3
+```
+
+That line appears when `dictionary.json` changes under a running server: it re-reads the
+file, keeps the last good copy if the new one does not parse, and says how many entries it
+now holds.
+
+Set `log.format` to `json` for a log collector:
+
+```json
+{ "log": { "level": "info", "format": "json" } }
+```
+
+```console
+$ arioso serve
+listening on http://127.0.0.1:10101
+{"timestamp":"2026-11-02T10:13:24.537942Z","level":"INFO","fields":{"message":"reloaded the user dictionary","entries":2},"target":"arioso_server"}
+```
+
+`RUST_LOG` wins over `log.level` when it is set, so a debugging session needs no config
+edit:
+
+```console
+$ RUST_LOG=arioso_server=debug,arioso=debug arioso serve
+```
+
+Two keys in `log` are accepted and not yet used: `log.file` (write to a file instead of
+stderr) and `log.log_text` (include the sentence being synthesized). They parse, so a
+config that sets them is valid, and they change nothing. The PRD records them as
+unimplemented rather than the config pretending otherwise.
+
+`config.json.example` in the repository root is a complete document with every default in
+it. Copy it to the config path and edit what you need:
+
+```console
+$ cp config.json.example ~/.local/share/arioso/config.json
+```

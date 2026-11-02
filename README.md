@@ -267,6 +267,9 @@ synthesized, because the queue between them holds two frames.
 
 ## Configuration
 
+`config.json.example` in the repository root is a complete document with every default in
+it, and a test fails if the defaults move without it.
+
 The config file lives at `~/.local/share/arioso/config.json` on Linux,
 `~/Library/Application Support/arioso/config.json` on macOS, and
 `%LOCALAPPDATA%\arioso\config.json` on Windows. Pass `--config` to use another file.
@@ -301,6 +304,24 @@ Every setting has an environment override, and the environment wins over the fil
 
 `dictionary.json` sits beside the config file. One written term maps to one or more spoken
 forms, tried in order. The first form the voice can render wins.
+
+The binary ships a small dictionary and uses it when you have no file of your own. It
+holds the project's name and the name of the person it was built for, because neither is
+in CMUdict:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    { "term": "arioso", "spoken": ["ah ree oh so"] },
+    { "term": "Tom Sella", "spoken": ["tom seller"] },
+    { "term": "Sella", "phonemes": ["S EH1 L AA0"] }
+  ]
+}
+```
+
+Your file replaces it rather than adding to it, so what you wrote is what is heard. Copy
+the block above as a starting point and change the names to your own.
 
 ```json
 {
