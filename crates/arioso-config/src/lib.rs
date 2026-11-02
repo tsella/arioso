@@ -520,6 +520,11 @@ mod tests {
     }
 
     #[test]
+    fn default_bind_is_loopback_on_10101() {
+        assert_eq!(Config::default().server.bind, "127.0.0.1:10101");
+    }
+
+    #[test]
     fn defaults_validate() {
         Config::default().validate().expect("defaults are valid");
     }
