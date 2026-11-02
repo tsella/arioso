@@ -850,6 +850,11 @@ arioso, reads one line, and talks HTTP.
 - F19.2 The child writes exactly one line to stdout, `START {port}`, and flushes it.
   Everything else — logs, the listening message, errors — goes to stderr, so a caller can
   read the port from a pipe without parsing anything.
+- F19.2a `server.bind` accepts an IP address or `localhost`. `localhost` is the IPv4
+  loopback: it is resolved to `127.0.0.1` before the loopback rules run, so the sidecar rule
+  and the token rule answer for the socket the process will take. A host name other than
+  `localhost` is refused, because those rules cannot be applied to a name without a
+  resolver, and a guard that skips what it cannot read is not a guard.
 - F19.3 The child binds `server.bind`. When that port is taken it binds port 0 and reports
   the port the operating system gave it, so two instances on one machine never collide.
 - F19.4 The child writes `arioso-{port}.pid` beside the config file. The port is in the

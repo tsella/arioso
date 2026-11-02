@@ -195,3 +195,14 @@ and a field the operator misspelled is still refused.
 `TcpListener`, so the bind has to set non-blocking first. And the port line has to come
 after the server object exists, not after the bind: a bound socket is not a server that can
 answer, and the first version announced a port and then panicked.
+
+## A guard that skips what it cannot parse is not a guard
+
+The token rule read `server.bind.parse::<SocketAddr>()` and only checked the address when
+the parse succeeded. A config naming a host — `myhost.lan:10101` — fell past the guard
+entirely and loaded with no token, and the resolver bound it to whatever that name meant.
+`localhost` fell into the same hole from the other side: it is loopback, and the sidecar
+rule refused it.
+
+Resolve the bind once, before the rules run, and let every rule ask the resolved address.
+One resolution, one answer, and nothing gets to skip a check by being unreadable.

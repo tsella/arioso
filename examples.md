@@ -805,3 +805,28 @@ $ curl -sS -X POST http://127.0.0.1:10194/v1/models/piper-en_US-lessac-medium/wa
 POST /v1/models/piper-en_US-lessac-medium/download first","status":409,
 "title":"Conflict","type":"about:blank"}
 ```
+
+### localhost means 127.0.0.1
+
+`"bind": "localhost:10195"` is the same server as `"bind": "127.0.0.1:10195"`. The address
+is resolved before the rules run, so the sidecar check and the token check answer for the
+socket the process will actually take, and it is the IPv4 loopback:
+
+```console
+$ ss -ltn | grep 10195
+LISTEN 0 128 127.0.0.1:10195 0.0.0.0:*
+$ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:10195/healthz
+200
+```
+
+A host name other than `localhost` is refused, because the loopback rules cannot be
+applied to a name without a resolver:
+
+```console
+$ arioso --config bad.json serve
+Error: loading config from bad.json
+Caused by:
+    invalid config at server.bind: server.bind myhost.lan:10195 names a host, and only
+    localhost can be checked without a resolver. Write an IP address, for example
+    127.0.0.1:10195 or 0.0.0.0:10195
+```
