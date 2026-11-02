@@ -2,3 +2,4 @@
 *.part
 .env
 .DS_Store
+/vendor

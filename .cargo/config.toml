@@ -1,0 +1,4 @@
+# ONNX Runtime for the Piper engine. Place the prebuilt runtime in
+# vendor/onnxruntime (see the README); an existing ORT_LIB_LOCATION wins.
+[env]
+ORT_LIB_LOCATION = { value = "vendor/onnxruntime", relative = true, force = false }
