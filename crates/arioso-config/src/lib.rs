@@ -111,12 +111,12 @@ pub struct Tts {
     pub dictionary: Option<PathBuf>,
     /// Say the part of the day after a clock time: "seven forty five in the
     /// evening". A written `am` or `pm` decides it; otherwise the hour does.
-    #[serde(default = "yes")]
+    #[serde(default = "default_true")]
     pub time_of_day: bool,
 }
 
 /// A default that is on.
-fn yes() -> bool {
+fn default_true() -> bool {
     true
 }
 

@@ -51,14 +51,14 @@ pub struct RenderOptions {
     /// Speaking rate, as a multiplier of the voice's own length scale.
     pub speed: f32,
     /// How text is expanded before it is phonemized.
-    pub normalize: arioso_core::Options,
+    pub normalize: arioso_core::NormalizeOptions,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             speed: 1.0,
-            normalize: arioso_core::Options::default(),
+            normalize: arioso_core::NormalizeOptions::default(),
         }
     }
 }
@@ -246,7 +246,7 @@ impl PiperVoice {
         text: &str,
         dictionary: &CmuDict,
         missing: &mut Vec<String>,
-        options: arioso_core::Options,
+        options: arioso_core::NormalizeOptions,
     ) -> Vec<&'static str> {
         text_symbols(text, dictionary, missing, options)
     }
@@ -258,7 +258,7 @@ impl PiperVoice {
         &self,
         entry: &Entry,
         dictionary: &CmuDict,
-        options: arioso_core::Options,
+        options: arioso_core::NormalizeOptions,
     ) -> Option<Vec<&'static str>> {
         entry
             .forms()
@@ -307,7 +307,7 @@ fn text_symbols(
     text: &str,
     dictionary: &CmuDict,
     missing: &mut Vec<String>,
-    options: arioso_core::Options,
+    options: arioso_core::NormalizeOptions,
 ) -> Vec<&'static str> {
     let expanded = normalize_with(text, options);
     let mut symbols = Vec::new();
@@ -338,7 +338,7 @@ pub fn form_symbols(
     form: &str,
     map: &PhonemeMap,
     dictionary: &CmuDict,
-    options: arioso_core::Options,
+    options: arioso_core::NormalizeOptions,
 ) -> Option<Vec<&'static str>> {
     let symbols = if is_arpabet(form) {
         arpabet::to_ipa(form)

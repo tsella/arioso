@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                 "{}",
                 arioso_core::normalize_with(
                     &text,
-                    arioso_core::Options {
+                    arioso_core::NormalizeOptions {
                         time_of_day: config.tts.time_of_day,
                     },
                 )
@@ -277,7 +277,7 @@ fn say(
     let mut samples: Vec<f32> = Vec::new();
     let options = arioso_tts_piper::RenderOptions {
         speed: config.tts.speed,
-        normalize: arioso_core::Options {
+        normalize: arioso_core::NormalizeOptions {
             time_of_day: config.tts.time_of_day,
         },
     };
@@ -436,7 +436,7 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
                     form,
                     &map,
                     &pronunciations,
-                    arioso_core::Options::default(),
+                    arioso_core::NormalizeOptions::default(),
                 )
                 .is_some()
             })

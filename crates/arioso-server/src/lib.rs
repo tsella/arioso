@@ -205,7 +205,7 @@ impl AppState {
         let user = self.user_dictionary();
         let options = arioso_tts_piper::RenderOptions {
             speed,
-            normalize: arioso_core::Options {
+            normalize: arioso_core::NormalizeOptions {
                 time_of_day: self.config.tts.time_of_day,
             },
         };

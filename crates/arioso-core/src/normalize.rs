@@ -48,13 +48,13 @@ const ABBREVIATIONS: [(&str, &str); 12] = [
 
 /// How text is expanded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Options {
+pub struct NormalizeOptions {
     /// Say the part of the day after a clock time: "seven forty five in the
     /// evening". A written `am` or `pm` decides it; otherwise the hour does.
     pub time_of_day: bool,
 }
 
-impl Default for Options {
+impl Default for NormalizeOptions {
     fn default() -> Self {
         Self { time_of_day: true }
     }
@@ -64,12 +64,12 @@ impl Default for Options {
 /// with the default [`Options`].
 #[must_use]
 pub fn normalize(text: &str) -> String {
-    normalize_with(text, Options::default())
+    normalize_with(text, NormalizeOptions::default())
 }
 
 /// Expand with explicit [`Options`].
 #[must_use]
-pub fn normalize_with(text: &str, options: Options) -> String {
+pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
     let expanded = expand_abbreviations(text);
     let chars: Vec<char> = expanded.chars().collect();
     let mut out = String::with_capacity(expanded.len() * 2);
@@ -439,7 +439,7 @@ fn currency(dollars: u64, fraction: &[u64]) -> String {
 }
 
 /// The clock reading of an hour and minute pair.
-fn clock(hour: u64, minute: u64, second: u64, options: Options) -> String {
+fn clock(hour: u64, minute: u64, second: u64, options: NormalizeOptions) -> String {
     let twelve = if hour % 12 == 0 { 12 } else { hour % 12 };
     let mut spoken = match minute {
         0 => format!("{} o'clock", cardinal(twelve)),
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn without_the_option_the_hour_stands_alone() {
-        let options = Options { time_of_day: false };
+        let options = NormalizeOptions { time_of_day: false };
         assert_eq!(normalize_with("19:45", options), "seven forty five");
         assert_eq!(normalize_with("07:45", options), "seven forty five");
     }

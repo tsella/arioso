@@ -6,4 +6,4 @@ pub mod normalize;
 
 pub use chunk::{chunk_text, sentences};
 pub use dictionary::{DictError, Entry, Piece, UserDictionary};
-pub use normalize::{Options, normalize, normalize_with};
+pub use normalize::{NormalizeOptions, normalize, normalize_with};
