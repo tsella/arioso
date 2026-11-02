@@ -1,8 +1,12 @@
 //! Grapheme to phoneme conversion for Arioso.
 
+pub mod cmudict;
+
 use std::collections::HashMap;
 
 use thiserror::Error;
+
+pub use cmudict::CmuDict;
 
 /// Why a phoneme table could not be built.
 #[derive(Debug, Error)]
