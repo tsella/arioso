@@ -47,8 +47,27 @@ fn prepare(request: &StreamRequest, default_speed: f32) -> Result<(String, f32),
     Ok((text.to_owned(), speed))
 }
 
+/// The first message, or `None` when the client sends nothing in time or the
+/// connection ends first.
+async fn first_message(socket: &mut WebSocket, limit: std::time::Duration) -> Option<Message> {
+    match tokio::time::timeout(limit, socket.recv()).await {
+        Ok(Some(Ok(message))) => Some(message),
+        _ => None,
+    }
+}
+
 async fn run(mut socket: WebSocket, state: Arc<AppState>) {
-    let Some(Ok(Message::Text(payload))) = socket.recv().await else {
+    // A client that connects and says nothing must not hold the task open.
+    let limit = std::time::Duration::from_millis(state.config.server.first_message_timeout_ms);
+    let Some(first) = first_message(&mut socket, limit).await else {
+        let frame = json!({
+            "type": "error",
+            "detail": format!("no request within {} ms", limit.as_millis()),
+        });
+        let _ = socket.send(Message::Text(frame.to_string().into())).await;
+        return;
+    };
+    let Message::Text(payload) = first else {
         let frame = json!({"type": "error", "detail": "expected a JSON text message"});
         let _ = socket.send(Message::Text(frame.to_string().into())).await;
         return;

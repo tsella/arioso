@@ -72,3 +72,34 @@ async fn streams_one_frame_per_sentence() {
     assert_eq!(audio_frames, 2, "one frame per sentence");
     assert!(samples > 10_000, "only {samples} samples");
 }
+
+#[tokio::test]
+async fn a_client_that_says_nothing_is_dropped() {
+    let Ok(dir) = std::env::var("ARIOSO_TEST_MODELS_DIR") else {
+        eprintln!("skipped: ARIOSO_TEST_MODELS_DIR is not set");
+        return;
+    };
+
+    let mut config = Config::default();
+    config.models.dir = Some(PathBuf::from(dir));
+    // Short, so the test does not wait ten seconds for a real client's timeout.
+    config.server.first_message_timeout_ms = 200;
+    let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+    let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(state)).await.unwrap();
+    });
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/tts/ws"))
+        .await
+        .unwrap();
+
+    let first = socket.next().await.unwrap().unwrap();
+    let Message::Text(text) = first else {
+        panic!("expected an error frame, got {first:?}");
+    };
+    assert!(text.contains("no request within 200 ms"), "got {text}");
+}

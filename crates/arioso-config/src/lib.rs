@@ -57,6 +57,11 @@ pub struct Server {
     pub bind: String,
     /// Bearer token policy for exposure beyond loopback.
     pub auth: Auth,
+    /// How long a WebSocket client may stay silent before it is dropped.
+    ///
+    /// Without this, a client that connects and sends nothing holds a task for
+    /// as long as it keeps the connection open.
+    pub first_message_timeout_ms: u64,
 }
 
 impl Default for Server {
@@ -66,6 +71,7 @@ impl Default for Server {
             // practice.
             bind: "127.0.0.1:10101".into(),
             auth: Auth::default(),
+            first_message_timeout_ms: 10_000,
         }
     }
 }
@@ -470,6 +476,15 @@ impl Config {
                 path: "server.bind".into(),
                 message: e.to_string(),
             })?;
+        if !(100..=600_000).contains(&self.server.first_message_timeout_ms) {
+            return Err(ConfigError::Invalid {
+                path: "server.first_message_timeout_ms".into(),
+                message: format!(
+                    "{} is outside 100 to 600000",
+                    self.server.first_message_timeout_ms
+                ),
+            });
+        }
         match self.server.auth.mode.as_str() {
             "none" | "bearer" => {}
             other => {
@@ -593,6 +608,14 @@ mod tests {
         let err = Config::from_json(r#"{"tts":{"speed":3.0}}"#, &origin()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("tts.speed"), "{msg}");
+    }
+
+    #[test]
+    fn a_silent_client_timeout_is_validated() {
+        let err = Config::from_json(r#"{"server":{"first_message_timeout_ms":5}}"#, &origin())
+            .unwrap_err();
+        assert!(err.to_string().contains("server.first_message_timeout_ms"));
+        assert_eq!(Config::default().server.first_message_timeout_ms, 10_000);
     }
 
     #[test]
