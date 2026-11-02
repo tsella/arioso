@@ -1,6 +1,6 @@
 //! ARPAbet to the IPA symbols the voice expects.
 
-use arioso_g2p::arpabet::{phoneme_to_ipa, to_ipa};
+use arioso_g2p::arpabet::{is_phoneme, phoneme_to_ipa, to_ipa};
 
 /// Every symbol `en_US-lessac-medium` maps, taken from its phoneme_id_map.
 /// Single characters only: diphthongs and affricates are sequences.
@@ -77,4 +77,21 @@ fn every_emitted_symbol_exists_in_the_voice() {
             }
         }
     }
+}
+
+#[test]
+fn a_phoneme_is_recognised_in_any_case() {
+    assert!(is_phoneme("AH0"));
+    assert!(is_phoneme("ah0"));
+    assert!(is_phoneme("AA"));
+    assert!(is_phoneme("ch"));
+    assert!(!is_phoneme("TOM"));
+    assert!(!is_phoneme("hello"));
+    assert!(!is_phoneme(""));
+}
+
+#[test]
+fn a_lowercase_pronunciation_gives_the_same_symbols() {
+    assert_eq!(to_ipa("ah0 l ow1"), to_ipa("AH0 L OW1"));
+    assert!(to_ipa("ah0 l ow1").contains(&"ə"));
 }

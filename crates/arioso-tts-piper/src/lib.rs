@@ -73,14 +73,18 @@ pub struct RenderReport {
 }
 
 /// Whether a form is written in ARPAbet rather than as a respelling.
+///
+/// Every token must be a phoneme the table knows, in any case. A capitalised
+/// respelling such as "TOM SELLER" fails this test and is looked up as words.
 fn is_arpabet(form: &str) -> bool {
-    form.split_whitespace().all(|phoneme| {
-        phoneme
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-    }) && form
-        .split_whitespace()
-        .any(|phoneme| phoneme.chars().all(|ch| ch.is_ascii_uppercase()))
+    let mut seen = false;
+    for token in form.split_whitespace() {
+        if !arioso_g2p::arpabet::is_phoneme(token) {
+            return false;
+        }
+        seen = true;
+    }
+    seen
 }
 
 /// A loaded Piper voice.

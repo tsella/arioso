@@ -13,10 +13,20 @@
 //! as `ɐ` rather than `ə`, depending on where the word sits. CMUdict does not
 //! carry that information, so this table always writes `ə`.
 
+/// Whether a token is a phoneme this table knows, with or without a stress
+/// digit. Case does not matter: `ah0` and `AH0` are the same token.
+#[must_use]
+pub fn is_phoneme(token: &str) -> bool {
+    let upper = token.to_ascii_uppercase();
+    let (base, stress) = split_stress(&upper);
+    !symbols(base, stress).is_empty()
+}
+
 /// Symbols for one ARPAbet token such as `AH0`.
 #[must_use]
 pub fn phoneme_to_ipa(token: &str) -> Vec<&'static str> {
-    let (base, stress) = split_stress(token);
+    let upper = token.to_ascii_uppercase();
+    let (base, stress) = split_stress(&upper);
     let mut symbols_out = Vec::with_capacity(3);
     if let Some(digit) = stress {
         if let Some(mark) = stress_mark(digit) {
