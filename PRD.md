@@ -646,6 +646,12 @@ Order of operations, both directions:
 - F14.12 Validation: duplicate terms rejected, empty `spoken` forms rejected, phrases
   capped in length, and every error names the offending entry.
 
+- F14.13 Times are spoken on a 12-hour clock with no marker, decided deliberately.
+  `19:45` and `07:45` both read as "seven forty five". A listener cannot tell them
+  apart, and that is accepted. There is no workaround today: a dictionary entry
+  cannot match across the colon, because a phrase may not straddle punctuation.
+  Changing this is a product decision, not a bug fix.
+
 Assumptions taken without asking, all reversible:
 
 - A pronunciation is written as plain respelling, with optional ARPAbet for precision.

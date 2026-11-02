@@ -422,6 +422,15 @@ mod tests {
     }
 
     #[test]
+    fn times_are_twelve_hour_with_no_marker() {
+        // Deliberate, per PRD F14.13: the morning and the evening sound the same.
+        assert_eq!(normalize("19:45"), "seven forty five");
+        assert_eq!(normalize("07:45"), "seven forty five");
+        assert_eq!(normalize("23:59"), "eleven fifty nine");
+        assert_eq!(normalize("00:00"), "twelve o'clock");
+    }
+
+    #[test]
     fn times() {
         assert_eq!(normalize("14:30"), "two thirty");
         assert_eq!(normalize("14:00"), "two o'clock");
