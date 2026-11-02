@@ -1,20 +1,23 @@
 # Arioso
 
-Speech out of text, on your own machine. No account, no API key, no audio leaving the box.
+[![ci](https://github.com/tsella/arioso/actions/workflows/ci.yml/badge.svg)](https://github.com/tsella/arioso/actions/workflows/ci.yml)
 
-Arioso is a Rust library and a single binary. It speaks text with Piper voices, streams
-audio over WebSocket as each sentence is ready, and gives you a place to correct the
-pronunciation of your own names. Speech to text comes next.
+Speech out of text, and text out of speech, on your own machine. No account, no API key,
+no audio leaving the box.
+
+Arioso is a Rust library and a single binary. It speaks with Piper voices and listens with
+Whisper, streams both ways over WebSocket, and gives you a place to correct the
+pronunciation of your own names in both directions.
 
 ```console
 $ arioso say "hello world. this is arioso speaking locally."
 wrote arioso.wav (2.11 s at 22050 Hz)
-1 word(s) not in the dictionary and skipped: arioso
+1 word(s) not in the dictionary, spoken by spelling rules: arioso
 ```
 
-That warning is the point of the dictionary section below. Arioso tells you what it could
-not say instead of quietly leaving a hole in the sentence. The length moves by a few
-hundredths between runs, because the model samples noise.
+That line is the point of the dictionary section below: a word the built-in dictionary
+does not hold is spoken by spelling rules, and named, so a guess is never silent. The
+length moves by a few hundredths between runs, because the model samples noise.
 
 ## Why this exists
 
