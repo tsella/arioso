@@ -201,14 +201,43 @@ Four defects, three of them silent.
    which accepts "less than 30 seconds". The window is now 29 seconds, and the engine's
    warning count went from dozens per run to zero.
 
-### What would change the result
+### Where the errors come from
 
-- A larger model. `small.en` is roughly three times the memory and two to three times the
-  time for a materially lower error rate; this run used the default tier on purpose.
-- Splitting at pauses instead of at a fixed window. The insertions and deletions cluster at
-  window edges, where a cut can fall inside a word.
-- Punctuation in the transcript. Whisper writes sentences without it, so a caller that
-  needs sentences must add them back.
+514 errors, classified by comparing the pronunciation of each pair in CMUdict. A pair with
+the same phonemes is not a mishearing: the model heard the sound and wrote another word
+that sounds the same.
+
+| cause | count | share | example |
+| --- | --- | --- | --- |
+| genuine mishearing | 164 | 31.9% | `trammels` → `traimals`, `controvert` → `contour` |
+| function word for function word | 103 | 20.0% | `and` → `in`, `the` → `that` |
+| near homophone | 78 | 15.2% | `flashed` → `flushed`, `caressed` → `crest` |
+| spelling variant | 64 | 12.5% | `traveller` → `traveler` |
+| invented a word | 45 | 8.8% | an `and` that was never said |
+| dropped a word | 32 | 6.2% | a `the` that was |
+| homophone | 26 | 5.1% | `passed` → `past`, `our` → `hour` |
+| rare word misheard | 2 | 0.4% | `recondite` → `recognized` |
+
+Three of those groups are the same event at different distances: spelling variant,
+homophone and near homophone total **168 errors, 32.7 percent**, where the sound was heard
+and a different word was chosen. A larger model reduces them; a dictionary removes the ones
+you care about.
+
+The genuine mishearings concentrate in the vocabulary: `trammels`, `controvert`,
+`spasmodic`, `lameness`, `nil`, `unreal`. This is an 1895 novel, and a model trained on
+modern prose meets those words rarely. That is a property of the corpus, not of the
+pipeline, and it is the reason a modern-text run would score better: a claim this run did
+not test.
+
+The 77 inserted and dropped words are mostly real, not alignment noise: only 7 of the 45
+insertions sit next to a deletion, which is what a moved word looks like. The rest are the
+decoder adding a connective or dropping a small word.
+
+Chunk boundaries are not a significant contributor, measured: nine boundaries, the regions
+around them hold 4 percent of the reference words and 5 percent of the errors. My earlier
+guess that errors cluster at window edges was wrong for the text-to-speech chunk edges. The
+engine's internal 29-second windows cannot be located from the transcript alone, so their
+share is unmeasured rather than absent.
 
 ### What this did not measure
 
