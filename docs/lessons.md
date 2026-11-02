@@ -30,6 +30,19 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**A summary line is not the result.** Two server tests were failing and the
+commit went in anyway, because the check summed a parsed field of `cargo test`
+output instead of reading its exit code. The field was wrong, so the number
+looked fine. Rule: gate a commit on the exit code, and never on a number you
+computed from the output.
+
+**Two writes in one clock tick look like one.** The dictionary reload compares
+modification times, so a test that rewrites the file microseconds after the first
+write sometimes sees no change and sometimes does. The test now moves the
+modification time forward by hand. Rule: when production keys on a clock, the
+test sets the clock; it does not race it. The production limit is real and
+accepted: two saves inside one tick are indistinguishable.
+
 **A module that is not declared compiles to nothing.** Twice, a new file with
 tests was written but never added to `lib.rs`, so `cargo test` reported the old
 count and passed. Rule: after adding a module, check that the test count went up

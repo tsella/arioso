@@ -475,6 +475,16 @@ mod tests {
         assert_eq!(json["voice_installed"], false);
     }
 
+    /// Write a dictionary and move its modification time forward, so a second
+    /// write in the same clock tick is still a change. Two writes microseconds
+    /// apart are indistinguishable by time alone, and a test must not race it.
+    fn write_dictionary(path: &std::path::Path, text: &str, forward: u64) {
+        std::fs::write(path, text).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(forward))
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn readiness_reports_the_user_dictionary() {
         let (state, _dir) = state();
@@ -522,14 +532,14 @@ mod tests {
         assert_eq!(json["dictionary"]["entries"], 1);
 
         // Add a second entry and ask again.
-        std::fs::write(
+        write_dictionary(
             &path,
             r#"{"version": 1, "entries": [
                 {"term": "arioso", "spoken": ["ah ree oh so"]},
                 {"term": "Sella", "spoken": ["seller"]}
             ]}"#,
-        )
-        .unwrap();
+            2,
+        );
         let (_, body) = call(
             router(Arc::clone(&state)),
             Request::builder()
@@ -559,7 +569,8 @@ mod tests {
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
         let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 
-        std::fs::write(&path, "{ not json").unwrap();
+        write_dictionary(&path, "{ not json", 2);
+
         let (_, body) = call(
             router(Arc::clone(&state)),
             Request::builder()
