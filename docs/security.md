@@ -54,19 +54,27 @@ non-loopback bind unless a token is configured, and the error names the exact fi
 **Comparison was not the only issue.** The token check uses a constant-time comparison, so
 a caller cannot learn the token one byte at a time from response timing.
 
+**Engine detail no longer reaches the client.** The runtime's message could name a path or
+a library symbol. It is logged at `error` and the client gets a stable sentence, so a failed
+transcription is not a map of the machine. The same applies to a failed config write.
+
+**Response headers.** Every response now carries `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`. Measured:
+
+```console
+$ curl -s -D - -o /dev/null -H 'Authorization: Bearer s3cret' http://127.0.0.1:10195/healthz
+HTTP/1.1 200 OK
+x-content-type-options: nosniff
+referrer-policy: no-referrer
+x-frame-options: DENY
+```
+
 ## What is still open
 
 These are known and not fixed. They are listed so nobody assumes they were.
 
-- **Engine error detail reaches the client.** `SttFailure::Engine(detail)` is returned in
-  the problem document. That detail comes from the runtime and may contain paths or library
-  messages. It should be logged at `error` and replaced with a stable sentence.
-- **Config write errors name the path.** `writing {path:?}: {error}` is useful in a log and
-  unnecessary in a response.
-- **No security headers.** `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
-  and a restrictive CSP for the Swagger UI are all absent.
 - **The API document is served whenever the server runs.** Behind a token now, but a
-  deployment may want `/docs` off entirely.
+  deployment may want `/docs` off entirely. There is no switch for it yet.
 - **No connection cap.** `server.limits.max_connections` parses and does nothing; the accept
   loop belongs to `axum-server`. The header timeout and the rate limiter are the controls
   that exist.

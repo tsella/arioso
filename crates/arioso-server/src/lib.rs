@@ -923,6 +923,30 @@ async fn require_auth(
     response
 }
 
+/// Add the response headers that cost nothing and close the cheap classes of browser bug.
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    // A browser that sniffs a JSON body as HTML turns a reflected string into a script.
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // A URL from this server should not carry the address of a private one.
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    response
+}
+
 /// Build the router.
 ///
 /// A disabled engine does not register its routes, so `stt.enabled: false` answers 404
@@ -967,6 +991,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_auth,
         ))
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
 }
 
@@ -1342,11 +1367,10 @@ async fn patch_config(
             ));
         };
         next.save(path).map_err(|error| {
-            ApiError::coded(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "config_write_failed",
-                format!("writing {path:?}: {error}"),
-            )
+            ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "config_write_failed", {
+                tracing::error!(path = %path.display(), %error, "could not write the config");
+                "the config file could not be written; the server log has the detail".to_owned()
+            })
         })?;
     }
 
@@ -1664,11 +1688,17 @@ async fn transcribe_audio(
             SttFailure::Audio(detail) => {
                 ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "bad_audio", detail)
             }
-            SttFailure::Engine(detail) => ApiError::coded(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "engine_unavailable",
-                detail,
-            ),
+            SttFailure::Engine(detail) => {
+                // The runtime's message can name a path or a library symbol. It belongs in
+                // the log, where the operator can use it, not in a response, where it is a
+                // map of the machine handed to whoever asked.
+                tracing::error!(%detail, "the speech engine failed");
+                ApiError::coded(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "engine_unavailable",
+                    "the speech engine failed; the server log has the detail",
+                )
+            }
             SttFailure::NotInstalled(id) => ApiError::coded(
                 StatusCode::CONFLICT,
                 "model_not_installed",
