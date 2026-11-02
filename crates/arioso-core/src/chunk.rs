@@ -27,6 +27,47 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<&str> {
     chunks
 }
 
+/// Split `text` into sentences, keeping the punctuation.
+///
+/// A sentence ends after `.`, `!`, `?`, or `…`, together with any closing
+/// quotes or brackets that follow, or at a newline. Surrounding whitespace is
+/// trimmed, and empty pieces are dropped. This is the granularity streaming
+/// synthesis uses: the first sentence can be spoken before the second is read.
+#[must_use]
+pub fn sentences(text: &str) -> Vec<&str> {
+    const CLOSERS: [char; 7] = ['"', '\'', ')', ']', '}', '\u{2019}', '\u{201d}'];
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        let ends = matches!(ch, '.' | '!' | '?' | '\u{2026}' | '\n');
+        if !ends {
+            continue;
+        }
+        let mut cut = index + ch.len_utf8();
+        while let Some(&(next_index, next)) = chars.peek() {
+            if CLOSERS.contains(&next) || matches!(next, '.' | '!' | '?') {
+                cut = next_index + next.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let piece = text[start..cut].trim();
+        if !piece.is_empty() {
+            pieces.push(piece);
+        }
+        start = cut;
+    }
+
+    let rest = text[start..].trim();
+    if !rest.is_empty() {
+        pieces.push(rest);
+    }
+    pieces
+}
+
 /// Byte length of the longest acceptable prefix of `s`.
 fn best_cut(s: &str, limit: usize) -> usize {
     if s.chars().count() <= limit {
@@ -71,4 +112,52 @@ fn best_cut(s: &str, limit: usize) -> usize {
     s.char_indices()
         .nth(limit)
         .map_or(s.len(), |(index, _)| index)
+}
+
+#[cfg(test)]
+mod sentence_tests {
+    use super::sentences;
+
+    #[test]
+    fn splits_at_terminators() {
+        assert_eq!(
+            sentences("One. Two! Three?"),
+            vec!["One.", "Two!", "Three?"]
+        );
+    }
+
+    #[test]
+    fn keeps_text_without_a_terminator() {
+        assert_eq!(sentences("No terminator"), vec!["No terminator"]);
+    }
+
+    #[test]
+    fn splits_at_newlines() {
+        assert_eq!(
+            sentences("Line one\nLine two"),
+            vec!["Line one", "Line two"]
+        );
+    }
+
+    #[test]
+    fn empty_text_has_no_sentences() {
+        assert!(sentences("").is_empty());
+        assert!(sentences("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn closing_quotes_stay_with_their_sentence() {
+        assert_eq!(sentences("\"Quoted.\" Next."), vec!["\"Quoted.\"", "Next."]);
+    }
+
+    #[test]
+    fn runs_of_terminators_stay_together() {
+        assert_eq!(sentences("Hello... World."), vec!["Hello...", "World."]);
+        assert_eq!(sentences("Wait!? Yes."), vec!["Wait!?", "Yes."]);
+    }
+
+    #[test]
+    fn pieces_cover_the_text_without_the_trimmed_spaces() {
+        assert_eq!(sentences("  Alpha.   Beta.  ").join(" "), "Alpha. Beta.");
+    }
 }

@@ -2,4 +2,4 @@
 
 pub mod chunk;
 
-pub use chunk::chunk_text;
+pub use chunk::{chunk_text, sentences};
