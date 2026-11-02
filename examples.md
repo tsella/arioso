@@ -263,7 +263,32 @@ Caused by:
     invalid config at server.bind: invalid socket address syntax
 ```
 
-## 10. Models
+## 10. Words the dictionary does not hold
+
+A name outside CMUdict is pronounced by spelling rule, and the words are named:
+
+```console
+$ arioso say "hello world. this is arioso speaking locally. zorbansky wrote it." --out spoken.wav
+wrote spoken.wav (4.01 s at 22050 Hz)
+2 word(s) not in the dictionary, spoken by spelling rules: arioso, zorbansky
+```
+
+Before the rules landed, the same command wrote a shorter file and dropped both words.
+The reading of "zorbansky" is a guess, and a dictionary entry replaces it with the
+correct one.
+
+`doctor` makes the same distinction for every entry, so a typo in a respelling does not
+hide behind the rules:
+
+```console
+$ ARIOSO_TTS_DICTIONARY=/tmp/dict-lts.json arioso doctor
+dictionary  4 entries from /tmp/dict-lts.json
+            1 entr(y/ies) spoken by spelling rules: xyzzy
+            every entry can be said by en_US-lessac-medium
+ok
+```
+
+## 11. Models
 
 ```console
 $ arioso models list

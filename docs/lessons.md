@@ -30,6 +30,12 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**A token stream without separators fails quietly.** Words inside one piece of text were
+concatenated with no space symbol, so the model read a sentence as one long word. It still
+sounded like speech, so listening did not expose it; reading the symbol list did. Rule:
+when a model consumes a token stream, assert the separators in a test, because a missing
+one does not raise anything.
+
 **A stale binary gives a stale measurement.** Three speed runs came out within
 2 % of each other, which looked like the speed setting did nothing. The CLI binary
 had not been rebuilt after the config change, so the new environment override was

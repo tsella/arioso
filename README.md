@@ -35,13 +35,13 @@ Working today:
 - Model download from a manifest, with SHA-256 verification and resumable transfers
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
 - A user dictionary for names and jargon, reloaded without a restart
+- Spelling rules for words the dictionary does not hold, reported, never silent
 - `arioso doctor`, which says what is wrong before a request fails
-- 129 tests
+- 144 tests
 
 Not built yet:
 
 - Speech to text (M2, on sherpa-onnx)
-- Letter to sound for words outside the built-in dictionary
 - A signed manifest
 
 ## Requirements
@@ -213,8 +213,9 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 
 - Times are spoken on a 12-hour clock. `19:45` and `7:45` differ only because the part of
   the day is added, and a bare `7:45` is read as morning.
-- A word outside the CMU dictionary is skipped and named, not guessed. The dictionary is
-  the fix until letter to sound lands.
+- A word outside the CMU dictionary is pronounced by spelling rule and named in the
+  warning. The rules are a fallback: "zorbansky" is heard, and it is a guess. One
+  dictionary entry replaces the guess with the truth.
 - One voice is loaded at a time, so concurrent requests queue. Each voice costs about
   60 MB, which is a memory decision before it is a code one.
 - The manifest is not signed yet, so a download trusts the SHA-256 in the manifest file
