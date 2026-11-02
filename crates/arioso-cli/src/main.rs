@@ -318,6 +318,24 @@ fn say(
             report.missing.len()
         );
     }
+    if !report.guessed.is_empty() {
+        let shown = report
+            .guessed
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if report.guessed.len() > 5 {
+            ", ..."
+        } else {
+            ""
+        };
+        eprintln!(
+            "{} word(s) not in the dictionary, spoken by spelling rules: {shown}{more}",
+            report.guessed.len()
+        );
+    }
     if !report.unusable.is_empty() {
         eprintln!(
             "{} entr(y/ies) the voice cannot say: {}",
@@ -429,23 +447,33 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
         }
     };
 
-    let unusable: Vec<&str> = user
-        .entries()
-        .iter()
-        .filter(|entry| {
-            !entry.forms().iter().any(|form| {
-                arioso_tts_piper::form_symbols(
-                    form,
-                    &map,
-                    &pronunciations,
-                    arioso_core::NormalizeOptions::default(),
-                )
-                .is_some()
+    // Two questions per entry: can the voice say it at all, and can it say it
+    // without guessing. Spelling rules can pronounce almost any letter string,
+    // so the second question is the one that finds a typo.
+    let options = arioso_core::NormalizeOptions::default();
+    let mut unusable: Vec<&str> = Vec::new();
+    let mut by_rule: Vec<&str> = Vec::new();
+    for entry in user.entries() {
+        let sayable = |rules: bool| {
+            entry.forms().iter().any(|form| {
+                arioso_tts_piper::form_symbols(form, &map, &pronunciations, options, rules)
+                    .is_some()
             })
-        })
-        .map(|entry| entry.term.as_str())
-        .collect();
+        };
+        if !sayable(true) {
+            unusable.push(&entry.term);
+        } else if !sayable(false) {
+            by_rule.push(&entry.term);
+        }
+    }
 
+    if !by_rule.is_empty() {
+        println!(
+            "            {} entr(y/ies) spoken by spelling rules: {}",
+            by_rule.len(),
+            by_rule.join(", ")
+        );
+    }
     if unusable.is_empty() {
         println!(
             "            every entry can be said by {}",

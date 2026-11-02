@@ -2,6 +2,7 @@
 
 pub mod arpabet;
 pub mod cmudict;
+pub mod lts;
 
 use std::collections::HashMap;
 

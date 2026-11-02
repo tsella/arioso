@@ -218,8 +218,11 @@ impl AppState {
                 |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
             )
             .map_err(|error| error.to_string())?;
+        if !report.guessed.is_empty() {
+            tracing::debug!(guessed = ?report.guessed, "words spoken by spelling rules");
+        }
         if !report.missing.is_empty() {
-            tracing::debug!(missing = ?report.missing, "words absent from the dictionary");
+            tracing::debug!(missing = ?report.missing, "words nothing could pronounce");
         }
         if !report.unusable.is_empty() {
             tracing::warn!(entries = ?report.unusable, "user dictionary entries the voice cannot say");

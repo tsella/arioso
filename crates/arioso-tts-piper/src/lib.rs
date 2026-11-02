@@ -66,7 +66,9 @@ impl Default for RenderOptions {
 /// What a render could not say.
 #[derive(Debug, Default, Clone)]
 pub struct RenderReport {
-    /// Words absent from the built-in dictionary.
+    /// Words absent from the built-in dictionary and pronounced by rule.
+    pub guessed: Vec<String>,
+    /// Words nothing could pronounce.
     pub missing: Vec<String>,
     /// Dictionary entries no form of which the voice can render.
     pub unusable: Vec<String>,
@@ -206,7 +208,7 @@ impl PiperVoice {
                                     groups.push(self.words(
                                         &entry.term,
                                         dictionary,
-                                        &mut report.missing,
+                                        &mut report,
                                         options.normalize,
                                     ));
                                 }
@@ -216,7 +218,7 @@ impl PiperVoice {
                             groups.push(self.words(
                                 segment,
                                 dictionary,
-                                &mut report.missing,
+                                &mut report,
                                 options.normalize,
                             ));
                         }
@@ -245,10 +247,10 @@ impl PiperVoice {
         &self,
         text: &str,
         dictionary: &CmuDict,
-        missing: &mut Vec<String>,
+        report: &mut RenderReport,
         options: arioso_core::NormalizeOptions,
     ) -> Vec<&'static str> {
-        text_symbols(text, dictionary, missing, options)
+        text_symbols(text, dictionary, report, options, true)
     }
 
     /// Symbols for a dictionary entry, trying its forms in order.
@@ -263,7 +265,7 @@ impl PiperVoice {
         entry
             .forms()
             .into_iter()
-            .find_map(|form| form_symbols(form, &self.map, dictionary, options))
+            .find_map(|form| form_symbols(form, &self.map, dictionary, options, true))
     }
 
     /// Speaking rate multiplier: 2.0 is twice as fast, 0.5 half as fast.
@@ -306,8 +308,9 @@ impl PiperVoice {
 fn text_symbols(
     text: &str,
     dictionary: &CmuDict,
-    missing: &mut Vec<String>,
+    report: &mut RenderReport,
     options: arioso_core::NormalizeOptions,
+    allow_rules: bool,
 ) -> Vec<&'static str> {
     let expanded = normalize_with(text, options);
     let mut symbols = Vec::new();
@@ -324,7 +327,21 @@ fn text_symbols(
         }
         match dictionary.lookup(&cleaned) {
             Some(pronunciations) => symbols.extend(arpabet::to_ipa(&pronunciations[0])),
-            None => missing.push(cleaned),
+            None => {
+                // Not in the dictionary, so spell it out. A guessed word is heard
+                // and named; a skipped one leaves a hole.
+                let guessed = if allow_rules {
+                    arioso_g2p::lts::pronounce(&cleaned)
+                } else {
+                    Vec::new()
+                };
+                if guessed.is_empty() {
+                    report.missing.push(cleaned);
+                } else {
+                    report.guessed.push(cleaned);
+                    symbols.extend(guessed);
+                }
+            }
         }
     }
     symbols
@@ -339,11 +356,18 @@ pub fn form_symbols(
     map: &PhonemeMap,
     dictionary: &CmuDict,
     options: arioso_core::NormalizeOptions,
+    allow_rules: bool,
 ) -> Option<Vec<&'static str>> {
     let symbols = if is_arpabet(form) {
         arpabet::to_ipa(form)
     } else {
-        text_symbols(form, dictionary, &mut Vec::new(), options)
+        text_symbols(
+            form,
+            dictionary,
+            &mut RenderReport::default(),
+            options,
+            allow_rules,
+        )
     };
     if symbols.is_empty() || symbols.iter().any(|symbol| map.ids_of(symbol).is_none()) {
         return None;
