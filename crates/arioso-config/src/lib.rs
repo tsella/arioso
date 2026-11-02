@@ -68,7 +68,7 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             // 10101 is IANA-registered to a defunct 2002 service and unused in
-            // practice.
+            // practice, so a stray client does not find the port by accident.
             bind: "127.0.0.1:10101".into(),
             auth: Auth::default(),
             first_message_timeout_ms: 10_000,
@@ -604,6 +604,15 @@ mod tests {
 
     fn origin() -> PathBuf {
         PathBuf::from("<test>")
+    }
+
+    #[test]
+    fn the_example_config_is_the_defaults() {
+        // The example is what a new user copies, so a default that moves without it
+        // leaves a file that claims to be complete and is not.
+        let text = include_str!("../../../config.json.example");
+        let parsed: Config = serde_json::from_str(text).expect("the example parses");
+        assert_eq!(parsed, Config::default());
     }
 
     #[test]
