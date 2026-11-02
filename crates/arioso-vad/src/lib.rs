@@ -24,6 +24,10 @@ pub struct Config {
     pub min_speech_ms: u32,
     /// Audio kept from before the first speech frame.
     pub preroll_ms: u32,
+    /// Longest utterance before it is cut, whether or not the speaker paused.
+    ///
+    /// Without this, a stream that never goes quiet grows without limit.
+    pub max_utterance_ms: u32,
 }
 
 impl Default for Config {
@@ -34,6 +38,7 @@ impl Default for Config {
             min_silence_ms: 500,
             min_speech_ms: 200,
             preroll_ms: 200,
+            max_utterance_ms: 30_000,
         }
     }
 }
@@ -182,7 +187,8 @@ impl Segmenter {
         self.consumed += frame_len as u64;
 
         let silent_ms = self.silence_frames * self.config.frame_ms;
-        if silent_ms < self.config.min_silence_ms {
+        let too_long = self.speech_ms() >= self.config.max_utterance_ms;
+        if silent_ms < self.config.min_silence_ms && !too_long {
             return;
         }
         let mut samples = std::mem::take(&mut self.speech);
@@ -201,6 +207,11 @@ impl Segmenter {
             samples,
             start: self.started_at,
         });
+    }
+
+    /// How much of the open utterance is speech.
+    fn speech_ms(&self) -> u32 {
+        self.speech_frames * self.config.frame_ms
     }
 
     /// Keep the last `preroll_ms` of audio, for the start of the next utterance.
@@ -338,6 +349,29 @@ mod tests {
             .expect("speech must start");
         // Preroll is 200 ms, so the start is before the 400 ms of leading silence ends.
         assert!(start <= 200 * u64::from(RATE) / 1000, "start at {start}");
+    }
+
+    #[test]
+    fn an_utterance_that_never_pauses_is_cut_at_the_limit() {
+        let config = Config {
+            max_utterance_ms: 1000,
+            ..Config::default()
+        };
+        let mut segmenter = Segmenter::new(RATE, config);
+        let events = segmenter.push(&tone(3000));
+        let cut: Vec<usize> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Utterance { samples, .. } => Some(samples.len()),
+                Event::SpeechStart { .. } => None,
+            })
+            .collect();
+        assert!(!cut.is_empty(), "a long utterance must be cut");
+        let ms = cut[0] * 1000 / RATE as usize;
+        assert!(
+            (900..=1200).contains(&ms),
+            "cut near the limit, got {ms} ms"
+        );
     }
 
     #[test]

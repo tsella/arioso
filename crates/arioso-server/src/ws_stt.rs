@@ -150,6 +150,9 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(interval_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let partials = state.config.stt.partials;
+    // Bumped when an utterance is finalised, so a partial still running for it is
+    // dropped instead of arriving after the final.
+    let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Shared with the partial tasks so the same hypothesis is not sent twice.
     let last_partial = Arc::new(tokio::sync::Mutex::new(String::new()));
 
@@ -166,6 +169,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
                                 continue;
                             }
                             last_partial.lock().await.clear();
+                            generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let length = samples.len();
                             let worker = Arc::clone(&state);
                             let result = tokio::task::spawn_blocking(move || {
@@ -243,6 +247,8 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
                 let worker = Arc::clone(&state);
                 let out = out.clone();
                 let last_partial = Arc::clone(&last_partial);
+                let seen = generation.load(std::sync::atomic::Ordering::SeqCst);
+                let generation = Arc::clone(&generation);
                 // Not awaited: a partial that takes its time must not stop the audio.
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
@@ -251,6 +257,10 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
                     .await;
                     let Ok(Some(text)) = result else { return };
                     if text.is_empty() {
+                        return;
+                    }
+                    if generation.load(std::sync::atomic::Ordering::SeqCst) != seen {
+                        // The utterance this partial belongs to is already final.
                         return;
                     }
                     {
@@ -267,7 +277,15 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     }
 
     drop(out);
-    let _ = writer.await;
+    // Partial tasks hold clones of the sender, so the writer only finishes when they
+    // do. Give them a moment and then stop waiting: a stuck partial must not keep a
+    // closed session alive.
+    if tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .is_err()
+    {
+        tracing::debug!("a partial was still running when the session closed");
+    }
 }
 
 #[cfg(test)]
