@@ -3,3 +3,6 @@
 .env
 .DS_Store
 /vendor
+
+# Internal notes: decisions and debates, not part of the project.
+/notes
