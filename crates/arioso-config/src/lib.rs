@@ -416,6 +416,12 @@ impl Config {
         if let Some(v) = get("ARIOSO_TTS_ENGINE") {
             self.tts.engine = v;
         }
+        if let Some(v) = get("ARIOSO_TTS_SPEED") {
+            self.tts.speed = v.parse::<f32>().map_err(|e| ConfigError::Invalid {
+                path: "ARIOSO_TTS_SPEED".into(),
+                message: e.to_string(),
+            })?;
+        }
         if let Some(v) = get("ARIOSO_TTS_DICTIONARY") {
             self.tts.dictionary = Some(PathBuf::from(v));
         }
@@ -608,6 +614,20 @@ mod tests {
         let err = Config::from_json(r#"{"tts":{"speed":3.0}}"#, &origin()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("tts.speed"), "{msg}");
+    }
+
+    #[test]
+    fn the_speed_can_come_from_the_environment() {
+        let mut cfg = Config::default();
+        cfg.apply_env(|k| (k == "ARIOSO_TTS_SPEED").then(|| "1.75".to_string()))
+            .unwrap();
+        assert!((cfg.tts.speed - 1.75).abs() < f32::EPSILON);
+
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_env(|k| (k == "ARIOSO_TTS_SPEED").then(|| "fast".to_string()))
+            .unwrap_err();
+        assert!(err.to_string().contains("ARIOSO_TTS_SPEED"));
     }
 
     #[test]

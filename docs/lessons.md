@@ -30,6 +30,12 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**A stale binary gives a stale measurement.** Three speed runs came out within
+2 % of each other, which looked like the speed setting did nothing. The CLI binary
+had not been rebuilt after the config change, so the new environment override was
+not in it. Rule: build the binary in the same command as the measurement, and
+treat "this setting has no effect" as a claim to verify, not to report.
+
 **A summary line is not the result.** Two server tests were failing and the
 commit went in anyway, because the check summed a parsed field of `cargo test`
 output instead of reading its exit code. The field was wrong, so the number
