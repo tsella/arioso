@@ -49,8 +49,18 @@ pub struct AppState {
     manifest: Manifest,
     models_dir: PathBuf,
     dictionary: CmuDict,
-    user: UserDictionary,
+    user: Mutex<UserState>,
     voice: Mutex<Option<PiperVoice>>,
+}
+
+/// The user dictionary on disk, and what it last looked like.
+#[derive(Debug)]
+struct UserState {
+    path: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    dictionary: UserDictionary,
+    /// Parse error from the last reload attempt. The last good copy stays in use.
+    error: Option<String>,
 }
 
 impl AppState {
@@ -68,14 +78,25 @@ impl AppState {
         let path = models_dir.join("cmudict.dict");
         let text = std::fs::read_to_string(&path)
             .map_err(|source| ServerError::Dictionary { path, source })?;
-        let user = match UserDictionary::load(&config.dictionary_path(config_file)) {
-            Ok(dictionary) => dictionary,
-            Err(arioso_core::DictError::Io { .. }) => UserDictionary::empty(),
-            Err(error) => return Err(ServerError::UserDictionary(error)),
+        let path = config.dictionary_path(config_file);
+        let modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let (dictionary, error) = match UserDictionary::load(&path) {
+            Ok(dictionary) => (dictionary, None),
+            Err(arioso_core::DictError::Io { .. }) => (UserDictionary::empty(), None),
+            Err(error) => {
+                return Err(ServerError::UserDictionary(error));
+            }
         };
         Ok(Self {
             dictionary: CmuDict::parse(&text),
-            user,
+            user: Mutex::new(UserState {
+                path,
+                modified,
+                dictionary,
+                error,
+            }),
             voice: Mutex::new(None),
             config,
             manifest,
@@ -91,6 +112,41 @@ impl AppState {
             .filter(|m| m.kind == Kind::Tts && m.engine == "piper")
             .find(|m| m.id == self.config.tts.voice || m.id.ends_with(&self.config.tts.voice))
             .ok_or_else(|| ServerError::NoVoice(self.config.tts.voice.clone()))
+    }
+
+    /// The user dictionary, reloaded if the file changed since the last look.
+    fn user_dictionary(&self) -> std::sync::MutexGuard<'_, UserState> {
+        let mut state = self
+            .user
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let modified = std::fs::metadata(&state.path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if modified == state.modified {
+            return state;
+        }
+        state.modified = modified;
+
+        if modified.is_none() {
+            state.dictionary = UserDictionary::empty();
+            state.error = None;
+            return state;
+        }
+
+        match UserDictionary::load(&state.path) {
+            Ok(dictionary) => {
+                tracing::info!(entries = dictionary.len(), "reloaded the user dictionary");
+                state.dictionary = dictionary;
+                state.error = None;
+            }
+            Err(error) => {
+                // Keep the last good copy: a typo must not break speech.
+                tracing::warn!(%error, "user dictionary did not reload");
+                state.error = Some(error.to_string());
+            }
+        }
+        state
     }
 
     /// Whether every file of `spec` is present at the recorded size.
@@ -146,10 +202,15 @@ impl AppState {
             *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
+        let user = self.user_dictionary();
         let report = voice
-            .render(text, &self.dictionary, &self.user, speed, |audio, rate| {
-                sink(audio, rate).map_err(PiperError::Consumer)
-            })
+            .render(
+                text,
+                &self.dictionary,
+                &user.dictionary,
+                speed,
+                |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
+            )
             .map_err(|error| error.to_string())?;
         if !report.missing.is_empty() {
             tracing::debug!(missing = ?report.missing, "words absent from the dictionary");
@@ -248,8 +309,15 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .lock()
         .map(|guard| guard.is_some())
         .unwrap_or(false);
+    let user = state.user_dictionary();
+    let dictionary = serde_json::json!({
+        "entries": user.dictionary.len(),
+        "error": user.error,
+    });
+    drop(user);
     Json(serde_json::json!({
         "status": if voice_installed { "ready" } else { "voice_missing" },
+        "dictionary": dictionary,
         "voice": voice,
         "voice_installed": voice_installed,
         "voice_loaded": voice_loaded,
@@ -399,6 +467,107 @@ mod tests {
         assert_eq!(json["status"], "voice_missing");
         assert_eq!(json["voice"], "piper-en_US-lessac-medium");
         assert_eq!(json["voice_installed"], false);
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_the_user_dictionary() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["dictionary"]["entries"], 0);
+        assert!(json["dictionary"]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_changed_dictionary_is_picked_up_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let path = dir.path().join("dictionary.json");
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "entries": [{"term": "arioso", "spoken": ["ah ree oh so"]}]}"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.dictionary = Some(path.clone());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let app = router(Arc::clone(&state));
+        let (_, body) = call(
+            app,
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["dictionary"]["entries"], 1);
+
+        // Add a second entry and ask again.
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "entries": [
+                {"term": "arioso", "spoken": ["ah ree oh so"]},
+                {"term": "Sella", "spoken": ["seller"]}
+            ]}"#,
+        )
+        .unwrap();
+        let (_, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["dictionary"]["entries"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_broken_dictionary_keeps_the_last_good_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let path = dir.path().join("dictionary.json");
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "entries": [{"term": "arioso", "spoken": ["ah ree oh so"]}]}"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.dictionary = Some(path.clone());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        std::fs::write(&path, "{ not json").unwrap();
+        let (_, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["dictionary"]["entries"], 1, "the good copy stays");
+        assert!(
+            json["dictionary"]["error"].as_str().is_some(),
+            "the parse error is reported"
+        );
     }
 
     #[tokio::test]
