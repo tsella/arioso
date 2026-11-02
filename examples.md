@@ -271,11 +271,14 @@ id                                 kind        size  license    state
 piper-en_US-lessac-medium          tts     60.3 MiB  Blizzard-2013 installed
 
 $ arioso models download piper-en_US-lessac-medium
-fetching piper-en_US-lessac-medium (63206179 bytes) into /tmp/arioso-say.Uk3iWZ
+checking piper-en_US-lessac-medium (63206179 bytes) in /tmp/arioso-say.Uk3iWZ
    100.0%  60.3 MiB / 60.3 MiB
 ready: 2 file(s)
 ```
 
-The download resumes from a partial file and verifies SHA-256 before it is used. The
+That run found the model already present: it hashed both files, matched them against the
+manifest, and fetched nothing. On a fresh directory the same command downloads, and an
+interrupted download resumes from the partial file. SHA-256 is checked before a file is
+used, never after. The
 license column is there because the default voice is research only; see the license
 section of the README before shipping anything.

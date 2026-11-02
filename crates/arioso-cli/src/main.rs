@@ -166,8 +166,10 @@ fn download(config: &Config, id: &str) -> Result<()> {
     })?;
     let dir = models_dir(config);
     let total = spec.total_size();
+    // "checking" rather than "fetching": a model that is already present is
+    // hashed and skipped, and the old wording read as if it downloaded again.
     println!(
-        "fetching {} ({} bytes) into {}",
+        "checking {} ({} bytes) in {}",
         spec.id,
         total,
         dir.display()
