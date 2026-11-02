@@ -60,6 +60,9 @@ impl Whisper {
     /// order of importance. An int8 file wins over a float one when both are present,
     /// because it is a third of the size and faster on a CPU.
     ///
+    /// The search is flat, so one directory holds one Whisper model. Two installed at
+    /// once would resolve to whichever name sorts first.
+    ///
     /// # Errors
     ///
     /// Returns [`SttError::NotAModel`] when a file is missing, and [`SttError::Load`]

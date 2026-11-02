@@ -513,7 +513,11 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
     } else {
         Some(config.stt.language.as_str())
     };
-    let engine = arioso_stt_sherpa::Whisper::load(&dir, language, 4).with_context(|| {
+    // Half the cores is the sweet spot for whisper on a laptop; more threads mostly
+    // fight each other.
+    let threads =
+        std::thread::available_parallelism().map_or(4, |count| (count.get() / 2).clamp(1, 8));
+    let engine = arioso_stt_sherpa::Whisper::load(&dir, language, threads).with_context(|| {
         format!(
             "loading {} from {}. Run `arioso models download {}` if it is missing.",
             config.stt.batch_model,

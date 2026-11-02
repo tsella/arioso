@@ -237,6 +237,8 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
   dictionary entry replaces the guess with the truth.
 - One voice is loaded at a time, so concurrent requests queue. Each voice costs about
   60 MB, which is a memory decision before it is a code one.
+- One Whisper model per models directory. The loader searches the directory flat, so a
+  second model would resolve to whichever name sorts first.
 - The manifest is not signed yet, so a download trusts the SHA-256 in the manifest file
   itself.
 - The server binds to loopback. Binding it elsewhere is your call, and the bearer token
