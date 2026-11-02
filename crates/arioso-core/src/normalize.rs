@@ -87,7 +87,7 @@ pub fn normalize_with(text: &str, options: Options) -> String {
         }
 
         if ch.is_ascii_digit() {
-            if let Some((hour, minute, next)) = scan_time(&chars, index) {
+            if let Some((hour, minute, second, next)) = scan_time(&chars, index) {
                 // A written marker decides the period and is consumed, so
                 // "7:45 pm" does not leave "p m" behind.
                 let (hour, next) = match scan_marker(&chars, next) {
@@ -97,7 +97,7 @@ pub fn normalize_with(text: &str, options: Options) -> String {
                     }
                     None => (hour, next),
                 };
-                out.push_str(&clock(hour, minute, options));
+                out.push_str(&clock(hour, minute, second, options));
                 index = next;
                 continue;
             }
@@ -125,7 +125,7 @@ pub fn normalize_with(text: &str, options: Options) -> String {
                         } else {
                             scanned.whole % 12
                         };
-                        out.push_str(&clock(hour, 0, options));
+                        out.push_str(&clock(hour, 0, 0, options));
                         index = after;
                         continue;
                     }
@@ -246,8 +246,9 @@ fn scan_number(chars: &[char], start: usize) -> Option<Scanned> {
     })
 }
 
-/// Read `H:MM` or `HH:MM` and return hours, minutes, and the index after.
-fn scan_time(chars: &[char], start: usize) -> Option<(u64, u64, usize)> {
+/// Read `H:MM`, `HH:MM`, or `H:MM:SS`, with hours, minutes, seconds, and the
+/// index after.
+fn scan_time(chars: &[char], start: usize) -> Option<(u64, u64, u64, usize)> {
     let mut index = start;
     let mut hour = 0u64;
     let mut hour_digits = 0;
@@ -278,7 +279,24 @@ fn scan_time(chars: &[char], start: usize) -> Option<(u64, u64, usize)> {
     if minute_digits != 2 || hour > 23 || minute > 59 {
         return None;
     }
-    Some((hour, minute, after))
+
+    // Seconds are optional, and consumed when present, so "19:45:30" does not
+    // leave a stray colon and an unexpanded number behind.
+    let mut second = 0;
+    let mut end = after;
+    if chars.get(end) == Some(&':') {
+        if let (Some(high), Some(low)) = (chars.get(end + 1), chars.get(end + 2)) {
+            if let (Some(high), Some(low)) = (high.to_digit(10), low.to_digit(10)) {
+                let value = high * 10 + low;
+                if value < 60 {
+                    second = u64::from(value);
+                    end += 3;
+                }
+            }
+        }
+    }
+
+    Some((hour, minute, second, end))
 }
 
 /// Read an ordinal suffix and return it with the index after.
@@ -421,13 +439,18 @@ fn currency(dollars: u64, fraction: &[u64]) -> String {
 }
 
 /// The clock reading of an hour and minute pair.
-fn clock(hour: u64, minute: u64, options: Options) -> String {
+fn clock(hour: u64, minute: u64, second: u64, options: Options) -> String {
     let twelve = if hour % 12 == 0 { 12 } else { hour % 12 };
     let mut spoken = match minute {
         0 => format!("{} o'clock", cardinal(twelve)),
         minute if minute < 10 => format!("{} oh {}", cardinal(twelve), cardinal(minute)),
         minute => format!("{} {}", cardinal(twelve), cardinal(minute)),
     };
+    if second > 0 {
+        spoken.push_str(" and ");
+        spoken.push_str(&cardinal(second));
+        spoken.push_str(if second == 1 { " second" } else { " seconds" });
+    }
     if options.time_of_day {
         spoken.push_str(period(hour));
     }
@@ -595,6 +618,24 @@ mod tests {
         assert_eq!(normalize("14:05"), "two oh five in the afternoon");
         assert_eq!(normalize("00:15"), "twelve fifteen in the morning");
         assert_eq!(normalize("9:41"), "nine forty one in the morning");
+    }
+
+    #[test]
+    fn seconds_are_consumed_and_spoken() {
+        assert_eq!(
+            normalize("19:45:30"),
+            "seven forty five and thirty seconds in the evening"
+        );
+        assert_eq!(normalize("19:45:00"), "seven forty five in the evening");
+        assert_eq!(
+            normalize("19:45:01"),
+            "seven forty five and one second in the evening"
+        );
+        // Not a valid second, so the colon stays and the number is spoken as one.
+        assert_eq!(
+            normalize("19:45:99"),
+            "seven forty five in the evening:ninety nine"
+        );
     }
 
     #[test]
