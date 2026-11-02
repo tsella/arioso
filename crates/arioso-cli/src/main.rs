@@ -207,7 +207,7 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
     voice.set_speed(config.tts.speed);
     let mut samples: Vec<f32> = Vec::new();
-    let mut missing = 0usize;
+    let mut missing: Vec<String> = Vec::new();
 
     for chunk in chunk_text(text, 300) {
         let mut symbols: Vec<&str> = Vec::new();
@@ -224,7 +224,7 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
                     }
                     symbols.extend(arpabet::to_ipa(&pronunciations[0]));
                 }
-                None => missing += 1,
+                None => missing.push(cleaned),
             }
         }
         if symbols.is_empty() {
@@ -245,8 +245,13 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
         out.display(),
         samples.len() as f32 / rate as f32
     );
-    if missing > 0 {
-        eprintln!("{missing} word(s) were not in the dictionary and were skipped");
+    if !missing.is_empty() {
+        let shown = missing.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = if missing.len() > 5 { ", ..." } else { "" };
+        eprintln!(
+            "{} word(s) not in the dictionary and skipped: {shown}{more}",
+            missing.len()
+        );
     }
     Ok(())
 }
