@@ -495,8 +495,8 @@ impl Config {
 
     /// The config as a JSON Schema document.
     #[must_use]
-    pub fn json_schema() -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(Config)).unwrap_or(serde_json::Value::Null)
+    pub fn json_schema() -> schemars::Schema {
+        schemars::schema_for!(Config)
     }
 }
 
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn schema_is_generated() {
-        let schema = Config::json_schema();
+        let schema = serde_json::to_value(Config::json_schema()).unwrap();
         assert_eq!(schema["title"], "Config");
         assert!(schema["properties"]["server"].is_object());
     }
