@@ -11,3 +11,11 @@ rustflags = [
   "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../vendor/onnxruntime/lib",
   "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../vendor/onnxruntime/lib",
 ]
+
+# The same two depths on macOS, where the loader spells it @loader_path. Without this
+# the binary builds and then dies at startup with a missing dylib.
+[target.'cfg(target_os = "macos")']
+rustflags = [
+  "-C", "link-arg=-Wl,-rpath,@loader_path/../../vendor/onnxruntime/lib",
+  "-C", "link-arg=-Wl,-rpath,@loader_path/../../../vendor/onnxruntime/lib",
+]
