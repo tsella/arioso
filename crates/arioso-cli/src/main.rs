@@ -6,9 +6,10 @@ use anyhow::{Context, Result, bail};
 use arioso_config::Config;
 use arioso_core::chunk_text;
 use arioso_g2p::{CmuDict, arpabet};
-use arioso_tts_piper::{PiperVoice, wav::write_wav};
 use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
+use arioso_tts_piper::{PiperVoice, wav::write_wav};
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -35,6 +36,8 @@ enum Command {
     },
     /// Check the install: config, cache directory, manifest.
     Doctor,
+    /// Serve the HTTP API.
+    Serve,
     /// Synthesize text to a WAV file.
     Say {
         /// Text to speak.
@@ -84,6 +87,7 @@ fn main() -> Result<()> {
         },
         Command::Doctor => doctor(&config, &config_path),
         Command::Say { text, out, dict } => say(&config, &text, out, dict),
+        Command::Serve => serve(config),
         Command::Config { command } => match command {
             ConfigCommand::Schema => {
                 println!("{}", serde_json::to_string_pretty(&Config::json_schema())?);
@@ -180,6 +184,21 @@ fn download(config: &Config, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn serve(config: Config) -> Result<()> {
+    let manifest = load_manifest(&config)?;
+    let state = Arc::new(arioso_server::AppState::new(config.clone(), manifest)?);
+    let bind = config.server.bind.clone();
+
+    tokio::runtime::Runtime::new()?.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .with_context(|| format!("binding {bind}"))?;
+        println!("listening on http://{bind}");
+        axum::serve(listener, arioso_server::router(state)).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
@@ -226,7 +245,9 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
 
     for chunk in chunk_text(text, 300) {
         let mut symbols: Vec<&str> = Vec::new();
-        for word in chunk.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}')) {
+        for word in
+            chunk.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
+        {
             let cleaned: String = word
                 .chars()
                 .filter(|c| c.is_alphanumeric() || *c == '\'')
@@ -261,7 +282,12 @@ fn say(config: &Config, text: &str, out: Option<PathBuf>, dict: Option<PathBuf>)
         samples.len() as f32 / rate as f32
     );
     if !missing.is_empty() {
-        let shown = missing.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let shown = missing
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         let more = if missing.len() > 5 { ", ..." } else { "" };
         eprintln!(
             "{} word(s) not in the dictionary and skipped: {shown}{more}",
