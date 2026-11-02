@@ -2,3 +2,8 @@
 # vendor/onnxruntime (see the README); an existing ORT_LIB_LOCATION wins.
 [env]
 ORT_LIB_LOCATION = { value = "vendor/onnxruntime", relative = true, force = false }
+
+# Find the runtime at run time too, relative to the binary, so no
+# LD_LIBRARY_PATH is needed: target/debug/arioso -> ../../vendor/onnxruntime/lib
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/../../vendor/onnxruntime/lib"]
