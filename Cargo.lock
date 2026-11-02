@@ -160,6 +160,7 @@ dependencies = [
  "arioso-core",
  "arioso-g2p",
  "arioso-models",
+ "arioso-stt-sherpa",
  "arioso-tts-piper",
  "axum",
  "futures-util",

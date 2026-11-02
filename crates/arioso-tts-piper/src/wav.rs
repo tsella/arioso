@@ -57,7 +57,16 @@ pub fn pcm_s16le(samples: &[f32]) -> Vec<u8> {
 /// Returns [`std::io::ErrorKind::InvalidData`] for a file that is not a WAV, or whose
 /// samples are neither 16-bit PCM nor 32-bit float.
 pub fn read(path: &Path) -> std::io::Result<(Vec<f32>, u32)> {
-    let bytes = std::fs::read(path)?;
+    read_bytes(&std::fs::read(path)?)
+}
+
+/// The same, for audio that arrived in a request body rather than a file.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::InvalidData`] for bytes that are not a WAV, or whose
+/// samples are neither 16-bit PCM nor 32-bit float.
+pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
     let invalid =
         |detail: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, detail.to_owned());
 

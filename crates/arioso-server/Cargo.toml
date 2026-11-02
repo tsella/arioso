@@ -13,6 +13,7 @@ arioso-config.workspace = true
 arioso-core.workspace = true
 arioso-g2p.workspace = true
 arioso-models.workspace = true
+arioso-stt-sherpa.workspace = true
 arioso-tts-piper.workspace = true
 axum.workspace = true
 serde.workspace = true

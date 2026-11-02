@@ -37,6 +37,9 @@ pub enum ServerError {
     /// The configured voice is not in the manifest.
     #[error("no piper voice matches tts.voice {0:?}")]
     NoVoice(String),
+    /// The configured speech to text model is not in the manifest.
+    #[error("no speech to text model matches stt.batch_model {0:?}")]
+    NoSttModel(String),
     /// The user dictionary could not be used.
     #[error("user dictionary: {0}")]
     UserDictionary(#[from] arioso_core::DictError),
@@ -51,6 +54,8 @@ pub struct AppState {
     dictionary: CmuDict,
     user: Mutex<UserState>,
     voice: Mutex<Option<PiperVoice>>,
+    /// Whisper, loaded on first use. One model, so one slot.
+    stt: Mutex<Option<arioso_stt_sherpa::Whisper>>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -98,6 +103,7 @@ impl AppState {
                 error,
             }),
             voice: Mutex::new(None),
+            stt: Mutex::new(None),
             config,
             manifest,
             models_dir,
@@ -112,6 +118,68 @@ impl AppState {
             .filter(|m| m.kind == Kind::Tts && m.engine == "piper")
             .find(|m| m.id == self.config.tts.voice || m.id.ends_with(&self.config.tts.voice))
             .ok_or_else(|| ServerError::NoVoice(self.config.tts.voice.clone()))
+    }
+
+    /// The speech to text model the config asks for.
+    fn stt_spec(&self) -> Result<&ModelSpec, ServerError> {
+        self.manifest
+            .models
+            .iter()
+            .filter(|m| m.kind == Kind::Stt && m.engine == "sherpa")
+            .find(|m| m.id == self.config.stt.batch_model)
+            .ok_or_else(|| ServerError::NoSttModel(self.config.stt.batch_model.clone()))
+    }
+
+    /// Transcribe WAV bytes, loading the engine on first use.
+    fn transcribe(&self, bytes: &[u8]) -> Result<(String, f64), SttFailure> {
+        let (samples, rate) = wav::read_bytes(bytes)
+            .map_err(|error| SttFailure::Audio(format!("reading the audio: {error}")))?;
+        let seconds = if rate == 0 {
+            0.0
+        } else {
+            samples.len() as f64 / f64::from(rate)
+        };
+        if seconds > f64::from(self.config.stt.max_audio_s) {
+            return Err(SttFailure::Audio(format!(
+                "the audio is {seconds:.0} s, longer than stt.max_audio_s of {} s",
+                self.config.stt.max_audio_s
+            )));
+        }
+
+        let mut guard = self
+            .stt
+            .lock()
+            .map_err(|_| SttFailure::Engine("the speech to text lock is poisoned".to_string()))?;
+        if guard.is_none() {
+            let spec = self
+                .stt_spec()
+                .map_err(|e| SttFailure::Engine(e.to_string()))?;
+            if !self.is_installed(spec) {
+                return Err(SttFailure::NotInstalled(spec.id.clone()));
+            }
+            let language = if self.config.stt.language == "auto" {
+                None
+            } else {
+                Some(self.config.stt.language.as_str())
+            };
+            let threads = std::thread::available_parallelism()
+                .map_or(4, |count| (count.get() / 2).clamp(1, 8));
+            *guard = Some(
+                arioso_stt_sherpa::Whisper::load(&self.models_dir, language, threads)
+                    .map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?,
+            );
+        }
+        let engine = guard
+            .as_ref()
+            .ok_or_else(|| SttFailure::Engine("the engine failed to load".to_string()))?;
+        let transcript = engine
+            .transcribe(&samples, rate)
+            .map_err(|e| SttFailure::Engine(e.to_string()))?;
+
+        // The dictionary runs backwards as well.
+        let user = self.user_dictionary();
+        let text = user.dictionary.correct(&transcript.text);
+        Ok((text, seconds))
     }
 
     /// The user dictionary, reloaded if the file changed since the last look.
@@ -236,6 +304,8 @@ impl AppState {
 pub struct ApiError {
     status: StatusCode,
     detail: String,
+    /// Stable machine-readable code, as the PRD's error model asks for.
+    code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -243,6 +313,16 @@ impl ApiError {
         Self {
             status,
             detail: detail.into(),
+            code: None,
+        }
+    }
+
+    /// Name the failure with the code a client switches on.
+    fn coded(status: StatusCode, code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            status,
+            detail: detail.into(),
+            code: Some(code),
         }
     }
 }
@@ -253,10 +333,22 @@ impl IntoResponse for ApiError {
             "type": "about:blank",
             "title": self.status.canonical_reason().unwrap_or("error"),
             "status": self.status.as_u16(),
+            "code": self.code,
             "detail": self.detail,
         });
         (self.status, Json(body)).into_response()
     }
+}
+
+/// Why a transcription did not happen.
+#[derive(Debug)]
+enum SttFailure {
+    /// The bytes were not audio we can read.
+    Audio(String),
+    /// The engine could not load or run.
+    Engine(String),
+    /// The model the config asks for is not downloaded.
+    NotInstalled(String),
 }
 
 /// Request body for `POST /v1/tts`.
@@ -286,15 +378,34 @@ pub struct ModelView {
 }
 
 /// Build the router.
+///
+/// A disabled engine does not register its routes, so `stt.enabled: false` answers 404
+/// on the speech to text path rather than pretending the feature exists.
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/v1/models", get(list_models))
-        .route("/v1/tts", post(synthesize))
-        .route("/v1/tts/ws", get(ws_handler))
-        .with_state(state)
+        .route("/v1/models", get(list_models));
+
+    if state.config.tts.enabled {
+        router = router
+            .route("/v1/tts", post(synthesize))
+            .route("/v1/tts/ws", get(ws_handler));
+    }
+    if state.config.stt.enabled {
+        // The body is audio, so the default 2 MiB limit is too small.
+        let limit = MAX_AUDIO_BYTES;
+        router = router.route(
+            "/v1/stt",
+            post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
+        );
+    }
+
+    router.with_state(state)
 }
+
+/// Largest audio body accepted: 16-bit mono at 48 kHz for the longest allowed audio.
+const MAX_AUDIO_BYTES: usize = 48_000 * 2 * 600;
 
 async fn healthz() -> &'static str {
     "ok"
@@ -390,6 +501,85 @@ async fn synthesize(
         .into_response())
 }
 
+/// Response body for `POST /v1/stt`.
+#[derive(Debug, Serialize)]
+pub struct SttResponse {
+    /// What the engine heard, after the user dictionary.
+    pub text: String,
+    /// Length of the audio, in seconds.
+    pub seconds: f64,
+}
+
+/// Transcribe an uploaded WAV file.
+///
+/// The body is the audio itself, not a JSON envelope: a client that already has a
+/// recording should not have to base64 it.
+async fn transcribe_audio(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<SttResponse>, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    // An absent type is accepted: curl with --data-binary sends none, and the bytes
+    // either parse as a WAV or they do not.
+    if !matches!(
+        content_type.as_str(),
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "application/octet-stream" | ""
+    ) {
+        return Err(ApiError::coded(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_format",
+            format!("{content_type} is not audio/wav"),
+        ));
+    }
+    if body.is_empty() {
+        return Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_audio",
+            "the request body is empty",
+        ));
+    }
+
+    let worker = Arc::clone(&state);
+    let (text, seconds) = tokio::task::spawn_blocking(move || worker.transcribe(&body))
+        .await
+        .map_err(|e| {
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "engine_unavailable",
+                e.to_string(),
+            )
+        })?
+        .map_err(|failure| match failure {
+            SttFailure::Audio(detail) => {
+                ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "bad_audio", detail)
+            }
+            SttFailure::Engine(detail) => ApiError::coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "engine_unavailable",
+                detail,
+            ),
+            SttFailure::NotInstalled(id) => ApiError::coded(
+                StatusCode::CONFLICT,
+                "model_not_installed",
+                format!("{id} is not installed. Run `arioso models download {id}`."),
+            ),
+        })?;
+
+    Ok(Json(SttResponse {
+        text,
+        seconds: (seconds * 100.0).round() / 100.0,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,8 +616,87 @@ mod tests {
         (status, body)
     }
 
+    async fn post_stt(
+        state: Arc<AppState>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/stt")
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
     #[tokio::test]
-    async fn healthz_answers_ok() {
+    async fn speech_to_text_is_not_registered_when_it_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.stt.enabled = false;
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let (status, _) = post_stt(state, "audio/wav", vec![1, 2, 3]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_is_not_downloaded_is_named() {
+        let (state, _dir) = state();
+        // The test directory holds no whisper files, so the request reaches the
+        // installed check and stops there.
+        let wav = wav::to_bytes(&[0.0; 160], 16_000);
+        let (status, body) = post_stt(state, "audio/wav", wav).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "model_not_installed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("sherpa-whisper-tiny-en")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_content_type_is_refused() {
+        let (state, _dir) = state();
+        let (status, body) = post_stt(state, "text/plain", b"hello".to_vec()).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body["code"], "unsupported_format");
+        assert!(body["detail"].as_str().unwrap().contains("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn bytes_that_are_not_audio_are_refused() {
+        let (state, _dir) = state();
+        let (status, body) = post_stt(state, "audio/wav", b"not a wav at all".to_vec()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "bad_audio");
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_is_refused() {
+        let (state, _dir) = state();
+        let (status, body) = post_stt(state, "audio/wav", Vec::new()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "bad_audio");
+        assert!(body["detail"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn healthz_is_ok() {
         let (state, _dir) = state();
         let (status, body) = call(
             router(state),
