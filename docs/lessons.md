@@ -30,6 +30,17 @@ awkward inputs (numbers, abbreviations, all-lowercase) before trusting it.
 `sentences(text)` settled in seconds what reading the code had left ambiguous.
 Delete the probe when the question is answered.
 
+**A module that is not declared compiles to nothing.** Twice, a new file with
+tests was written but never added to `lib.rs`, so `cargo test` reported the old
+count and passed. Rule: after adding a module, check that the test count went up
+by the number of tests written.
+
+**A large text slice can delete code that is not in the slice's name.** Cutting
+from one function to the end of the file to move a helper removed `set_speed`,
+`map`, and `synthesize` along with it. The build caught it, but only after the
+edit. Rule: read `git diff --stat` after a structural edit, and prefer small
+patches over one wide cut.
+
 ## Build and environment
 
 **Pin the dependency to what the toolchain supports.** `ort` 2.0.0-rc.15 needs
