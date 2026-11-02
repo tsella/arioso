@@ -104,6 +104,7 @@ impl Manifest {
                 found: manifest.schema_version,
             });
         }
+        manifest.validate()?;
         Ok(manifest)
     }
 
@@ -118,6 +119,33 @@ impl Manifest {
             source,
         })?;
         Self::parse(&bytes)
+    }
+
+    fn validate(&self) -> Result<(), ManifestError> {
+        let mut seen = std::collections::HashSet::new();
+        for model in &self.models {
+            if model.id.trim().is_empty() {
+                return Err(ManifestError::Invalid {
+                    path: "models[].id".into(),
+                    message: "must not be empty".into(),
+                });
+            }
+            if !seen.insert(model.id.as_str()) {
+                return Err(ManifestError::Invalid {
+                    path: format!("models[{}].id", model.id),
+                    message: "duplicate model id".into(),
+                });
+            }
+            for file in &model.files {
+                if !is_sha256(&file.sha256) {
+                    return Err(ManifestError::Invalid {
+                        path: format!("models[{}].files[{}].sha256", model.id, file.name),
+                        message: "expected 64 lowercase hex characters".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Find a model by id.
@@ -138,6 +166,14 @@ pub enum ManifestError {
         /// Underlying error.
         source: std::io::Error,
     },
+    /// A field is present but not usable.
+    #[error("invalid manifest at {path}: {message}")]
+    Invalid {
+        /// Dotted path of the offending value.
+        path: String,
+        /// What is wrong with it.
+        message: String,
+    },
     /// The document is not a valid manifest.
     #[error("parsing manifest: {source}")]
     Parse {
@@ -156,6 +192,13 @@ pub enum ManifestError {
     /// The key or signature is not valid hex or not a valid curve point.
     #[error("malformed signature material: {0}")]
     Malformed(String),
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// Verify a detached signature over the manifest bytes.
@@ -202,7 +245,7 @@ mod tests {
             "files": [{
                 "name": "en_US-lessac-medium.onnx",
                 "url": "https://example.invalid/voice.onnx",
-                "sha256": "aa",
+                "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
                 "size": 63201294
             }],
             "meta": {"sample_rate": 22050}
@@ -222,6 +265,27 @@ mod tests {
         assert_eq!(spec.kind, Kind::Tts);
         assert_eq!(spec.total_size(), 63_201_294);
         assert!(m.find("nope").is_none());
+    }
+
+    #[test]
+    fn rejects_a_malformed_hash() {
+        let bad = SAMPLE.replace(
+            "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+            "aa",
+        );
+        let err = Manifest::parse(bad.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("sha256"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_ids() {
+        let one = Manifest::parse(SAMPLE.as_bytes()).unwrap().models.remove(0);
+        let doc = Manifest {
+            schema_version: 1,
+            models: vec![one.clone(), one],
+        };
+        let err = Manifest::parse(serde_json::to_string(&doc).unwrap().as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
     #[test]
