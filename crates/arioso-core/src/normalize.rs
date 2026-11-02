@@ -458,11 +458,15 @@ fn clock(hour: u64, minute: u64, second: u64, options: NormalizeOptions) -> Stri
 }
 
 /// The part of the day, from the hour on a 24-hour clock.
+///
+/// Night is the late evening and the small hours, so 22:00 and 02:00 both read as night
+/// and the two are not split across a boundary a listener would not hear.
 fn period(hour: u64) -> &'static str {
     match hour {
-        0..=11 => " in the morning",
+        6..=11 => " in the morning",
         12..=17 => " in the afternoon",
-        _ => " in the evening",
+        18..=21 => " in the evening",
+        _ => " at night",
     }
 }
 
@@ -548,10 +552,15 @@ mod tests {
         assert_eq!(normalize("7:45"), "seven forty five in the morning");
         assert_eq!(normalize("19:45"), "seven forty five in the evening");
         assert_eq!(normalize("12:30"), "twelve thirty in the afternoon");
-        assert_eq!(normalize("00:30"), "twelve thirty in the morning");
+        assert_eq!(normalize("00:30"), "twelve thirty at night");
         assert_eq!(normalize("17:59"), "five fifty nine in the afternoon");
         assert_eq!(normalize("18:00"), "six o'clock in the evening");
-        assert_eq!(normalize("23:59"), "eleven fifty nine in the evening");
+        assert_eq!(normalize("21:59"), "nine fifty nine in the evening");
+        assert_eq!(normalize("22:00"), "ten o'clock at night");
+        assert_eq!(normalize("23:59"), "eleven fifty nine at night");
+        assert_eq!(normalize("02:00"), "two o'clock at night");
+        assert_eq!(normalize("05:59"), "five fifty nine at night");
+        assert_eq!(normalize("06:00"), "six o'clock in the morning");
     }
 
     #[test]
@@ -566,7 +575,9 @@ mod tests {
         assert_eq!(normalize("7:45 pm"), "seven forty five in the evening");
         assert_eq!(normalize("7:45pm"), "seven forty five in the evening");
         assert_eq!(normalize("7:45 a.m."), "seven forty five in the morning");
-        assert_eq!(normalize("12:30 am"), "twelve thirty in the morning");
+        // The marker sets the hour; the table still decides the word, and half past
+        // midnight is night.
+        assert_eq!(normalize("12:30 am"), "twelve thirty at night");
         assert_eq!(normalize("12:30 pm"), "twelve thirty in the afternoon");
         assert_eq!(normalize("9:05 P.M."), "nine oh five in the evening");
         assert_eq!(normalize("9:05 P.M"), "nine oh five in the evening");
@@ -584,7 +595,7 @@ mod tests {
         );
         assert_eq!(
             normalize("meet at 12 am"),
-            "meet at twelve o'clock in the morning"
+            "meet at twelve o'clock at night"
         );
         assert_eq!(
             normalize("meet at 12 pm"),
@@ -616,7 +627,7 @@ mod tests {
         assert_eq!(normalize("14:30"), "two thirty in the afternoon");
         assert_eq!(normalize("14:00"), "two o'clock in the afternoon");
         assert_eq!(normalize("14:05"), "two oh five in the afternoon");
-        assert_eq!(normalize("00:15"), "twelve fifteen in the morning");
+        assert_eq!(normalize("00:15"), "twelve fifteen at night");
         assert_eq!(normalize("9:41"), "nine forty one in the morning");
     }
 
