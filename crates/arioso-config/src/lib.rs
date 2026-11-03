@@ -857,7 +857,10 @@ mod tests {
         let text = r#"{"tts":{"max_chars":1234}}"#;
         let config = Config::from_json(text, std::path::Path::new("test.json")).unwrap();
         assert_eq!(config.server.limits.max_text_chars, 1234);
-        assert_eq!(config.tts.legacy_max_chars, None, "the old field is consumed");
+        assert_eq!(
+            config.tts.legacy_max_chars, None,
+            "the old field is consumed"
+        );
     }
 
     #[test]

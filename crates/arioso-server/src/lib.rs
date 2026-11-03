@@ -240,9 +240,8 @@ impl AppState {
             // Wait for a slot before touching the network. The catalog shows this model as
             // downloading while it waits, which is true: the request was accepted.
             let slot = Arc::clone(&state.download_slots).acquire_owned().await;
-            let downloader = arioso_models::Downloader::with_mirror(
-                state.config().models.mirror.clone(),
-            );
+            let downloader =
+                arioso_models::Downloader::with_mirror(state.config().models.mirror.clone());
             let result = match downloader {
                 Ok(downloader) => {
                     let reporting = Arc::clone(&state);
@@ -743,14 +742,20 @@ impl AppState {
             if log_text {
                 tracing::debug!(guessed = ?report.guessed, "words spoken by spelling rules");
             } else {
-                tracing::debug!(count = report.guessed.len(), "words spoken by spelling rules");
+                tracing::debug!(
+                    count = report.guessed.len(),
+                    "words spoken by spelling rules"
+                );
             }
         }
         if !report.missing.is_empty() {
             if log_text {
                 tracing::debug!(missing = ?report.missing, "words nothing could pronounce");
             } else {
-                tracing::debug!(count = report.missing.len(), "words nothing could pronounce");
+                tracing::debug!(
+                    count = report.missing.len(),
+                    "words nothing could pronounce"
+                );
             }
         }
         if !report.unusable.is_empty() {
@@ -2330,7 +2335,9 @@ async fn synthesize(
     }
     let speed = request.speed.unwrap_or(state.config().tts.speed);
     if !(0.5..=2.0).contains(&speed) {
-        return Err(unprocessable(format!("speed {speed} is outside 0.5 to 2.0")));
+        return Err(unprocessable(format!(
+            "speed {speed} is outside 0.5 to 2.0"
+        )));
     }
 
     // Checked before the render, so a missing voice is the code a client switches on rather
@@ -3259,7 +3266,10 @@ mod tests {
         let app = router(state);
         let (_, _, headers) = call_with_headers(
             app.clone(),
-            Request::builder().uri("/healthz").body(Body::empty()).unwrap(),
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         let generated = headers
@@ -3365,7 +3375,12 @@ mod tests {
         .await;
         // The voice is not installed here, so the answer is 409 rather than 404: the
         // route is live again.
-        assert_eq!(status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
     }
 
     #[tokio::test]
@@ -3666,7 +3681,11 @@ mod tests {
         // running" and both spawned a task writing the same .part file.
         let (state, _dir) = state();
         let id = state.manifest.models.first().unwrap().id.clone();
-        assert_eq!(state.try_start_download(&id, 100), None, "the first caller owns it");
+        assert_eq!(
+            state.try_start_download(&id, 100),
+            None,
+            "the first caller owns it"
+        );
         let second = state.try_start_download(&id, 100);
         assert_eq!(second, Some((0, 100)), "the second caller must be refused");
         state.note_download(&id, 40, 100);

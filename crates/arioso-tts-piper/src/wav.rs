@@ -81,10 +81,7 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
     let mut data: Option<&[u8]> = None;
 
     let mut at: usize = 12;
-    while at
-        .checked_add(8)
-        .is_some_and(|end| end <= bytes.len())
-    {
+    while at.checked_add(8).is_some_and(|end| end <= bytes.len()) {
         let id = &bytes[at..at + 4];
         let size = u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]])
             as usize;
@@ -92,7 +89,9 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
         // 32-bit target it can overflow the pointer-sized arithmetic that follows. Both are
         // refused rather than allowed to wrap or to pass as an empty chunk, because a
         // truncated data chunk that reads as zero samples is a silent wrong answer.
-        let start = at.checked_add(8).ok_or_else(|| invalid("chunk offset overflows"))?;
+        let start = at
+            .checked_add(8)
+            .ok_or_else(|| invalid("chunk offset overflows"))?;
         let end = start
             .checked_add(size)
             .ok_or_else(|| invalid("chunk size overflows"))?;

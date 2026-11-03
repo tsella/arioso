@@ -270,9 +270,8 @@ SPEAKS  S P IY1 K S
         // The entry carries no spelling at all, only the pronunciation the voice is given.
         // Reading `S EH1 L AA0` as four English words matched nothing, so an entry that
         // worked for speaking never worked for hearing.
-        let dictionary = user(
-            r#"{"version":1,"entries":[{"term":"Sella","phonemes":["S EH1 L AH0"]}]}"#,
-        );
+        let dictionary =
+            user(r#"{"version":1,"entries":[{"term":"Sella","phonemes":["S EH1 L AH0"]}]}"#);
         // The entry holds no spelling at all, so a match can only come from the phonemes:
         // as words, `S EH1 L AH0` pronounces to nothing usable and the form is dropped.
         let out = correct(&dictionary, &cmu(), "I met sella yesterday");

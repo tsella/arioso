@@ -664,19 +664,17 @@ fn say(
         .iter()
         .filter(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
         .collect();
-    let model = manifest
-        .find_voice(&config.tts.voice)
-        .with_context(|| {
-            let available = voices
-                .iter()
-                .map(|m| m.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "no piper voice matches tts.voice {:?}; available: {available}",
-                config.tts.voice
-            )
-        })?;
+    let model = manifest.find_voice(&config.tts.voice).with_context(|| {
+        let available = voices
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no piper voice matches tts.voice {:?}; available: {available}",
+            config.tts.voice
+        )
+    })?;
     let file = |suffix: &str| {
         model
             .files

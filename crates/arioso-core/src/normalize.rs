@@ -317,11 +317,7 @@ fn scan_ordinal_suffix(chars: &[char], start: usize) -> Option<(&'static str, us
     // The suffix has to end the word, with one exception: an adverb keeps it, because
     // `2ndly` is `secondly` and a voice should say that. Without the boundary, `1stand`
     // reads as `first` + `and` and the reader hears `firstand`.
-    let lower = |offset: usize| {
-        chars
-            .get(start + offset)
-            .map(|ch| ch.to_ascii_lowercase())
-    };
+    let lower = |offset: usize| chars.get(start + offset).map(|ch| ch.to_ascii_lowercase());
     let follows_alnum = chars.get(start + 2).is_some_and(|ch| ch.is_alphanumeric());
     let adverb = lower(2) == Some('l')
         && lower(3) == Some('y')
@@ -549,7 +545,10 @@ mod tests {
         assert_eq!(normalize("2026"), "twenty twenty six");
         // A real separator still works, in both forms.
         assert_eq!(normalize("1,000 items"), "one thousand items");
-        assert_eq!(normalize("12,345,678"), "twelve million three hundred forty five thousand six hundred seventy eight");
+        assert_eq!(
+            normalize("12,345,678"),
+            "twelve million three hundred forty five thousand six hundred seventy eight"
+        );
         // A comma between digits that is not a group of three is left alone.
         assert!(!normalize("1,2 things").contains("twelve"));
     }
