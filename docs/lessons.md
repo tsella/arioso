@@ -137,6 +137,14 @@ numbers and not the before ones, so the plan records a baseline and an argument,
 speedup. Take the measurement before the first edit, or write down that the claim is
 structural.
 
+## A bound you invent is a performance change
+
+Halving the ONNX thread count was written as politeness to the rest of the server, and it
+cost a quarter of the synthesis time on the machine the project targets. Any limit added for
+a reason other than a measurement is a performance change that has to be measured like one:
+run the end-to-end number with the bound and without it, on the smallest machine the project
+supports. A design argument that sounds careful is not evidence.
+
 ## A probe that sets a clock sets it last
 
 To prove the log rotates, a file was written and its modification time moved back two days

@@ -83,6 +83,35 @@ BlueTTS is the more intelligible voice by about a point and costs 6.7 times the 
 time and five times the memory. The vendor calls it the fastest open source TTS; on four CPU
 cores it is the slower of the two.
 
+## Speed, with process start included
+
+A single CLI invocation on the same four core machine, so the time includes reading the
+config, loading the model and writing the result. That is what a caller of `arioso say` or
+`arioso transcribe` waits for. The `RTF` column above is steady state through the server and
+is the one to use for a long session; this one is what a one-shot run costs.
+
+| voice | audio | wall | RTF | peak RSS |
+| --- | --- | --- | --- | --- |
+| `piper-en_US-kathleen-low` | 59.73 s | 7.0 s | 0.117 | 345 MB |
+| `piper-en_US-joe-medium` | 78.82 s | 8.5 s | 0.108 | 497 MB |
+| `piper-en_US-lessac-medium` | 75.33 s | 8.2 s | 0.109 | 368 MB |
+| `piper-en_GB-alba-medium` | 81.87 s | 9.9 s | 0.120 | 335 MB |
+| `piper-en_US-ljspeech-high` | 88.43 s | 53.9 s | **0.609** | 406 MB |
+
+| recognizer | audio | wall | RTF | peak RSS |
+| --- | --- | --- | --- | --- |
+| `sherpa-whisper-tiny-en` | 600 s | 78.1 s | 0.130 | 548 MB |
+| `sherpa-whisper-base-en` | 600 s | 134.6 s | 0.224 | 822 MB |
+
+The four medium and low voices cost the same, within a fifth of each other. `ljspeech-high`
+is the exception: five times the synthesis time for the same sentence, which is what the
+high quality model costs and the reason it is not the default. The recognizer's memory is
+mostly activations, not weights: base is 153 MiB on disk and 822 MB resident on a ten minute
+file.
+
+Parakeet v2 was not re-measured in this pass. Its row above stands as measured on the
+corpora, and it is the default because it wins on accuracy at whisper-base speed.
+
 ## Recommended configuration
 
 Speech to text defaults to Parakeet v2:

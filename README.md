@@ -413,7 +413,8 @@ More worked examples, with the real output of each, are in [EXAMPLES.md](EXAMPLE
 Guidance for putting this in your own program, with a use case per shape, is in
 [IMPLEMENTATION.md](IMPLEMENTATION.md). The product requirements are in [PRD.md](PRD.md).
 Which models are measured, what they cost, which languages they cover, and the evidence
-behind the defaults is in [MODELS.md](MODELS.md).
+behind the defaults is in [MODELS.md](MODELS.md). What the code costs in time and memory, on
+the smallest machine it targets, is in [BENCHMARK.md](BENCHMARK.md).
 The execution plan is in [docs/plans/](docs/plans/). Mistakes that cost time, and the rules
 that prevent repeats, are in [docs/lessons.md](docs/lessons.md). If you are changing this
 repository, read [AGENTS.md](AGENTS.md).

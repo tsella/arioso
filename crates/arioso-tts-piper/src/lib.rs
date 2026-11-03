@@ -149,11 +149,10 @@ impl PiperVoice {
 
         let map = PhonemeMap::from_voice_config(&text)?;
         // Level 3 fuses the graph; the default is Level 1, which leaves the fused kernels
-        // unused. Intra-op threads are bounded because this runs inside a server: one
-        // synthesis per voice, and a thread count equal to every core leaves nothing for
-        // the requests arriving behind it.
-        let threads =
-            std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).clamp(1, 4));
+        // unused. The thread count is set rather than left to the runtime, and it is every
+        // core: one voice synthesizes one request at a time, so the graph is the only work
+        // in flight. Halving it cost 26% of synthesis time on a four core machine.
+        let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
