@@ -378,8 +378,6 @@ mod tests {
         assert_eq!(config.frame_ms, 20);
     }
 
-    use super::*;
-
     #[test]
     fn pcm16_is_scaled_to_the_unit_range() {
         let bytes = [0x00, 0x00, 0xff, 0x7f, 0x01, 0x80];

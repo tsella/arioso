@@ -79,6 +79,40 @@ impl ModelSpec {
     pub fn total_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
+
+    /// Whether every file is on disk at the size the catalog gives.
+    ///
+    /// Size, not hash: the hash is checked when a file is written, and checking 650 MB again
+    /// on every request that asks whether a model is installed would cost more than the
+    /// answer is worth.
+    #[must_use]
+    pub fn is_installed(&self, dir: &std::path::Path) -> bool {
+        self.files.iter().all(|file| {
+            std::fs::metadata(dir.join(&file.name))
+                .map(|meta| meta.len() == file.size)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Whether `voice` names this model, by id or by the bare voice name.
+    ///
+    /// The config may say `en_US-joe-medium`, which is the file stem, or
+    /// `piper-en_US-joe-medium`, which is the catalog id. Both mean this model.
+    #[must_use]
+    pub fn is_voice(&self, voice: &str) -> bool {
+        self.kind == Kind::Tts && (self.id == voice || self.id.ends_with(voice))
+    }
+}
+
+impl Manifest {
+    /// The voice a config names, by id or by the bare voice name.
+    #[must_use]
+    pub fn find_voice(&self, voice: &str) -> Option<&ModelSpec> {
+        self.models
+            .iter()
+            .filter(|model| model.engine == "piper")
+            .find(|model| model.is_voice(voice))
+    }
 }
 
 /// The catalog document.
@@ -253,6 +287,24 @@ pub fn verify_manifest(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn a_voice_is_found_by_its_id_or_its_bare_name() {
+        // `tts.voice` may hold either, and `arioso doctor` reported an installed voice as
+        // missing when it held the id, because it matched file names by substring.
+        let manifest = Manifest::parse(include_bytes!("../../../models/manifest.json")).unwrap();
+        let by_id = manifest.find_voice("piper-en_US-joe-medium");
+        let by_name = manifest.find_voice("en_US-joe-medium");
+        assert!(by_id.is_some());
+        assert_eq!(by_id.map(|m| &m.id), by_name.map(|m| &m.id));
+        assert!(manifest.find_voice("no-such-voice").is_none());
+    }
+
+    #[test]
+    fn a_speech_model_is_not_a_voice() {
+        let manifest = Manifest::parse(include_bytes!("../../../models/manifest.json")).unwrap();
+        assert!(manifest.find_voice("sherpa-whisper-base-en").is_none());
+    }
 
     const SAMPLE: &str = r#"{
         "schema_version": 1,

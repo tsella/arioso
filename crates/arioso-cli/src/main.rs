@@ -664,10 +664,8 @@ fn say(
         .iter()
         .filter(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
         .collect();
-    let model = voices
-        .iter()
-        .find(|m| m.id == config.tts.voice || m.id.ends_with(&config.tts.voice))
-        .copied()
+    let model = manifest
+        .find_voice(&config.tts.voice)
         .with_context(|| {
             let available = voices
                 .iter()
@@ -844,17 +842,19 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     };
     println!("dictionary  {} entries from {}", user.len(), path.display());
 
-    // The voice's symbol inventory lives in its config, so no model is loaded.
-    let voice_config = std::fs::read_dir(models)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.to_string_lossy().ends_with(".onnx.json")
-                && path.to_string_lossy().contains(&config.tts.voice)
-        });
+    // The voice's symbol inventory lives in its config, so no model is loaded. The catalog
+    // names the file: a directory scan matched nothing when `tts.voice` was a catalog id
+    // rather than the bare name, and reported a voice that was installed as missing.
+    let voice_config = load_manifest(config).ok().and_then(|manifest| {
+        manifest
+            .find_voice(&config.tts.voice)
+            .and_then(|spec| {
+                spec.files
+                    .iter()
+                    .find(|file| file.name.ends_with(".onnx.json"))
+            })
+            .map(|file| models.join(&file.name))
+    });
     let Some(voice_config) = voice_config else {
         println!(
             "            voice {} is not installed, so entries were not checked",
@@ -1071,11 +1071,7 @@ fn init_tracing_to_stderr(config: &Config, filter: EnvFilter) {
 
 /// A model counts as installed only when every file is present at the right size.
 fn model_installed(model: &ModelSpec, dir: &Path) -> bool {
-    model.files.iter().all(|file| {
-        std::fs::metadata(dir.join(&file.name))
-            .map(|meta| meta.len() == file.size)
-            .unwrap_or(false)
-    })
+    model.is_installed(dir)
 }
 
 fn human_bytes(bytes: u64) -> String {

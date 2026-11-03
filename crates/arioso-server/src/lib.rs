@@ -394,10 +394,7 @@ impl AppState {
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
         let voice = self.config().tts.voice;
         self.manifest
-            .models
-            .iter()
-            .filter(|m| m.kind == Kind::Tts && m.engine == "piper")
-            .find(|m| m.id == voice || m.id.ends_with(&voice))
+            .find_voice(&voice)
             .ok_or(ServerError::NoVoice(voice))
     }
 
@@ -657,11 +654,7 @@ impl AppState {
 
     /// Whether every file of `spec` is present at the recorded size.
     fn is_installed(&self, spec: &ModelSpec) -> bool {
-        spec.files.iter().all(|file| {
-            std::fs::metadata(self.models_dir.join(&file.name))
-                .map(|meta| meta.len() == file.size)
-                .unwrap_or(false)
-        })
+        spec.is_installed(&self.models_dir)
     }
 
     fn file_of(&self, spec: &ModelSpec, suffix: &str) -> Result<PathBuf, String> {
@@ -777,14 +770,6 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, detail: impl Into<String>) -> Self {
-        Self {
-            status,
-            detail: detail.into(),
-            code: None,
-        }
-    }
-
     /// Name the failure with the code a client switches on.
     fn coded(status: StatusCode, code: &'static str, detail: impl Into<String>) -> Self {
         Self {
@@ -2355,7 +2340,7 @@ async fn synthesize(
     let spec = state
         .voice_spec()
         .map_err(|detail| unprocessable(detail.to_string()))?;
-    if !state.is_installed(&spec) {
+    if !state.is_installed(spec) {
         return Err(ApiError::coded(
             StatusCode::CONFLICT,
             "model_not_installed",
