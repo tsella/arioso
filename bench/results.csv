@@ -1,0 +1,2 @@
+date,arioso_version,reporter,os,cpu,cores,memory_gb,gpu,binary,voice,stt_model,repeats,say_wall_s,say_audio_s,say_rtf,say_rss_mb,stt_wall_s,stt_audio_s,stt_rtf,stt_rss_mb,startup_ms,healthz_rps,stream_first_ms,stream_total_s,stream_rtf,doctor_ms,normalize_us
+2026-11-03,0.1.7,tsella,Linux 6.8.0-147-generic,Intel(R) N150,4,15,none,release,default,default,3,4.3144,29.85,0.1445,356.3,15.409,60.0,0.2568,1017.1,88.0,1580,2954.0,14.935,0.2489,3.787,100.0

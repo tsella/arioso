@@ -2,6 +2,8 @@
 *.part
 .env
 .DS_Store
+__pycache__/
+*.pyc
 /vendor
 
 # Internal notes: decisions and debates, not part of the project.
