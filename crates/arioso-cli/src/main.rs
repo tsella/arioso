@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use arioso_config::Config;
 use arioso_g2p::CmuDict;
 use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
-use arioso_tts_piper::{PiperVoice, wav::write_wav};
+use arioso_tts_piper::PiperVoice;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -701,7 +701,9 @@ fn say(
     };
 
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
-    let mut samples: Vec<f32> = Vec::new();
+    // Converted as it arrives: holding the audio as floats and again as bytes costs six
+    // bytes a sample for a document that can run for minutes.
+    let mut pcm: Vec<u8> = Vec::new();
     let options = arioso_tts_piper::RenderOptions {
         speed: config.tts.speed,
         normalize: arioso_core::NormalizeOptions {
@@ -709,21 +711,21 @@ fn say(
         },
     };
     let report = voice.render(text, &dictionary, &user, options, |audio, _| {
-        samples.extend_from_slice(audio);
+        arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
         Ok(())
     })?;
 
-    if samples.is_empty() {
+    if pcm.is_empty() {
         bail!("nothing to say: none of the words are in the dictionary");
     }
 
     let out = out.unwrap_or_else(|| PathBuf::from("out.wav"));
     let rate = voice.sample_rate();
-    write_wav(&out, &samples, rate)?;
+    arioso_tts_piper::wav::write_wav_pcm(&out, &pcm, rate)?;
     println!(
         "wrote {} ({:.2} s at {rate} Hz)",
         out.display(),
-        samples.len() as f32 / rate as f32
+        (pcm.len() / 2) as f32 / rate as f32
     );
     if !report.missing.is_empty() {
         let shown = report

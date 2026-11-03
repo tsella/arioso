@@ -17,8 +17,36 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
 /// The same audio as an in-memory WAV, for HTTP responses.
 #[must_use]
 pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    header(sample_rate, samples.len() * 2, &mut out);
+    write_pcm_s16le(samples, &mut out);
+    out
+}
+
+/// A WAV from PCM that is already 16-bit little-endian.
+///
+/// A caller that converts as it goes — the CLI accumulates a long document — holds two
+/// bytes per sample instead of six.
+#[must_use]
+pub fn to_bytes_from_pcm(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(44 + pcm.len());
+    header(sample_rate, pcm.len(), &mut out);
+    out.extend_from_slice(pcm);
+    out
+}
+
+/// The same, written to a file.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error.
+pub fn write_wav_pcm(path: &Path, pcm: &[u8], sample_rate: u32) -> std::io::Result<()> {
+    std::fs::write(path, to_bytes_from_pcm(pcm, sample_rate))
+}
+
+/// The 44 byte header for `data_len` bytes of mono 16-bit PCM.
+fn header(sample_rate: u32, data_len: usize, out: &mut Vec<u8>) {
+    let data_len = data_len as u32;
 
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -32,9 +60,6 @@ pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
-
-    write_pcm_s16le(samples, &mut out);
-    out
 }
 
 /// Samples as little-endian 16-bit PCM, without a container.
@@ -165,6 +190,17 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converting_first_produces_the_same_file() {
+        // The CLI converts each chunk as it arrives; the server converts at the end. Both
+        // have to produce the same bytes for the same audio.
+        let samples = [0.0, 0.25, -0.25, 1.0, -1.0, 0.333];
+        assert_eq!(
+            to_bytes_from_pcm(&pcm_s16le(&samples), 22_050),
+            to_bytes(&samples, 22_050)
+        );
+    }
 
     #[test]
     fn a_written_file_reads_back() {
