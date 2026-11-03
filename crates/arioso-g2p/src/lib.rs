@@ -152,4 +152,23 @@ impl PhonemeMap {
         ids.push(self.eos);
         ids
     }
+
+    /// The same sequence, in the type the voice's tensor wants.
+    ///
+    /// The render path needs `i64`, and converting the `Vec<u32>` afterwards built the
+    /// sequence twice for every chunk it spoke.
+    #[must_use]
+    pub fn to_ids_i64(&self, phonemes: &[&str]) -> Vec<i64> {
+        let mut ids = Vec::with_capacity(phonemes.len() * 2 + 3);
+        ids.push(i64::from(self.bos));
+        ids.push(i64::from(self.pad));
+        for phoneme in phonemes {
+            if let Some(entry) = self.ids.get(*phoneme) {
+                ids.extend(entry.iter().map(|&id| i64::from(id)));
+                ids.push(i64::from(self.pad));
+            }
+        }
+        ids.push(i64::from(self.eos));
+        ids
+    }
 }

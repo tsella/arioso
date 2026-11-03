@@ -148,7 +148,16 @@ impl PiperVoice {
         ];
 
         let map = PhonemeMap::from_voice_config(&text)?;
-        let session = Session::builder()?.commit_from_file(model)?;
+        // Level 3 fuses the graph; the default is Level 1, which leaves the fused kernels
+        // unused. Intra-op threads are bounded because this runs inside a server: one
+        // synthesis per voice, and a thread count equal to every core leaves nothing for
+        // the requests arriving behind it.
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |count| (count.get() / 2).clamp(1, 4));
+        let session = Session::builder()?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
+            .with_intra_threads(threads)?
+            .commit_from_file(model)?;
 
         Ok(Self {
             session,
@@ -288,9 +297,8 @@ impl PiperVoice {
     ///
     /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
     pub fn synthesize(&mut self, symbols: &[&str]) -> Result<Vec<f32>, PiperError> {
-        let ids = self.map.to_ids(symbols);
-        let length = ids.len() as i64;
-        let input: Vec<i64> = ids.iter().map(|&id| i64::from(id)).collect();
+        let input = self.map.to_ids_i64(symbols);
+        let length = input.len() as i64;
 
         let outputs = self.session.run(ort::inputs![
             "input" => Tensor::from_array(([1i64, length], input))?,
