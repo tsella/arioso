@@ -46,6 +46,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 wiremock = "0.6"
 
+[profile.release]
+# One crate's work inlined into the next: the pipeline crosses four of them, and the
+# boundaries were costing more than the code.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 missing_debug_implementations = "warn"
