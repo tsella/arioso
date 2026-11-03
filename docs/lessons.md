@@ -145,6 +145,13 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## An accented letter is spoken, not dropped
+
+The spelling rules read ASCII. A Portuguese or French word is not in an English dictionary, so it
+reached the rules with `é` in it, the rules produced nothing, and the word was reported missing
+and skipped. A missing word is a hole in the sentence; a folded letter is one wrong vowel that a
+dictionary entry can correct. Fold the letter to its base form and say the word.
+
 ## A voice can be several voices, and the number is an input
 
 Piper voices are single-speaker unless the model says otherwise. `en_GB-semaine-medium` has four

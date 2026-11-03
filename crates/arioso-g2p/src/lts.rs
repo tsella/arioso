@@ -88,13 +88,53 @@ pub fn pronounce(word: &str) -> Vec<&'static str> {
     arpabet::to_ipa(&tokens.join(" "))
 }
 
+/// Fold a Latin letter carrying a diacritic to the letter these rules can read.
+///
+/// The rules are English, so `é` has no rule of its own. Dropping the letter left a hole in
+/// the sentence, which is worse than saying `e`: a wrong vowel is heard and can be corrected
+/// with a dictionary entry, a missing word cannot.
+fn fold_latin(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        'ß' => "ss",
+        'æ' => "ae",
+        'œ' => "oe",
+        'þ' => "th",
+        'ð' | 'đ' => "d",
+        'ø' => "o",
+        'ł' => "l",
+        'ı' => "i",
+        // Latin-1 Supplement and Latin Extended-A, which is the range the voices in the
+        // catalog write in.
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'ç' | 'ć' | 'č' | 'ĉ' | 'ċ' => "c",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ğ' | 'ģ' => "g",
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => "i",
+        'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' | 'ŏ' | 'ő' => "o",
+        'ŕ' | 'ř' => "r",
+        'ś' | 'š' | 'ş' | 'ș' => "s",
+        'ť' | 'ţ' | 'ț' => "t",
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ý' | 'ÿ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
 /// Pronounce a word by spelling rule, as ARPAbet tokens with one primary stress.
 #[must_use]
 pub fn to_arpabet(word: &str) -> Vec<String> {
     let text: String = word
         .chars()
-        .filter(|ch| ch.is_ascii_alphabetic())
-        .map(|ch| ch.to_ascii_lowercase())
+        .flat_map(|ch| {
+            let lower = ch.to_lowercase().next().unwrap_or(ch);
+            match fold_latin(lower) {
+                Some(folded) => folded.chars().collect::<Vec<char>>(),
+                None => vec![lower],
+            }
+        })
+        .filter(char::is_ascii_alphabetic)
         .collect();
     if text.is_empty() {
         return Vec::new();
@@ -264,6 +304,20 @@ mod tests {
 
     fn say(word: &str) -> String {
         to_arpabet(word).join(" ")
+    }
+
+    #[test]
+    fn an_accented_letter_is_spoken_as_its_base_letter() {
+        // A Portuguese or French word is not in an English dictionary, and the rules have no
+        // rule for `é`. Folding it says the word with one wrong vowel; dropping it says
+        // nothing at all, which is the worse failure.
+        assert_eq!(say("café"), say("cafe"));
+        assert_eq!(say("São"), say("sao"));
+        assert_eq!(say("Straße"), say("strasse"));
+        assert_eq!(say("niño"), say("nino"));
+        assert!(!pronounce("é").is_empty());
+        // A letter with no base form is still not a word.
+        assert!(pronounce("漢").is_empty());
     }
 
     #[test]
