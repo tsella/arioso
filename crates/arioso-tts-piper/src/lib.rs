@@ -40,6 +40,17 @@ pub enum PiperError {
     /// The caller stopped accepting audio.
     #[error("{0}")]
     Consumer(String),
+    /// A speaker was asked for on a voice that has only one.
+    #[error("this voice has a single speaker, so speaker {0} does not exist")]
+    NoSpeakers(i64),
+    /// A speaker number outside the voice's range.
+    #[error("speaker {sid} is out of range: this voice has {count}")]
+    SpeakerRange {
+        /// The speaker asked for.
+        sid: i64,
+        /// How many the voice has.
+        count: usize,
+    },
 }
 
 /// Longest piece of text handed to the model, in characters.
@@ -52,6 +63,9 @@ pub struct RenderOptions {
     pub speed: f32,
     /// How text is expanded before it is phonemized.
     pub normalize: arioso_core::NormalizeOptions,
+    /// Which speaker to use on a multi-speaker voice. Ignored, and must be 0, on a
+    /// single-speaker one.
+    pub sid: i64,
 }
 
 impl Default for RenderOptions {
@@ -59,6 +73,7 @@ impl Default for RenderOptions {
         Self {
             speed: 1.0,
             normalize: arioso_core::NormalizeOptions::default(),
+            sid: 0,
         }
     }
 }
@@ -72,6 +87,37 @@ pub struct RenderReport {
     pub missing: Vec<String>,
     /// Dictionary entries no form of which the voice can render.
     pub unusable: Vec<String>,
+}
+
+/// Check a speaker number against how many a voice has.
+///
+/// # Errors
+///
+/// Returns [`PiperError::NoSpeakers`] for a number on a single-speaker voice, and
+/// [`PiperError::SpeakerRange`] for one outside the range.
+pub fn check_speaker(sid: i64, num_speakers: usize) -> Result<(), PiperError> {
+    if sid < 0 {
+        return Err(PiperError::SpeakerRange {
+            sid,
+            count: num_speakers,
+        });
+    }
+    if num_speakers <= 1 {
+        // A voice with one speaker has nothing to choose, so any other number is a
+        // request the voice cannot answer rather than a number out of range.
+        return if sid == 0 {
+            Ok(())
+        } else {
+            Err(PiperError::NoSpeakers(sid))
+        };
+    }
+    match usize::try_from(sid) {
+        Ok(number) if number < num_speakers => Ok(()),
+        _ => Err(PiperError::SpeakerRange {
+            sid,
+            count: num_speakers,
+        }),
+    }
 }
 
 /// Whether a form is written in ARPAbet rather than as a respelling.
@@ -97,6 +143,11 @@ pub struct PiperVoice {
     scales: [f32; 3],
     /// The voice's own length scale, before a speed multiplier.
     length_scale: f32,
+    /// How many speakers the voice was trained on.
+    num_speakers: usize,
+    /// Whether the graph takes a speaker id. A multi-speaker voice without it produces
+    /// the same voice for every number, so the two facts are kept apart.
+    has_sid: bool,
 }
 
 impl std::fmt::Debug for PiperVoice {
@@ -105,6 +156,7 @@ impl std::fmt::Debug for PiperVoice {
             .field("sample_rate", &self.sample_rate)
             .field("scales", &self.scales)
             .field("symbols", &self.map.len())
+            .field("num_speakers", &self.num_speakers)
             .finish_non_exhaustive()
     }
 }
@@ -159,12 +211,26 @@ impl PiperVoice {
             .with_intra_threads(threads)?
             .commit_from_file(model)?;
 
+        // A multi-speaker voice takes a `sid` input and produces one voice per number.
+        // The count comes from the config and the input from the graph, because a voice
+        // can be trained on several speakers and exported without the input, and that
+        // one would otherwise answer every number with the same voice.
+        let num_speakers = document
+            .pointer("/num_speakers")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(1);
+        let has_sid = session.inputs.iter().any(|input| input.name == "sid");
+
         Ok(Self {
             session,
             map,
             sample_rate,
             scales,
             length_scale,
+            num_speakers,
+            has_sid,
         })
     }
 
@@ -178,6 +244,30 @@ impl PiperVoice {
     #[must_use]
     pub fn symbols(&self) -> usize {
         self.map.len()
+    }
+
+    /// How many speakers the voice was trained on.
+    #[must_use]
+    pub fn num_speakers(&self) -> usize {
+        self.num_speakers
+    }
+
+    /// Whether the graph takes a speaker id at all.
+    #[must_use]
+    pub fn has_speaker_input(&self) -> bool {
+        self.has_sid
+    }
+
+    /// Check a speaker number against this voice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiperError::NoSpeakers`] when a speaker was asked for on a voice that
+    /// has one, and [`PiperError::SpeakerRange`] when the number is out of range. Both
+    /// are errors rather than silent fallbacks: a caller that asked for a voice and got
+    /// a different one has no way to notice.
+    pub fn check_speaker(&self, sid: i64) -> Result<(), PiperError> {
+        check_speaker(sid, self.num_speakers)
     }
 
     /// Speak `text`, handing each piece of audio to `sink` as it is ready.
@@ -199,6 +289,7 @@ impl PiperVoice {
         mut sink: impl FnMut(&[f32], u32) -> Result<(), PiperError>,
     ) -> Result<RenderReport, PiperError> {
         self.set_speed(options.speed);
+        self.check_speaker(options.sid)?;
         let rate = self.sample_rate();
         let mut report = RenderReport::default();
 
@@ -244,7 +335,7 @@ impl PiperVoice {
                 if symbols.is_empty() {
                     continue;
                 }
-                let audio = self.synthesize(&symbols)?;
+                let audio = self.synthesize(&symbols, options.sid)?;
                 sink(&audio, rate)?;
             }
         }
@@ -293,18 +384,32 @@ impl PiperVoice {
 
     /// Synthesize one chunk of phoneme symbols into mono audio samples.
     ///
+    /// `sid` selects the speaker on a multi-speaker voice. It is sent only when the graph
+    /// declares the input, because a model that does not have it rejects the run.
+    ///
     /// # Errors
     ///
     /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
-    pub fn synthesize(&mut self, symbols: &[&str]) -> Result<Vec<f32>, PiperError> {
+    pub fn synthesize(&mut self, symbols: &[&str], sid: i64) -> Result<Vec<f32>, PiperError> {
         let input = self.map.to_ids_i64(symbols);
         let length = input.len() as i64;
 
-        let outputs = self.session.run(ort::inputs![
-            "input" => Tensor::from_array(([1i64, length], input))?,
-            "input_lengths" => Tensor::from_array(([1i64], vec![length]))?,
-            "scales" => Tensor::from_array(([3i64], self.scales.to_vec()))?,
-        ])?;
+        let mut feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
+            ("input", Tensor::from_array(([1i64, length], input))?.into()),
+            (
+                "input_lengths",
+                Tensor::from_array(([1i64], vec![length]))?.into(),
+            ),
+            (
+                "scales",
+                Tensor::from_array(([3i64], self.scales.to_vec()))?.into(),
+            ),
+        ];
+        if self.has_sid {
+            feeds.push(("sid", Tensor::from_array(([1i64], vec![sid]))?.into()));
+        }
+
+        let outputs = self.session.run(feeds)?;
 
         let output = outputs.get("output").ok_or(PiperError::NoOutput)?;
         let (_shape, samples) = output.try_extract_tensor::<f32>()?;
@@ -402,6 +507,29 @@ mod tests {
 
     /// A tiny dictionary, so the symbol path can be checked without a model.
     const TWO_WORDS: &str = "hello HH AH0 L OW1\nworld W ER1 L D\n";
+
+    #[test]
+    fn a_speaker_number_is_checked_against_the_voice() {
+        // A single-speaker voice answers 0 and refuses anything else, because a caller
+        // that asked for a different voice has no way to notice it got the same one.
+        assert!(check_speaker(0, 1).is_ok());
+        assert!(matches!(
+            check_speaker(1, 1),
+            Err(PiperError::NoSpeakers(1))
+        ));
+        // A multi-speaker voice has a range, and the first number outside it is refused.
+        for sid in 0..4 {
+            assert!(check_speaker(sid, 4).is_ok(), "sid {sid}");
+        }
+        assert!(matches!(
+            check_speaker(4, 4),
+            Err(PiperError::SpeakerRange { sid: 4, count: 4 })
+        ));
+        assert!(matches!(
+            check_speaker(-1, 4),
+            Err(PiperError::SpeakerRange { sid: -1, count: 4 })
+        ));
+    }
 
     #[test]
     fn words_are_separated_by_the_space_symbol() {

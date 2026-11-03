@@ -55,6 +55,9 @@ enum Command {
         /// Pronunciation dictionary. Defaults to cmudict.dict in the models directory.
         #[arg(long)]
         dict: Option<PathBuf>,
+        /// Speaker number on a multi-speaker voice, such as en_GB-semaine-medium.
+        #[arg(long)]
+        sid: Option<i64>,
     },
     /// Transcribe a WAV file to text.
     Transcribe {
@@ -101,7 +104,12 @@ fn main() -> Result<()> {
             ModelsCommand::Download { id } => download(&config, &id),
         },
         Command::Doctor => doctor(&config, &config_path),
-        Command::Say { text, out, dict } => say(&config, &config_path, &text, out, dict),
+        Command::Say {
+            text,
+            out,
+            dict,
+            sid,
+        } => say(&config, &config_path, &text, out, dict, sid),
         Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
         Command::Stop => stop(&config_path),
@@ -656,6 +664,7 @@ fn say(
     text: &str,
     out: Option<PathBuf>,
     dict: Option<PathBuf>,
+    sid: Option<i64>,
 ) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
@@ -709,6 +718,7 @@ fn say(
         normalize: arioso_core::NormalizeOptions {
             time_of_day: config.tts.time_of_day,
         },
+        sid: sid.unwrap_or(config.tts.sid),
     };
     let report = voice.render(text, &dictionary, &user, options, |audio, _| {
         arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);

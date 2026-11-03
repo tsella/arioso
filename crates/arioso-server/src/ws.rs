@@ -24,6 +24,8 @@ pub(crate) struct StreamRequest {
     pub text: String,
     /// Speaking rate multiplier, overriding the config.
     pub speed: Option<f32>,
+    /// Speaker number on a multi-speaker voice, overriding the config.
+    pub sid: Option<i64>,
 }
 
 /// Upgrade the connection and stream.
@@ -113,6 +115,17 @@ async fn run(
     };
 
     let config = state.config();
+    let sid = request.sid.unwrap_or(config.tts.sid);
+    if !(0..=4095).contains(&sid) {
+        let frame = json!({"type": "error", "detail": format!("sid {sid} is outside 0 to 4095")});
+        let _ = socket.send(Message::Text(frame.to_string().into())).await;
+        return;
+    }
+    if let Err(detail) = state.check_sid(sid) {
+        let frame = json!({"type": "error", "detail": detail});
+        let _ = socket.send(Message::Text(frame.to_string().into())).await;
+        return;
+    }
     let (text, speed) = match prepare(
         &request,
         config.tts.speed,
@@ -129,7 +142,7 @@ async fn run(
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Vec<f32>, u32)>(QUEUE);
     let worker = Arc::clone(&state);
     let joining = tokio::task::spawn_blocking(move || {
-        worker.render_stream(&text, speed, |samples, rate| {
+        worker.render_stream(&text, speed, sid, |samples, rate| {
             sender
                 .blocking_send((samples.to_vec(), rate))
                 .map_err(|_| "the client went away".to_string())
@@ -237,6 +250,7 @@ mod tests {
         StreamRequest {
             text: text.to_owned(),
             speed,
+            sid: None,
         }
     }
 

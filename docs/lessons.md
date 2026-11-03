@@ -145,6 +145,24 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A voice can be several voices, and the number is an input
+
+Piper voices are single-speaker unless the model says otherwise. `en_GB-semaine-medium` has four
+speakers from the SEMAINE set (prudence, spike, obadiah, poppy), and the ONNX graph takes a `sid`
+input for them. Without it the run fails; with it every number is a different voice.
+
+Two facts, not one. The count is in the voice config as `num_speakers`, and the input is in the
+graph. Read both: a model can be trained on several speakers and exported without the input, and
+that one answers every number with the same voice, which is worse than failing.
+
+Refuse a number the voice does not have. A 422 on the HTTP routes and an error frame on the
+socket, because a caller that asked for a different voice has no way to notice it got the same
+one. A single-speaker voice accepts 0 and refuses the rest by name.
+
+The test that proves it needs a real multi-speaker model, so the range logic lives in a free
+function and is tested without one; the model itself was checked by synthesizing the same
+sentence at four numbers and comparing the audio.
+
 ## A dictionary is a word list, not a grammar
 
 CMUdict holds `avenger` and not `avengers`. The lookup missed, the letter-to-sound rules took

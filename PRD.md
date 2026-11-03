@@ -258,7 +258,7 @@ ready`, or `failed { reason }`.
   16 kHz for low. Voice IDs are the upstream names (`en_US-lessac-medium`).
 - F3.3 Kokoro: 54 voices, 24 kHz, English plus seven other languages. Voice IDs are
   the upstream names (`af_heart`, `am_michael`).
-- F3.4 Controls: voice, speed (0.5 to 2.0), and format (`wav`, `pcm`). `pcm` is raw
+- F3.4 Controls: voice, speed (0.5 to 2.0), speaker (`sid`), and format (`wav`, `pcm`). `pcm` is raw
   16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
   `opus` are not implemented: the config refuses them rather than answering with WAV bytes
   labelled as what was asked for.
@@ -268,6 +268,13 @@ ready`, or `failed { reason }`.
   accepts text fragments and returns audio frames plus a timing event.
 - F3.7 Output is deterministic for a fixed voice, speed, and engine version.
 - F3.8 Unsupported voice or language returns 422 with the list of valid values.
+- F3.10 A multi-speaker voice takes a speaker number: `sid` on the request, `tts.sid` in the
+  config, `--sid` on `arioso say`. The count comes from the voice config (`num_speakers`) and
+  the input from the graph, because a voice can be trained on several speakers and exported
+  without the input. A number the voice does not have is a 422 `invalid_value` on the HTTP
+  routes and an `error` frame on the WebSocket, never a 500 and never a silent fallback: a
+  caller that asked for a voice and got a different one has no way to notice. A single-speaker
+  voice accepts only 0 and refuses the rest by name.
 - F3.9 Text passes through normalization and the user dictionary before phonemization.
   See F14.
 
@@ -374,6 +381,7 @@ because it runs batch models and natively streaming models behind the same C API
     "engine": "piper",
     "voice": "en_US-joe-medium",
     "speed": 1.0,
+    "sid": 0,
     "format": "wav"
   },
   "stt": {

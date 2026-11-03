@@ -669,10 +669,10 @@ impl AppState {
     }
 
     /// Synthesize text, loading the voice on first use.
-    fn render(&self, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+    fn render(&self, text: &str, speed: f32, sid: i64) -> Result<(Vec<f32>, u32), String> {
         let mut rate = 0;
         let mut samples = Vec::new();
-        self.render_stream(text, speed, |chunk, chunk_rate| {
+        self.render_stream(text, speed, sid, |chunk, chunk_rate| {
             rate = chunk_rate;
             samples.extend_from_slice(chunk);
             Ok(())
@@ -702,6 +702,22 @@ impl AppState {
         Ok(())
     }
 
+    /// Check a speaker number against the configured voice.
+    ///
+    /// A speaker the voice does not have is the caller's mistake, not an engine failure,
+    /// so it is checked before the render and answered with a code a client can switch on.
+    pub(crate) fn check_sid(&self, sid: i64) -> Result<(), String> {
+        self.warm_voice()?;
+        let guard = self
+            .voice
+            .lock()
+            .map_err(|_| "the voice lock is poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(voice) => voice.check_speaker(sid).map_err(|error| error.to_string()),
+            None => Err("voice failed to load".to_string()),
+        }
+    }
+
     /// Synthesize text one chunk at a time, handing each to `sink`.
     ///
     /// The sink runs while later chunks are still being synthesized, so a
@@ -710,6 +726,7 @@ impl AppState {
         &self,
         text: &str,
         speed: f32,
+        sid: i64,
         mut sink: impl FnMut(&[f32], u32) -> Result<(), String>,
     ) -> Result<(), String> {
         let mut guard = self
@@ -729,6 +746,7 @@ impl AppState {
             normalize: arioso_core::NormalizeOptions {
                 time_of_day: self.config().tts.time_of_day,
             },
+            sid,
         };
         let report = voice
             .render(
@@ -884,6 +902,8 @@ pub struct TtsRequest {
     pub text: String,
     /// Speaking rate multiplier, overriding the config.
     pub speed: Option<f32>,
+    /// Speaker number on a multi-speaker voice, overriding the config.
+    pub sid: Option<i64>,
 }
 
 /// One model as reported by `GET /v1/models`.
@@ -1397,6 +1417,11 @@ pub struct VoiceView {
     pub quality: Option<String>,
     /// Languages the voice speaks.
     pub languages: Vec<String>,
+    /// How many speakers the voice can produce.
+    pub num_speakers: u64,
+    /// Speaker names and their numbers, where the voice names them. This is what a
+    /// picker shows instead of asking the user for an integer.
+    pub speakers: Option<serde_json::Value>,
     /// Whether its files are on disk.
     pub installed: bool,
     /// Whether this is the voice the server would load now.
@@ -1571,6 +1596,8 @@ pub struct TtsPatch {
     pub voice: Option<String>,
     /// Speaking rate, 0.5 to 2.0.
     pub speed: Option<f32>,
+    /// Speaker number on a multi-speaker voice.
+    pub sid: Option<i64>,
     /// `wav` or `pcm`.
     pub format: Option<String>,
     /// Whether times are read with a part of day.
@@ -1646,6 +1673,9 @@ impl ConfigPatch {
             }
             if let Some(speed) = tts.speed {
                 config.tts.speed = speed;
+            }
+            if let Some(sid) = tts.sid {
+                config.tts.sid = sid;
             }
             if let Some(format) = tts.format {
                 config.tts.format = format;
@@ -1915,6 +1945,12 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             config.tts.speed
         )));
     }
+    if !(0..=4095).contains(&config.tts.sid) {
+        return Err(unprocessable(format!(
+            "tts.sid {} is outside 0 to 4095",
+            config.tts.sid
+        )));
+    }
     if !AUDIO_FORMATS.contains(&config.tts.format.as_str()) {
         return Err(unprocessable(format!(
             "tts.format {} is not one of {}",
@@ -2011,6 +2047,12 @@ async fn list_voices(
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
                 languages,
+                num_speakers: model
+                    .meta
+                    .get("num_speakers")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1),
+                speakers: model.meta.get("speakers").cloned(),
                 installed: state.is_installed(model),
                 active: active.as_ref() == Some(&model.id),
             })
@@ -2380,6 +2422,14 @@ async fn synthesize(
             "speed {speed} is outside 0.5 to 2.0"
         )));
     }
+    let sid = request.sid.unwrap_or(state.config().tts.sid);
+    if !(0..=4095).contains(&sid) {
+        return Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_value",
+            format!("sid {sid} is outside 0 to 4095"),
+        ));
+    }
 
     // Checked before the render, so a missing voice is the code a client switches on rather
     // than a 422 carrying an operating system path.
@@ -2399,9 +2449,19 @@ async fn synthesize(
         ));
     }
 
+    // A voice with one speaker has no other voice to give, and a number out of range is
+    // the caller's mistake. Both are 422 with a code, not a 500 from inside the engine.
+    if let Err(detail) = state.check_sid(sid) {
+        return Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_value",
+            detail,
+        ));
+    }
+
     let text = text.to_owned();
     let worker = Arc::clone(&state);
-    let rendered = tokio::task::spawn_blocking(move || worker.render(&text, speed)).await;
+    let rendered = tokio::task::spawn_blocking(move || worker.render(&text, speed, sid)).await;
     let (samples, rate) = match rendered {
         Ok(Ok(pair)) => pair,
         Ok(Err(detail)) => {

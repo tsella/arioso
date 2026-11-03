@@ -220,6 +220,8 @@ pub struct Tts {
     pub voice: String,
     /// Speaking rate multiplier.
     pub speed: f32,
+    /// Speaker number on a multi-speaker voice. Voices with one speaker ignore it.
+    pub sid: i64,
     /// Output format: `wav` or `pcm`.
     pub format: String,
     /// The old limit. Read so a config written before it moved still loads, then folded
@@ -251,6 +253,7 @@ impl Default for Tts {
             // the one voice you cannot ship was the one everybody got.
             voice: "en_US-joe-medium".into(),
             speed: 1.0,
+            sid: 0,
             format: "wav".into(),
             legacy_max_chars: None,
             dictionary: None,

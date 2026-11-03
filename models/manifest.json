@@ -273,6 +273,41 @@
         "quantization": "int8",
         "license_note": "CC BY 4.0, NVIDIA Parakeet TDT 0.6B v2; attribution required"
       }
+    },
+    {
+      "id": "piper-en_GB-semaine-medium",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2023.11",
+      "license": "MIT",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "en_GB-semaine-medium.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/semaine/medium/en_GB-semaine-medium.onnx",
+          "sha256": "d6dab6f3b92db43ea3f78c7f20dc8eadb47a1f15d8a1c9d451cf3ccd201a2f66",
+          "size": 76737711
+        },
+        {
+          "name": "en_GB-semaine-medium.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/semaine/medium/en_GB-semaine-medium.onnx.json",
+          "sha256": "6425dcb878684043b77d772b173ae006d86a583b110303edda48b8438ecee5ee",
+          "size": 5076
+        }
+      ],
+      "meta": {
+        "sample_rate": 22050,
+        "languages": [
+          "en-GB"
+        ],
+        "num_speakers": 4,
+        "speakers": {
+          "prudence": 0,
+          "spike": 1,
+          "obadiah": 2,
+          "poppy": 3
+        }
+      }
     }
   ]
 }
