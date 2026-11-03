@@ -145,6 +145,18 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A throughput number measured through a rate limiter measures the limiter
+
+The published figure was 3,500 requests a second on `/healthz`. The load script counted
+`len(body)` for every response and never read the status, so the 429s the rate limiter
+returned were counted as successes: 400 requests came back as 101 answered and 299 refused.
+The server's real figure with the limiter raised is about 29,000 a second, and the honest
+default-configuration figure is the limiter's 50.
+
+Two rules. A load client reads the status code and counts only what it asked for. And a
+throughput run states the policy it ran under: a limit that applies per address is shared by
+every client on loopback, so eight local clients do not get eight times the allowance.
+
 ## A default that moves leaves the prose behind
 
 The speech model's default moved from Whisper base to Parakeet v2, and the README went on

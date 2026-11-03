@@ -18,7 +18,12 @@ at, not a workstation, so the numbers are pessimistic on purpose.
   `sherpa-whisper-tiny-en`. Ten minutes is long enough to cross several 29 second windows
   and to need resampling, which is where the cost is.
 - **Server.** Time from process start to the first `200` on `/healthz`, then requests per
-  second with eight concurrent clients on a keep-alive connection each, one route at a time.
+  second with eight concurrent clients on a keep-alive connection each, one route at a time,
+  1,000 requests per client, median of three rounds. **The rate limiter is raised to
+  100,000 for this measurement.** Left at its default of 50 a second with a burst of 100,
+  every client is `127.0.0.1`, so the eight of them share one bucket and the run measures
+  the limiter instead of the server: 400 requests come back as 101 answered and 299
+  refused.
 - **Per path.** A timing harness that calls one function in a loop and reports the median of
   three runs. Memory for a single call is a separate process measured with
   `/usr/bin/time -v`, because a peak is not something a loop can report.
@@ -36,14 +41,15 @@ at, not a workstation, so the numbers are pessimistic on purpose.
 
 | measure | value |
 | --- | --- |
-| start to first healthy response | 85 ms |
-| `GET /healthz` | 3,528 per second |
-| `GET /v1/config` | 3,330 per second |
-| `GET /v1/models` | 3,172 per second |
+| start to first healthy response | 89 ms |
+| `GET /healthz` | 29,100 per second |
+| `GET /v1/config` | 27,600 per second |
+| `GET /v1/models` | 23,300 per second |
 | release binary | 42.3 MB |
 
-Eight clients on four cores: a request is about 285 µs, and almost all of it is the HTTP
-stack. No route in this set touches a model.
+Eight clients on four cores: a request costs about 275 µs of client wall time, and almost
+all of it is the HTTP stack on both ends. No route in this set touches a model. The three
+routes differ by the size of the response, 2 bytes against 1,243 and 1,453.
 
 ## Per path
 
@@ -88,8 +94,8 @@ Three changes were measured and showed nothing, which is worth recording as much
 ones that did.
 
 - **The config clone.** Handing out an `Arc<Config>` instead of a copy is correct, and at
-  3,500 requests per second on `/healthz` the difference is inside the noise: the route
-  costs 285 µs and the copy was a few of them.
+  29,000 requests per second on `/healthz` the difference is inside the noise: the route
+  costs about 275 µs and the copy was a few of them.
 - **The phoneme sequence.** Building the tensor's `i64` sequence directly instead of
   converting a `u32` one saves one allocation per chunk, and 11 phonemes is too small a
   chunk to show it: 0.26 µs against 0.25 µs.

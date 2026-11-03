@@ -33,9 +33,9 @@ every flag. A run with no test name runs all five, in the order `say`, `stt`, `s
 | --- | --- | --- |
 | `say` | Synthesizes one fixed 560-character passage three times | `say_wall_s`, `say_audio_s`, `say_rtf`, `say_rss_mb` |
 | `stt` | Transcribes the 60 s clip in `bench/audio/` three times | `stt_wall_s`, `stt_audio_s`, `stt_rtf`, `stt_rss_mb` |
-| `server` | Starts a server on a free port, waits for the first `200`, then 8 keep-alive clients × 200 requests on `/healthz` | `startup_ms`, `healthz_rps` |
+| `server` | Starts a server on a free port, waits for the first `200`, then 8 keep-alive clients × 1,000 requests on `/healthz` | `startup_ms`, `healthz_rps` |
 | `stream` | One paced session for the first partial, then the whole clip as fast as the socket takes it | `stream_first_ms`, `stream_total_s`, `stream_rtf` |
-| `micro` | `doctor` (config, manifest, voice config), then `normalize` against the process floor | `doctor_ms`, `normalize_us` |
+| `micro` | `doctor`: the config, the manifest and the voice config it loads before it can answer | `doctor_ms` |
 
 Every timing is the median of `--repeats` runs, default 3. Peak memory is the kernel's high
 water mark for that one process, read in a child of its own so it is not the largest any
@@ -45,20 +45,25 @@ earlier command reached.
 
 - **Accuracy.** Word error rate needs a corpus and a reference, and it does not vary with
   hardware. `MODELS.md` carries those numbers.
-- **The segmenter and the reverse dictionary on their own.** Both need a library call, and
-  a Python driver has no way in. They are inside the `stream` and `stt` numbers, not beside
-  them. `BENCHMARK.md` has the isolated figures, measured from inside the crates.
+- **Normalization, VAD framing and the reverse dictionary on their own.** Each is
+  microseconds of work behind a seventy millisecond process start, so a harness that spawns
+  a process cannot see them, and a column built from the difference of two medians reported
+  a zero as often as a number. They are inside the `stream` and `stt` numbers, not beside
+  them, and the isolated figures are in `BENCHMARK.md`, measured from inside the crates.
 - **Download speed.** That is the network, not the machine.
 - **Quality of the output.** A fast wrong answer scores well here. `stt_rtf` says nothing
   about whether the words were right.
 
-`normalize_us` is a difference of two medians, so it carries the noise of both. On a quiet
-machine it lands near 200 µs; treat anything under about 100 µs as "below the noise floor",
-not as a fast machine.
-
 `healthz_rps` is driven by 8 Python threads, and the client becomes the limit on a fast
-server: on one four-core machine the same binary measured between 1,580 and 1,940 rps across
-runs. Compare rows from this harness with each other, not with `wrk` or `ab`.
+server: on one four-core machine the same binary measured between 26,000 and 29,000 rps,
+and a run of 1,600 requests reports half that because the threads start inside the clock.
+Compare rows from this harness with each other, not with `wrk` or `ab`.
+
+**The harness raises the rate limiter, and that is on purpose.** The default is 50 requests a
+second per address with a burst of 100, and every client here is `127.0.0.1`, so eight of
+them share one bucket. Left at the default, the throughput run measures the limiter: 400
+requests came back 101 answered and 299 refused. The row is about the server, so the config
+sets `requests_per_second` and `burst` to 100,000 and every response in the run is a `200`.
 
 ## Requirements
 

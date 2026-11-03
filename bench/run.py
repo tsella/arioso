@@ -49,9 +49,12 @@ SAY_TEXT = (
     "atmosphere when thought runs gracefully free of the trammels of precision."
 )
 
-# A sentence with a number, a currency, a unit and a clock time, so normalization has
-# something to do. Used for the micro measurement, never spoken.
-NORMALIZE_TEXT = "It costs $3.99 on the 3rd at 14:30, and the box is 5kg at 190cm."
+
+
+# The ids a run with no --voice and no --model will load. Only used to warn before a test
+# fails inside the engine; the binary decides what it actually loads.
+DEFAULT_VOICE_ID = "piper-en_US-joe-medium"
+DEFAULT_STT_ID = "sherpa-parakeet-tdt-0.6b-v2-en"
 
 COLUMNS = [
     "date",
@@ -80,7 +83,6 @@ COLUMNS = [
     "stream_total_s",
     "stream_rtf",
     "doctor_ms",
-    "normalize_us",
 ]
 
 TESTS = {
@@ -88,7 +90,7 @@ TESTS = {
     "stt": "Transcription of the shipped clip: wall clock, real time factor, peak memory",
     "server": "Server: start to the first 200, and requests per second on /healthz",
     "stream": "Streaming: a 60 s session over /v1/stt/ws, first partial and total",
-    "micro": "Micro: dictionary and manifest load (doctor), normalization per call",
+    "micro": "Micro: what the binary loads before it answers (doctor)",
 }
 
 # Runs one command in a child of its own, so the peak memory is that command's and not the
@@ -268,7 +270,15 @@ class Bench:
         """A config with the models directory and the voice the run will use."""
         document = {
             "models": {"dir": os.path.abspath(self.args.models)},
-            "server": {"bind": f"127.0.0.1:{port or 10101}", "docs": False},
+            "server": {
+                "bind": f"127.0.0.1:{port or 10101}",
+                "docs": False,
+                # The default is 50 requests a second per address with a burst of 100, and
+                # every client here is 127.0.0.1: eight of them share one bucket, so the
+                # throughput run would measure the limiter and call it the server. The row
+                # is about the server.
+                "limits": {"requests_per_second": 100_000, "burst": 100_000},
+            },
             "log": {"level": "error"},
             "stt": {"partials": True},
         }
@@ -278,6 +288,48 @@ class Bench:
             document.setdefault("stt", {})["batch_model"] = self.args.model
         with open(self.config, "w") as handle:
             json.dump(document, handle, indent=2)
+
+    def installed(self):
+        """The catalog ids this models directory reports as installed, and their kind."""
+        out = subprocess.run(
+            [self.binary, "--config", self.config, "models", "list"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        found = {}
+        for line in out.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 3 and fields[-1] == "installed":
+                found[fields[0]] = fields[1]
+        return found
+
+    def check_models(self):
+        """Warn when the shipped default is not on disk, and refuse an explicit miss.
+
+        A model that was never downloaded fails inside sherpa with three lines naming a file
+        in the models directory, which a reporter reads as a broken build. The default is
+        only a warning: the config may name another model, and refusing a run that would
+        have worked is worse than a line on stderr.
+        """
+        found = self.installed()
+        if self.args.model and self.args.model not in found:
+            raise BenchError(
+                f"{self.args.model} is not installed. Run "
+                f"`{self.binary} models download {self.args.model}`"
+            )
+        if not self.args.model and DEFAULT_STT_ID not in found:
+            print(
+                f"  warning: {DEFAULT_STT_ID} is not installed in this directory; the "
+                f"speech tests will fail unless the config names another model "
+                f"(`{os.path.basename(self.binary)} models download {DEFAULT_STT_ID}`)",
+                file=sys.stderr,
+            )
+        if not self.args.voice and DEFAULT_VOICE_ID not in found:
+            print(
+                f"  warning: {DEFAULT_VOICE_ID} is not installed in this directory; "
+                "synthesis will fail unless the config names another voice",
+                file=sys.stderr,
+            )
 
     def say(self):
         """Synthesis of one fixed passage, repeated."""
@@ -504,7 +556,13 @@ class Bench:
         return session
 
     def micro_test(self):
-        """Dictionary and manifest load, then what normalization adds per call."""
+        """What the binary loads before it can answer: config, manifest, voice config.
+
+        Normalization, VAD framing and the reverse dictionary are all microseconds of work
+        behind a seventy millisecond process start, so a harness that spawns a process
+        cannot see them. They are measured from inside the crates and recorded in
+        BENCHMARK.md, not here.
+        """
         walls = []
         for _ in range(self.args.repeats):
             wall, _, stderr, _, code = measure(
@@ -513,35 +571,13 @@ class Bench:
             if code != 0:
                 raise BenchError(f"`doctor` exited {code}: {stderr.strip()[:300]}")
             walls.append(wall * 1000)
-
-        def per_call(argv):
-            """Median wall of a command, over the repeats."""
-            return median([measure(argv)[0] for _ in range(self.args.repeats)])
-
-        floor = per_call([self.binary, "--version"])
-        normalize = per_call(
-            [self.binary, "--config", self.config, "normalize", NORMALIZE_TEXT]
-        )
-        above = None
-        # One run of each cannot separate the work from the process, and the difference of
-        # two single measurements is a coin toss: report nothing rather than a number that
-        # is the noise between them.
-        if self.args.repeats >= 2 and floor is not None and normalize is not None:
-            above = round(max(normalize - floor, 0) * 1_000_000, 1)
-        self.values.update(
-            {
-                "doctor_ms": median(walls),
-                # The floor is the process, the config load and the exit; what is left is
-                # the work normalization did. It can be small enough to be noise, which is
-                # why the number is a median of repeats and the README says so.
-                "normalize_us": above,
-            }
-        )
+        self.values.update({"doctor_ms": median(walls)})
 
     def run(self, names):
         """Run the chosen tests in the order given."""
         self.check()
         self.write_config()
+        self.check_models()
         steps = {
             "say": self.say,
             "stt": self.stt,
@@ -809,8 +845,7 @@ def print_table(row):
         "stream_first_ms": ("streaming, first partial", "ms"),
         "stream_total_s": ("streaming, whole session", "s"),
         "stream_rtf": ("streaming real time factor", ""),
-        "doctor_ms": ("doctor, dictionary and manifest", "ms"),
-        "normalize_us": ("normalization, per call above the process floor", "us"),
+        "doctor_ms": ("doctor, config, manifest and voice config", "ms"),
     }
     width = max(len(name) for name, _ in labels.values())
     print()
@@ -861,7 +896,12 @@ def main(argv=None):
     parser.add_argument("--model", default="", help="speech model id")
     parser.add_argument("--repeats", type=int, default=3, help="runs per measurement")
     parser.add_argument("--clients", type=int, default=8, help="concurrent clients")
-    parser.add_argument("--requests", type=int, default=200, help="requests per client")
+    parser.add_argument(
+        "--requests",
+        type=int,
+        default=1000,
+        help="requests per client; below about 500 the thread start is the measurement",
+    )
     parser.add_argument("--reporter", default="", help="your github user name")
     parser.add_argument("--cpu", default="", help="override the detected CPU name")
     parser.add_argument("--memory-gb", default="", help="override the detected memory")
