@@ -33,7 +33,7 @@ pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
 
-    out.extend_from_slice(&pcm_s16le(samples));
+    write_pcm_s16le(samples, &mut out);
     out
 }
 
@@ -41,11 +41,20 @@ pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 #[must_use]
 pub fn pcm_s16le(samples: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
+    write_pcm_s16le(samples, &mut out);
+    out
+}
+
+/// Append `samples` to `out` as little-endian 16-bit PCM.
+///
+/// The conversion writes into the caller's buffer because the WAV writer has already
+/// allocated the exact size. Building a separate PCM vector and copying it in doubled the
+/// peak buffer for every response and every file.
+pub fn write_pcm_s16le(samples: &[f32], out: &mut Vec<u8>) {
     for &sample in samples {
         let scaled = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
         out.extend_from_slice(&scaled.to_le_bytes());
     }
-    out
 }
 
 /// Read a WAV file as mono samples and its rate.
@@ -123,30 +132,34 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
         return Err(invalid("zero channels"));
     }
 
-    let samples: Vec<f32> = match (format, bits) {
-        (1, 16) => data
-            .chunks_exact(2)
-            .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX))
-            .collect(),
-        (3, 32) => data
-            .chunks_exact(4)
-            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-            .collect(),
+    // Decode and mix in one pass. Decoding every channel and averaging afterwards held
+    // two full-length buffers at once: a ten-minute 48 kHz stereo file needed 345 MB
+    // where 115 MB is the answer.
+    let frame_bytes = match (format, bits) {
+        (1, 16) => 2 * usize::from(channels),
+        (3, 32) => 4 * usize::from(channels),
         _ => {
             return Err(invalid(&format!(
                 "unsupported format {format} with {bits} bits"
             )));
         }
     };
-
-    if channels == 1 {
-        return Ok((samples, rate));
+    let frames = data.len() / frame_bytes;
+    let mut samples: Vec<f32> = Vec::with_capacity(frames);
+    for frame in data.chunks_exact(frame_bytes) {
+        let mut sum = 0.0f32;
+        for channel in 0..usize::from(channels) {
+            let at = channel * (frame_bytes / usize::from(channels));
+            let value = if format == 1 {
+                f32::from(i16::from_le_bytes([frame[at], frame[at + 1]])) / f32::from(i16::MAX)
+            } else {
+                f32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]])
+            };
+            sum += value;
+        }
+        samples.push(sum / f32::from(channels));
     }
-    let mixed = samples
-        .chunks_exact(channels as usize)
-        .map(|frame| frame.iter().sum::<f32>() / f32::from(channels))
-        .collect();
-    Ok((mixed, rate))
+    Ok((samples, rate))
 }
 
 #[cfg(test)]
