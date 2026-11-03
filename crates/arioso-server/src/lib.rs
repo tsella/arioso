@@ -1932,26 +1932,42 @@ async fn delete_model(
 
     let mut removed = Vec::new();
     for file in &spec.files {
-        let path = state.models_dir.join(&file.name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => removed.push(file.name.clone()),
-            // Absent is the state the caller asked for, so it is not an error.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::error!(%error, model = %id, "could not remove {}", path.display());
-                return ApiError::coded(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "remove_failed",
-                    "a file could not be removed; the server log has the detail",
-                )
-                .into_response();
+        // The partial file too: an interrupted download leaves one behind, and a delete
+        // that leaves half a model on disk has not deleted the model.
+        for name in [file.name.clone(), format!("{}.part", file.name)] {
+            let path = state.models_dir.join(&name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(name),
+                // Absent is the state the caller asked for, so it is not an error.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::error!(%error, model = %id, "could not remove {}", path.display());
+                    return ApiError::coded(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "remove_failed",
+                        "a file could not be removed; the server log has the detail",
+                    )
+                    .into_response();
+                }
             }
         }
     }
-    tracing::info!(model = %id, files = removed.len(), "model removed");
+    // A model that is gone from disk must not stay in memory. Left loaded, `/readyz` says
+    // the voice is installed while it is not, and the next request speaks from a model the
+    // caller believes they deleted.
+    let mut dropped = Vec::new();
+    if spec.kind == Kind::Tts && state.voice_spec().is_ok_and(|active| active.id == spec.id) {
+        state.drop_voice();
+        dropped.push("voice");
+    }
+    if spec.kind == Kind::Stt && state.config().stt.batch_model == spec.id {
+        state.drop_stt();
+        dropped.push("stt");
+    }
+    tracing::info!(model = %id, files = removed.len(), dropped = ?dropped, "model removed");
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "id": id, "removed": removed })),
+        Json(serde_json::json!({ "id": id, "removed": removed, "dropped": dropped })),
     )
         .into_response()
 }
@@ -3211,6 +3227,52 @@ mod tests {
             None,
             "a finished download can be started again"
         );
+    }
+
+    /// A state whose catalog says every file is zero bytes, so a test can create the files
+    /// without writing hundreds of megabytes to a temporary directory.
+    fn state_of_empty_files() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        for spec in &mut manifest.models {
+            for file in &mut spec.files {
+                file.size = 0;
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        (
+            Arc::new(AppState::new(config, manifest, None).unwrap()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn deleting_a_model_also_removes_its_partial_file() {
+        let (state, dir) = state_of_empty_files();
+        let spec = state.manifest.models.first().unwrap().clone();
+        for file in &spec.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+            std::fs::write(dir.path().join(format!("{}.part", file.name)), b"half").unwrap();
+        }
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/models/{}", spec.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        for file in &spec.files {
+            assert!(
+                !dir.path().join(format!("{}.part", file.name)).exists(),
+                "{} .part survived",
+                file.name
+            );
+        }
     }
 
     #[tokio::test]
