@@ -308,11 +308,6 @@ impl AppState {
         self.downloads.lock().ok()?.get(id).copied()
     }
 
-    /// Whether this model is being fetched right now.
-    fn is_downloading(&self, id: &str) -> bool {
-        self.download_progress(id).is_some()
-    }
-
     /// The accept loop's handle, when this process is serving.
     pub(crate) fn handle(&self) -> Option<&axum_server::Handle<std::net::SocketAddr>> {
         self.handle.get()
@@ -2073,7 +2068,11 @@ async fn delete_model(
         )
         .into_response();
     };
-    if state.is_downloading(&id) {
+    // Checking that nothing is downloading and blocking a new download has to be one
+    // step. Apart, a request that lands between the check and the unlink starts writing
+    // the `.part` file this is removing, and the delete reports a model gone while a
+    // download keeps writing into it.
+    if state.try_start_download(&id, 0).is_some() {
         return ApiError::coded(
             StatusCode::CONFLICT,
             "download_in_progress",
@@ -2081,6 +2080,12 @@ async fn delete_model(
         )
         .into_response();
     }
+    // Gives the slot back however this ends, including the early return that reports a
+    // file could not be removed. A reservation left behind wedges the id until restart.
+    let _reserved = DeleteReservation {
+        state: Arc::clone(&state),
+        id: id.clone(),
+    };
 
     let mut removed = Vec::new();
     for file in &spec.files {
@@ -2122,6 +2127,21 @@ async fn delete_model(
         Json(serde_json::json!({ "id": id, "removed": removed, "dropped": dropped })),
     )
         .into_response()
+}
+
+/// Holds a model's download slot for the length of a delete.
+///
+/// The slot is what a download claims before it writes, so holding it is how a delete says
+/// "not now" without a second lock and without a window between the check and the unlink.
+struct DeleteReservation {
+    state: Arc<AppState>,
+    id: String,
+}
+
+impl Drop for DeleteReservation {
+    fn drop(&mut self) {
+        self.state.finish_download(&self.id);
+    }
 }
 
 /// Load a model so the next request does not pay for the load.
@@ -3763,6 +3783,41 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "download_in_progress");
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_fails_still_gives_the_model_back() {
+        // The reservation is held for the length of the unlink. Left behind on the error
+        // path, the id stays busy until the process restarts: no download, no second
+        // delete, and a catalog entry that says "downloading" forever.
+        let (state, dir) = state();
+        let spec = state
+            .manifest
+            .models
+            .iter()
+            .find(|spec| spec.kind == Kind::Tts)
+            .cloned()
+            .unwrap();
+        // A directory where a file belongs: `remove_file` refuses it, so the handler takes
+        // the `remove_failed` path.
+        std::fs::create_dir(dir.path().join(&spec.files[0].name)).unwrap();
+
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/models/{}", spec.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "remove_failed");
+        assert!(
+            state.download_progress(&spec.id).is_none(),
+            "the id is still reserved after a failed delete"
+        );
     }
 
     #[tokio::test]
