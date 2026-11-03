@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use arioso_config::Config;
+use arioso_config::{AUDIO_FORMATS, Config};
 use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
@@ -1567,7 +1567,7 @@ pub struct TtsPatch {
     pub voice: Option<String>,
     /// Speaking rate, 0.5 to 2.0.
     pub speed: Option<f32>,
-    /// `wav`, `pcm`, `mp3`, or `opus`.
+    /// `wav` or `pcm`.
     pub format: Option<String>,
     /// Whether times are read with a part of day.
     pub time_of_day: Option<bool>,
@@ -1701,9 +1701,6 @@ impl ConfigPatch {
 /// Engines this binary can actually serve, and what they are called.
 const TTS_ENGINES: [&str; 1] = ["piper"];
 const STT_ENGINES: [&str; 1] = ["sherpa"];
-/// Formats the server can produce. `mp3` and `opus` were accepted and never encoded, so a
-/// config that asked for one got a WAV labelled as what it asked for.
-const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
 #[utoipa::path(
     get,

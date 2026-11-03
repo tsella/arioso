@@ -12,6 +12,13 @@ use thiserror::Error;
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Audio formats this binary can produce.
+///
+/// `mp3` and `opus` are absent because no encoder for either is linked in. A format the
+/// config accepts and the server cannot produce is the same lie as a field nothing reads:
+/// the caller asks for one thing and receives another.
+pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
+
 /// Everything arioso reads at startup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -213,7 +220,7 @@ pub struct Tts {
     pub voice: String,
     /// Speaking rate multiplier.
     pub speed: f32,
-    /// Output format: `wav`, `pcm`, `mp3`, or `opus`.
+    /// Output format: `wav` or `pcm`.
     pub format: String,
     /// The old limit. Read so a config written before it moved still loads, then folded
     /// into `server.limits.max_text_chars`, which is the one the routes enforce.
@@ -755,6 +762,16 @@ impl Config {
                 message: format!("expected 0.5 to 2.0, got {}", self.tts.speed),
             });
         }
+        if !AUDIO_FORMATS.contains(&self.tts.format.as_str()) {
+            return Err(ConfigError::Invalid {
+                path: "tts.format".into(),
+                message: format!(
+                    "expected one of {}, got {:?}; no other audio encoder is built into this binary",
+                    AUDIO_FORMATS.join(", "),
+                    self.tts.format
+                ),
+            });
+        }
         if self.vad.engine != "energy" {
             return Err(ConfigError::Invalid {
                 path: "vad.engine".into(),
@@ -912,6 +929,23 @@ mod tests {
             err,
             ConfigError::UnsupportedVersion { found: 99, .. }
         ));
+    }
+
+    #[test]
+    fn an_audio_format_that_is_not_built_in_is_refused() {
+        // The route wrote WAV for any format it did not recognise, so a config asking for
+        // mp3 got WAV bytes labelled as mp3. The document has to refuse what the binary
+        // cannot produce, at load, where the operator sees it.
+        for format in ["mp3", "opus", "flac"] {
+            let json = format!(r#"{{"tts":{{"format":"{format}"}}}}"#);
+            let err = Config::from_json(&json, &origin()).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("tts.format"), "{format}: {msg}");
+        }
+        for format in AUDIO_FORMATS {
+            let json = format!(r#"{{"tts":{{"format":"{format}"}}}}"#);
+            assert!(Config::from_json(&json, &origin()).is_ok(), "{format}");
+        }
     }
 
     #[test]
