@@ -51,6 +51,26 @@ async fn a_start_frame_is_answered_with_ready() {
 }
 
 #[tokio::test]
+async fn a_frame_that_is_not_a_start_is_refused() {
+    let url = serve().await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    socket
+        .send(Message::Text(r#"{"type":"nonsense"}"#.into()))
+        .await
+        .unwrap();
+
+    let first = socket.next().await.unwrap().unwrap();
+    let Message::Text(frame) = first else {
+        panic!("expected a text frame, got {first:?}");
+    };
+    assert!(frame.contains("\"type\":\"error\""), "got {frame}");
+    assert!(
+        !frame.contains("ready"),
+        "a nonsense frame was accepted: {frame}"
+    );
+}
+
+#[tokio::test]
 async fn the_wrong_sample_rate_is_named() {
     let url = serve().await;
     let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();

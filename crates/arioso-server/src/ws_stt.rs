@@ -33,13 +33,22 @@ const MIN_PARTIAL: usize = STREAM_RATE as usize * 3 / 5;
 const QUEUE: usize = 32;
 
 /// Request sent as the first text message.
+///
+/// Unknown fields stay ignored, so a newer client that sends a field this server does not know
+/// still opens a session. The `type` field is the exception, because a frame that says it is
+/// something other than a start is not a client from the future: it is a client speaking a
+/// different protocol, and answering `ready` to it hides the mistake until no audio arrives.
 #[derive(Debug, Deserialize)]
 pub(crate) struct StartRequest {
+    /// The message type, `start`. Optional, because the first version of this frame had no
+    /// type; when present it must be `start`.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
     /// Sample rate of the audio that follows.
     #[serde(default = "default_rate")]
     pub sample_rate: u32,
-    // A `language` field is accepted and ignored: the engine loads once, with the
-    // language from the config, so a per-session language would need a second engine.
+    // A `language` field is accepted and ignored: the engine loads once, with the language
+    // from the config, so a per-session language would need a second engine.
 }
 
 fn default_rate() -> u32 {
@@ -234,6 +243,21 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
             return;
         }
     };
+    if let Some(kind) = start.kind.as_deref() {
+        if kind != "start" {
+            send(
+                &out,
+                json!({
+                    "type": "error",
+                    "detail": format!("expected a start frame, got type {kind:?}"),
+                }),
+            )
+            .await;
+            drop(out);
+            let _ = writer.await;
+            return;
+        }
+    }
     if start.sample_rate != STREAM_RATE {
         send(
             &out,

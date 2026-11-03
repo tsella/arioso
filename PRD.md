@@ -514,6 +514,12 @@ The flush on `stop` is a transcription like any other: if it fails, the session 
 `{"type":"error","code":…,"detail":…}` and no `done` follows, because `done` says the work
 finished. Every number in these frames is rounded to a hundredth, `duration` included.
 
+A first frame whose `type` is present and is not `start` is refused with an error frame. It
+used to be accepted, because every field had a default and unknown fields are ignored, so a
+client speaking a different protocol got `ready` and then waited for audio it was never going
+to send. Fields this server does not know stay ignored on purpose, so the documented
+`sources` field above can arrive from a newer client without breaking an older server.
+
 WebSocket TTS protocol:
 
 ```text

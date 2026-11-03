@@ -145,6 +145,17 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A frame where every field has a default accepts anything
+
+The streaming route's start frame parsed into a struct whose only field had a default, and
+unknown fields are ignored, so `{"type":"nonsense"}` was a valid start: the server answered
+`ready` and waited for audio from a client that was speaking a different protocol. The bug
+surfaced only because a downstream contract test asserted an error and got `ready`.
+
+Read the type of a protocol message, and refuse a value that names a message this server does
+not implement. Keep unknown *fields* ignored, so a newer client's extra field still works; the
+two rules look alike and are not.
+
 ## A throughput number measured through a rate limiter measures the limiter
 
 The published figure was 3,500 requests a second on `/healthz`. The load script counted
