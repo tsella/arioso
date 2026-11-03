@@ -152,8 +152,8 @@ impl PiperVoice {
         // unused. Intra-op threads are bounded because this runs inside a server: one
         // synthesis per voice, and a thread count equal to every core leaves nothing for
         // the requests arriving behind it.
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |count| (count.get() / 2).clamp(1, 4));
+        let threads =
+            std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).clamp(1, 4));
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
