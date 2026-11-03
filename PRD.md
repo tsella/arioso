@@ -468,6 +468,14 @@ problem without a code, because one route that used it gave a client `"code": nu
 four cases it most wanted to switch on: empty text, text over the limit, a speed out of
 range, and a voice that is not installed.
 
+**No speech is a result, not an error.** `POST /v1/stt` answers `200` with `"text": ""` and
+the duration when the audio holds no words: a silent file, a muted microphone, a room with
+nobody in it. It answered `503 engine_unavailable` before, because the recognizer returns no
+result for silence and the wrapper read that as a failure, which sends an operator to inspect
+a model that is working. `422 bad_audio` stays for a body that is empty or cannot be decoded,
+which is a different thing: nothing was sent, or what was sent was not audio. The streaming
+route makes the same distinction, and never sends a `final` with empty text.
+
 Audio contract, stated once and enforced everywhere:
 
 | Field | Value |

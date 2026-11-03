@@ -1013,6 +1013,10 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
             "{}",
             serde_json::json!({ "text": text, "seconds": (seconds * 100.0).round() / 100.0 })
         );
+    } else if text.trim().is_empty() {
+        // No speech is a result, not a failure, but a blank line reads as one. The note goes
+        // to stderr so a script reading stdout still gets the empty transcript it asked for.
+        eprintln!("no speech found in {}", file.display());
     } else {
         println!("{text}");
     }

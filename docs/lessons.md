@@ -145,6 +145,21 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## No speech is not a failure
+
+`POST /v1/stt` answered `503 engine_unavailable` for a silent recording. The recognizer returns
+no result when it hears no words, and the wrapper mapped "no result" to an engine error, so the
+one outcome that is completely normal in a recorder read as a broken server.
+
+The engine's silence is a result: return an empty transcript and let the caller decide. Keep the
+error for audio that is empty or cannot be decoded, which is a different fact. On the streaming
+path, an utterance with no words produces no frame at all, because a `final` with empty text
+puts a blank line in the transcript.
+
+The tell was a user saying "no speech is not an error". Ask what the failure means to the caller
+before choosing a status code: a 5xx says the server is broken, and silence is the server
+working.
+
 ## A frame where every field has a default accepts anything
 
 The streaming route's start frame parsed into a struct whose only field had a default, and

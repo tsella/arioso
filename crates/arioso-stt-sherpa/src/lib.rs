@@ -42,9 +42,6 @@ pub enum SttError {
     /// There was no audio to transcribe.
     #[error("the audio is empty")]
     EmptyAudio,
-    /// The recognizer returned nothing.
-    #[error("the recognizer returned no result")]
-    NoResult,
 }
 
 /// One transcript.
@@ -255,8 +252,8 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns [`SttError::EmptyAudio`] for no samples, and [`SttError::NoResult`] when
-    /// the engine returns nothing.
+    /// Returns [`SttError::EmptyAudio`] when there are no samples at all. Audio that holds
+    /// no speech is **not** an error: it returns a transcript with empty text.
     pub fn transcribe(&self, samples: &[f32], rate: u32) -> Result<Transcript, SttError> {
         if samples.is_empty() {
             return Err(SttError::EmptyAudio);
@@ -293,9 +290,10 @@ impl Engine {
             }
             text.push_str(piece);
         }
-        if text.is_empty() {
-            return Err(SttError::NoResult);
-        }
+        // No speech is a result, not a failure. A file of silence, a muted microphone and a
+        // room with nobody in it all produce no words, and the caller asked what was said.
+        // Reporting an error made the batch route answer 503 engine_unavailable for silence,
+        // which reads as a broken server and sends an operator to look at the model.
         Ok(Transcript { text })
     }
 }
@@ -463,6 +461,51 @@ mod tests {
         assert_eq!(pieces[0].len() + pieces[1].len(), samples.len());
         let cut_s = pieces[0].len() as f64 / 48_000.0;
         assert!((27.0..28.0).contains(&cut_s), "cut at {cut_s} s");
+    }
+
+    /// Silence is a transcript with no words, not a failure.
+    ///
+    /// Ignored because CI has no model, and a test that returns early when the model is
+    /// missing passes whether or not the bug is fixed. Run it deliberately:
+    ///
+    /// ```text
+    /// ARIOSO_MODELS_DIR=... cargo test -p arioso-stt-sherpa -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a real model in ARIOSO_MODELS_DIR"]
+    fn silence_is_an_empty_transcript_not_an_error() {
+        let dir = std::env::var("ARIOSO_MODELS_DIR")
+            .expect("set ARIOSO_MODELS_DIR to a directory holding a speech model");
+        // Scan the directory rather than reading the manifest: this crate does not depend on
+        // arioso-models, and the roles are decided by file name. The directory must hold one
+        // model; two sets of files are refused by design.
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("a readable ARIOSO_MODELS_DIR")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("onnx" | "txt")
+                )
+            })
+            .collect();
+        let engine = Engine::from_manifest_files(
+            std::path::Path::new(&dir),
+            &files,
+            Some("nemo_transducer"),
+            None,
+            4,
+        )
+        .expect("one model in ARIOSO_MODELS_DIR");
+        let silence = vec![0.0f32; 16_000 * 3];
+        let transcript = engine
+            .transcribe(&silence, 16_000)
+            .expect("three seconds of silence must not be an error");
+        assert!(
+            transcript.text.is_empty(),
+            "silence produced {:?}",
+            transcript.text
+        );
     }
 
     #[test]

@@ -155,6 +155,12 @@ async fn send_utterance(
         tokio::task::spawn_blocking(move || worker.transcribe_samples(&samples, STREAM_RATE)).await;
     match result {
         Ok(Ok(text)) => {
+            // An utterance the engine heard no words in is not a line. The segmenter already
+            // gates on speech frames, but a cough or a door can clear the energy threshold and
+            // produce nothing, and a final with empty text would put a blank line in the file.
+            if text.trim().is_empty() {
+                return true;
+            }
             send(
                 out,
                 json!({
