@@ -35,7 +35,7 @@
   "stt": {
     "enabled": true,
     "engine": "sherpa",
-    "batch_model": "sherpa-whisper-base-en",
+    "batch_model": "sherpa-parakeet-tdt-0.6b-v2-en",
     "stream_model": "sherpa-zipformer-en",
     "language": "auto",
     "partials": true,

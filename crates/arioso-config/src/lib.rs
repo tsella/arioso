@@ -278,7 +278,10 @@ impl Default for Stt {
             // "Tonseller built REO so" where base wrote "Tom Sella built a Rio so",
             // and the phonetic correction then swallowed the word "built". The extra
             // 57 MiB buys a transcript that is actually right.
-            batch_model: "sherpa-whisper-base-en".into(),
+            // Parakeet measured better than every Whisper tier on both corpora and runs at
+            // whisper-base speed, so it is the default. Whisper base stays in the catalog
+            // as the small download. See docs/models.md.
+            batch_model: "sherpa-parakeet-tdt-0.6b-v2-en".into(),
             stream_model: "sherpa-zipformer-en".into(),
             language: "auto".into(),
             partials: true,
