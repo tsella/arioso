@@ -826,8 +826,14 @@ pub struct ModelView {
     pub license: String,
     /// Whether every file is present at the right size.
     pub installed: bool,
+    /// `installed`, `downloading`, or `not_installed`.
+    pub state: String,
+    /// Bytes fetched so far, while a download is running.
+    pub downloaded: Option<u64>,
     /// Total size in bytes.
     pub bytes: u64,
+    /// Whether the model's license allows commercial use.
+    pub commercial_use: bool,
 }
 
 /// Read a certificate and key, ready to serve TLS.
@@ -1185,16 +1191,22 @@ pub struct DictionaryView {
 /// Response body for `GET /readyz`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ReadyView {
-    /// `ready` when the configured voice is installed.
+    /// `ready` when every enabled engine can serve, otherwise what is missing.
     pub status: String,
     /// The user dictionary.
     pub dictionary: DictionaryView,
-    /// Voice the server will load.
+    /// Voice the server will load, when text to speech is enabled.
     pub voice: Option<String>,
     /// Whether that voice is on disk.
     pub voice_installed: bool,
     /// Whether it is loaded right now.
     pub voice_loaded: bool,
+    /// Speech model the server will load, when speech to text is enabled.
+    pub stt: Option<String>,
+    /// Whether that model is on disk.
+    pub stt_installed: bool,
+    /// Whether it is loaded right now.
+    pub stt_loaded: bool,
     /// How many catalog models are installed.
     pub models_installed: usize,
 }
@@ -1284,46 +1296,86 @@ pub struct ModelListView {
     path = "/readyz",
     tag = "system",
     summary = "Readiness",
-    description = "Ready means the configured voice is installed, not that some model is.",
-    responses((status = 200, body = ReadyView))
+    description = "Ready means every enabled engine has its model installed, not that some model is. A missing model is 503.",
+    responses(
+        (status = 200, body = ReadyView),
+        (status = 503, description = "An enabled engine's model is not installed", body = ReadyView)
+    )
 )]
-async fn readyz(State(state): State<Arc<AppState>>) -> Json<ReadyView> {
+async fn readyz(State(state): State<Arc<AppState>>) -> Response {
+    let config = state.config();
     let installed = state
         .manifest
         .models
         .iter()
         .filter(|model| state.is_installed(model))
         .count();
-    // Readiness is about the voice this server will actually load, not about
-    // any model being present.
-    let voice = state.voice_spec().ok().map(|spec| spec.id.clone());
-    let voice_installed = state
-        .voice_spec()
-        .is_ok_and(|spec| state.is_installed(spec));
+    // Readiness is about the models this server will actually load, and only about the
+    // engines that are on. A server with speech to text off is not unready because no
+    // speech model is installed.
+    let voice = config
+        .tts
+        .enabled
+        .then(|| state.voice_spec().ok().map(|spec| spec.id.clone()))
+        .flatten();
+    let voice_installed = !config.tts.enabled
+        || state
+            .voice_spec()
+            .is_ok_and(|spec| state.is_installed(spec));
     let voice_loaded = state
         .voice
         .lock()
         .map(|guard| guard.is_some())
         .unwrap_or(false);
+    let stt = config.stt.enabled.then(|| config.stt.batch_model.clone());
+    let stt_installed = !config.stt.enabled
+        || state
+            .manifest
+            .find(&config.stt.batch_model)
+            .is_some_and(|spec| state.is_installed(spec));
+    let stt_loaded = state
+        .stt
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false);
+
+    let status = if !voice_installed {
+        "voice_missing"
+    } else if !stt_installed {
+        "stt_missing"
+    } else {
+        "ready"
+    };
     let user = state.user_dictionary();
     let dictionary = DictionaryView {
         entries: user.dictionary.len(),
         error: user.error.clone(),
     };
     drop(user);
-    Json(ReadyView {
-        status: if voice_installed {
-            "ready"
-        } else {
-            "voice_missing"
-        }
-        .to_string(),
-        dictionary,
-        voice,
-        voice_installed,
-        voice_loaded,
-        models_installed: installed,
-    })
+
+    // The status code is the part an orchestrator reads. Answering 200 with
+    // `"status": "voice_missing"` tells a health check the process is fine when it cannot
+    // serve a single request.
+    let code = if status == "ready" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadyView {
+            status: status.to_owned(),
+            dictionary,
+            voice,
+            voice_installed,
+            voice_loaded,
+            stt,
+            stt_installed,
+            stt_loaded,
+            models_installed: installed,
+        }),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -2117,13 +2169,27 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelListView> 
         .manifest
         .models
         .iter()
-        .map(|m| ModelView {
-            id: m.id.clone(),
-            kind: format!("{:?}", m.kind).to_lowercase(),
-            engine: m.engine.clone(),
-            license: m.license.clone(),
-            installed: state.is_installed(m),
-            bytes: m.total_size(),
+        .map(|m| {
+            let installed = state.is_installed(m);
+            // A caller that started a download polls this route. Reporting only `installed`
+            // made it re-POST to find out whether anything was happening.
+            let progress = state.download_progress(&m.id);
+            let label = match (installed, progress) {
+                (true, _) => "installed",
+                (false, Some(_)) => "downloading",
+                (false, None) => "not_installed",
+            };
+            ModelView {
+                id: m.id.clone(),
+                kind: format!("{:?}", m.kind).to_lowercase(),
+                engine: m.engine.clone(),
+                license: m.license.clone(),
+                installed,
+                state: label.to_owned(),
+                downloaded: progress.map(|(downloaded, _)| downloaded),
+                bytes: m.total_size(),
+                commercial_use: m.commercial_use,
+            }
         })
         .collect();
     Json(ModelListView { models })
@@ -2800,11 +2866,94 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        // An orchestrator reads the status code, not the body. 200 with `voice_missing`
+        // told a health check the process was fine when it could not serve one request.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "voice_missing");
         assert_eq!(json["voice"], "piper-en_US-lessac-medium");
         assert_eq!(json["voice_installed"], false);
+    }
+
+    #[tokio::test]
+    async fn the_catalog_reports_a_download_in_flight() {
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        state.note_download(&id, 40, 100);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entry = json["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("the model is listed");
+        assert_eq!(entry["state"], "downloading");
+        assert_eq!(entry["downloaded"], 40);
+        assert_eq!(entry["commercial_use"], false, "lessac is not commercial");
+    }
+
+    #[tokio::test]
+    async fn readiness_names_the_speech_model_when_that_is_what_is_missing() {
+        let (state, dir) = state_of_empty_files();
+        // The voice is installed, so readiness moves on to the speech model.
+        let voice = state.voice_spec().unwrap().clone();
+        for file in &voice.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "stt_missing");
+        assert_eq!(json["stt_installed"], false);
+        assert_eq!(json["voice_installed"], true);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_engine_does_not_make_the_server_unready() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        for spec in &mut manifest.models {
+            for file in &mut spec.files {
+                file.size = 0;
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.stt.enabled = false;
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let voice = state.voice_spec().unwrap().clone();
+        for file in &voice.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert!(json["stt"].is_null(), "a disabled engine is not reported");
     }
 
     /// Write a dictionary and move its modification time forward, so a second
@@ -2828,7 +2977,9 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        // The voice is not installed in this state, so readiness is 503 and the dictionary
+        // is still reported: a health check that fails must still say what it found.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // No file of the user's own, so the shipped dictionary is what applies.
         assert_eq!(json["dictionary"]["entries"], 3);
