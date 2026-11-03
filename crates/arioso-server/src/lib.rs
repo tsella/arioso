@@ -1924,8 +1924,11 @@ async fn warm_model(
             )
             .into_response();
         }
-        return match state.warm_voice() {
-            Ok(()) => {
+        let worker = Arc::clone(&state);
+        // Loading a voice reads tens of megabytes from disk and builds an ONNX session.
+        // On the request thread that stalls every other connection the runtime is serving.
+        return match tokio::task::spawn_blocking(move || worker.warm_voice()).await {
+            Ok(Ok(())) => {
                 tracing::info!(model = %id, "model warmed");
                 (
                     StatusCode::OK,
@@ -1933,8 +1936,17 @@ async fn warm_model(
                 )
                     .into_response()
             }
-            Err(detail) => {
+            Ok(Err(detail)) => {
                 tracing::error!(model = %id, %detail, "could not warm the voice");
+                ApiError::coded(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "load_failed",
+                    "the voice could not be loaded; the server log has the detail",
+                )
+                .into_response()
+            }
+            Err(join) => {
+                tracing::error!(model = %id, %join, "the warm task failed");
                 ApiError::coded(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "load_failed",
@@ -1945,9 +1957,19 @@ async fn warm_model(
         };
     }
 
-    // Speech to text loads one model, on first use, in the same slot the routes use.
-    match state.warm_stt() {
-        Ok(()) => {
+    // Speech to text holds one model, in the slot the routes read. Warming an id that is
+    // not that model would load something else and report success for the wrong name.
+    if state.config().stt.batch_model != spec.id {
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "not_active_model",
+            "only the configured batch model can be warmed; there is one speech slot",
+        )
+        .into_response();
+    }
+    let worker = Arc::clone(&state);
+    match tokio::task::spawn_blocking(move || worker.warm_stt()).await {
+        Ok(Ok(())) => {
             tracing::info!(model = %id, "model warmed");
             (
                 StatusCode::OK,
@@ -1955,8 +1977,17 @@ async fn warm_model(
             )
                 .into_response()
         }
-        Err(detail) => {
+        Ok(Err(detail)) => {
             tracing::error!(model = %id, %detail, "could not warm the speech engine");
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "load_failed",
+                "the engine could not be loaded; the server log has the detail",
+            )
+            .into_response()
+        }
+        Err(join) => {
+            tracing::error!(model = %id, %join, "the warm task failed");
             ApiError::coded(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "load_failed",
@@ -3136,6 +3167,49 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "model_not_installed");
+    }
+
+    #[tokio::test]
+    async fn warming_a_speech_model_that_is_not_the_configured_one_is_refused() {
+        // The speech slot holds `stt.batch_model` and nothing else. Warming another id used
+        // to load that one anyway, or fail for a model the caller never asked for, and
+        // answer for the id in the path.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        // Every size is zero in this copy of the catalog, so an empty file counts as
+        // installed and the test does not write a few hundred megabytes to prove a refusal.
+        let mut manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        for spec in &mut manifest.models {
+            for file in &mut spec.files {
+                file.size = 0;
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let configured = state.config().stt.batch_model.clone();
+        let other = state
+            .manifest
+            .models
+            .iter()
+            .find(|spec| spec.kind == Kind::Stt && spec.id != configured)
+            .expect("the catalog holds more than one speech model")
+            .clone();
+        for file in &other.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/models/{}/warm", other.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "not_active_model");
     }
 
     #[tokio::test]
