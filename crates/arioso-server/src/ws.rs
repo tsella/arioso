@@ -54,6 +54,19 @@ fn prepare(
     Ok((text.to_owned(), speed))
 }
 
+/// Whether a control frame asks to stop the stream.
+///
+/// The whole document is a control message, so anything that is not JSON, or is JSON
+/// without `type: cancel`, is not one.
+fn is_cancel(text: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Control {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    serde_json::from_str::<Control>(text).is_ok_and(|control| control.kind == "cancel")
+}
+
 /// The first message, or `None` when the client sends nothing in time or the
 /// connection ends first.
 async fn first_message(socket: &mut WebSocket, limit: std::time::Duration) -> Option<Message> {
@@ -122,7 +135,28 @@ async fn run(
 
     let mut chunks = 0usize;
     let mut total_samples = 0usize;
-    while let Some((samples, rate)) = receiver.recv().await {
+    let mut cancelled = false;
+    loop {
+        let chunk = tokio::select! {
+            chunk = receiver.recv() => chunk,
+            // The socket is read for the whole stream, not only before it starts. A client
+            // that cancels halfway through must be heard at the next chunk boundary.
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) if is_cancel(text.as_str()) => {
+                        cancelled = true;
+                        break;
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    // Audio and unknown frames from the client are ignored; the protocol
+                    // sends control as JSON text.
+                    Some(Ok(_)) => continue,
+                }
+            }
+        };
+        let Some((samples, rate)) = chunk else {
+            break;
+        };
         if chunks == 0 {
             let start = json!({"type": "start", "sample_rate": rate, "format": "pcm_s16le"});
             if socket
@@ -142,6 +176,20 @@ async fn run(
         {
             break;
         }
+    }
+
+    if cancelled {
+        // Dropping the receiver is what stops the synthesis: the render task's next
+        // `blocking_send` fails, it returns, and the voice lock is released.
+        drop(receiver);
+        let _ = joining.await;
+        let frame = json!({
+            "type": "cancelled",
+            "chunks": chunks,
+            "samples": total_samples,
+        });
+        let _ = socket.send(Message::Text(frame.to_string().into())).await;
+        return;
     }
 
     let detail = match joining.await {
@@ -167,6 +215,15 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_frame_is_recognised_and_nothing_else_is() {
+        assert!(is_cancel("{\"type\":\"cancel\"}"));
+        assert!(is_cancel(" { \"type\" : \"cancel\" } "));
+        assert!(!is_cancel("{\"type\":\"stop\"}"));
+        assert!(!is_cancel("not json"));
+        assert!(!is_cancel("{\"text\":\"hello\"}"));
+    }
 
     fn request(text: &str, speed: Option<f32>) -> StreamRequest {
         StreamRequest {
