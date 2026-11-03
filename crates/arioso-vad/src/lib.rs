@@ -115,12 +115,39 @@ impl Segmenter {
     }
 
     /// Add audio and collect whatever it completes.
+    ///
+    /// Whole frames are read straight out of `samples`, so a chunk of audio costs one pass
+    /// and no allocations. Copying each frame out of a growing buffer and shifting the tail
+    /// down moved the same bytes once per frame: a one second chunk moved half a megabyte
+    /// to deliver fifty frames of twenty milliseconds.
     pub fn push(&mut self, samples: &[f32]) -> Vec<Event> {
-        self.pending.extend_from_slice(samples);
         let mut events = Vec::new();
-        while self.pending.len() >= self.frame_len {
-            let frame: Vec<f32> = self.pending.drain(..self.frame_len).collect();
+        let mut rest = samples;
+
+        // Finish the frame left over from the last call, if there is one. Only this path
+        // copies, and only up to one frame.
+        if !self.pending.is_empty() {
+            let needed = self.frame_len - self.pending.len();
+            let take = needed.min(rest.len());
+            self.pending.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            if self.pending.len() < self.frame_len {
+                return events;
+            }
+            let mut frame = std::mem::take(&mut self.pending);
             self.frame(&frame, &mut events);
+            // Keep the allocation: the next push that splits a frame reuses it.
+            frame.clear();
+            self.pending = frame;
+        }
+
+        let mut chunks = rest.chunks_exact(self.frame_len);
+        for chunk in &mut chunks {
+            self.frame(chunk, &mut events);
+        }
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            self.pending.extend_from_slice(remainder);
         }
         events
     }
@@ -221,8 +248,13 @@ impl Segmenter {
         if keep == 0 {
             self.preroll.clear();
         } else if self.preroll.len() > keep {
+            // One move instead of a drain per frame. The window is bounded by
+            // `preroll_ms`, so this is a copy of at most that much audio, and it only runs
+            // while the buffer is over its size: a ring buffer would save the copy and
+            // cost the wholesale handover to `speech` that starts an utterance.
             let excess = self.preroll.len() - keep;
-            self.preroll.drain(..excess);
+            self.preroll.copy_within(excess.., 0);
+            self.preroll.truncate(keep);
         }
     }
 }
@@ -251,6 +283,41 @@ mod tests {
 
     fn silence(ms: u32) -> Vec<f32> {
         vec![0.0; (RATE * ms / 1000) as usize]
+    }
+
+    #[test]
+    fn frames_split_across_pushes_are_the_same_as_one_push() {
+        // The framing changed from copying frames out of a buffer to reading them from the
+        // caller's slice, so a frame that straddles two pushes is the case to pin.
+        let rate = 16_000u32;
+        let config = Config::default();
+        let mut audio = vec![0.0f32; rate as usize * 3];
+        for sample in &mut audio[rate as usize / 2..rate as usize] {
+            *sample = 0.5;
+        }
+        for sample in &mut audio[rate as usize * 2..rate as usize * 5 / 2] {
+            *sample = 0.5;
+        }
+
+        let shape = |events: Vec<Event>| -> Vec<(u8, usize)> {
+            events
+                .into_iter()
+                .map(|event| match event {
+                    Event::SpeechStart { .. } => (0, 0),
+                    Event::Utterance { samples, .. } => (1, samples.len()),
+                })
+                .collect()
+        };
+
+        let mut whole = Segmenter::new(rate, config);
+        let one = shape(whole.push(&audio));
+        let mut split = Segmenter::new(rate, config);
+        let mut many = Vec::new();
+        for chunk in audio.chunks(123) {
+            many.extend(split.push(chunk));
+        }
+        assert_eq!(shape(many), one);
+        assert!(!one.is_empty(), "the fixture has to produce speech");
     }
 
     #[test]
