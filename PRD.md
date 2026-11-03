@@ -673,7 +673,9 @@ Order of operations, both directions:
 - F14.1 Normalization covers cardinals, currency, ordinals, times, dates, years,
   percentages, units, and a short list of abbreviations. `$3.99` becomes
   `three dollars ninety nine cents`; `2026` becomes `twenty twenty six`; `3rd`
-  becomes `third`.
+  becomes `third`. A comma groups thousands only when three digits follow it and the
+  group before it is one to three digits: `1,234,567` is a number, `2026,100` is a year
+  followed by a clause, and `1.5,000` is a decimal followed by one.
 - F14.1a A unit written after a number is spoken: `5kg` is `five kilograms`, `190cm` is
   `one hundred ninety centimeters`, `1.5kg` is `one point five kilograms`, `20°C` is
   `twenty degrees Celsius`, `60mph` is `sixty miles per hour`. The unit is plural unless

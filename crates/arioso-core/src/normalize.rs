@@ -606,6 +606,10 @@ fn scan_number(chars: &[char], start: usize) -> Option<Scanned> {
     let mut whole = 0u64;
     let mut digits = 0;
     let mut separated = false;
+    // Digits since the last separator, or since the start. A comma is a thousands
+    // separator only when it groups three digits, and only when the group before it is a
+    // plausible head: `2026,100` is a year and a new clause, not two million.
+    let mut group = 0usize;
 
     while let Some(&ch) = chars.get(index) {
         if ch.is_ascii_digit() {
@@ -613,9 +617,16 @@ fn scan_number(chars: &[char], start: usize) -> Option<Scanned> {
                 .checked_mul(10)?
                 .checked_add(u64::from(ch as u8 - b'0'))?;
             digits += 1;
+            group += 1;
             index += 1;
-        } else if ch == ',' && digits > 0 && is_thousands_separator(chars, index) {
+        } else if ch == ','
+            && digits > 0
+            && is_thousands_separator(chars, index)
+            && (1..=3).contains(&group)
+            && (!separated || group == 3)
+        {
             separated = true;
+            group = 0;
             index += 1;
         } else {
             break;
@@ -924,6 +935,21 @@ fn scan_marker(chars: &[char], start: usize) -> Option<(bool, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thousands_separator_needs_the_right_digit_count_before_it() {
+        // `2026,100` was read as 2,026,100: a four-digit year followed by a comma is a
+        // year and a new clause, not a group of three.
+        assert_eq!(normalize("2026,100"), "twenty twenty six,one hundred");
+        // A comma inside the fractional part is punctuation too.
+        assert_eq!(normalize("1.5,000"), "one point five,zero");
+        // The shape that is a separator still is one.
+        assert_eq!(normalize("1,000"), "one thousand");
+        assert_eq!(
+            normalize("12,345,678"),
+            "twelve million three hundred forty five thousand six hundred seventy eight"
+        );
+    }
 
     #[test]
     fn a_comma_after_a_year_is_not_a_thousands_separator() {
