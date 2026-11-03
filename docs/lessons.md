@@ -17,6 +17,14 @@ Writing it to a temp directory turned a 0.06 s suite into a minute and proved no
 empty file at a declared size of zero does not. Zero the sizes in the test's own copy of the
 manifest, write empty files, and keep one helper for every install-state test.
 
+**A test that passes with the fix removed proves nothing.** The delete reservation test
+asserts that a failed delete releases the model id. It passed before the reservation
+existed, because with no reservation there is nothing to leak. The test pins the release,
+not the fix, and saying so in the commit is the honest version: the atomicity is one lock
+acquisition and the observable end is the only part a test can reach. Before claiming a test
+covers a change, remove the change and watch it fail; when that is impossible, write down
+what the test does pin.
+
 **A test that has never run is not a test.** The `arioso-tts-piper` tests used
 `tempfile` without the dev-dependency. Only `cargo build` had been run on that
 crate, so the workspace suite broke two commits later. Rule: run `cargo test -p
@@ -120,6 +128,15 @@ unformatted and the failure surfaced later, in a background job whose output
 arrived out of order. Rule: `cargo fmt --all && cargo clippy --all-targets -- -D
 warnings && cargo test` before `git commit`, in that order.
 
+## A probe that sets a clock sets it last
+
+To prove the log rotates, a file was written and its modification time moved back two days
+with `touch -d '2 days ago'`. The write came first in one attempt and last in another, and
+the version with the write last reset the timestamp the probe had just set: the rotation did
+not happen and the feature looked broken. When a probe manipulates a timestamp, the
+timestamp is the last thing it touches, and the probe reads it back before starting the
+program under test.
+
 ## Structure
 
 **Two copies of a pipeline drift.** The CLI and the server each had their own
@@ -152,6 +169,19 @@ config's bare `en_US-lessac-medium` to a catalog id `piper-en_US-lessac-medium`,
 marked nothing and every voice looked inactive. The fixture agreed with the bug because it
 asserted against the same bare name. Assert against what the code resolves to, not against
 the input it was given.
+
+**A check at one entrance is not a check.** `tts.format` was refused when the config was
+patched and accepted when the config was loaded, so a `config.json` naming `mp3` started
+cleanly and answered WAV under the label the caller asked for. The route had been fixed and
+the file had not. Every setting that is validated at runtime has a second entrance — the
+file, the environment, the CLI — and the refusal has to live where all of them pass: one
+constant, one `validate()`.
+
+**A guard on the path that works is half a guard.** The `stop` branch discarded the final
+flush's failure and answered `done`, while the binary path sent a coded error; the delete
+released its reservation only on success, so a failed unlink would have wedged the id until
+restart. A guard belongs on every exit of the operation, not on the one that was being
+tested.
 
 **A document generated from handlers describes routes the server may not register.** With
 `stt.enabled: false` the route is absent and the document still promised `/v1/stt`, which
