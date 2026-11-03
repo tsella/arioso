@@ -76,6 +76,7 @@
     "level": "error",
     "format": "pretty",
     "file": null,
+    "retention_days": 7,
     "log_text": false
   }
 }

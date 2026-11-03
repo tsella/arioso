@@ -1017,6 +1017,225 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
     Ok(())
 }
 
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// A log file that rolls over at midnight UTC and keeps a fixed number of older files.
+///
+/// The active file is exactly the path the config names, so an operator who tails
+/// `log.file` keeps tailing it across a rollover. Yesterday's records move to a sibling
+/// named `<file>.<YYYY-MM-DD>`, which is what `log.retention_days` prunes.
+struct RotatingLog {
+    state: std::sync::Mutex<OpenLog>,
+}
+
+struct OpenLog {
+    path: PathBuf,
+    day: u64,
+    retention_days: u32,
+    file: std::fs::File,
+}
+
+impl RotatingLog {
+    /// Open the file, or report why it could not be opened.
+    fn open(path: PathBuf, retention_days: u32) -> std::io::Result<Self> {
+        // A file left by an earlier run rolls on the first write of today, so the date in
+        // its name is the day its records were written, not the day it was reopened.
+        let day = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(today, |since| since.as_secs() / SECONDS_PER_DAY);
+        Self::with_day(path, retention_days, day)
+    }
+
+    fn with_day(path: PathBuf, retention_days: u32, day: u64) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            state: std::sync::Mutex::new(OpenLog {
+                path,
+                day,
+                retention_days,
+                file,
+            }),
+        })
+    }
+
+    /// Write one record, rolling first when the day changed.
+    fn write_at(&self, buf: &[u8], today: u64) -> std::io::Result<usize> {
+        let mut open = match self.state.lock() {
+            Ok(guard) => guard,
+            // A panic elsewhere must not cost the log: the records are still wanted.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        open.roll(today);
+        open.file.write(buf)
+    }
+}
+
+impl std::io::Write for &RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write_at(buf, today())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.state.lock() {
+            Ok(mut open) => open.file.flush(),
+            Err(poisoned) => poisoned.into_inner().file.flush(),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RotatingLog {
+    type Writer = &'a RotatingLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self
+    }
+}
+
+impl OpenLog {
+    fn roll(&mut self, today: u64) {
+        if today == self.day {
+            return;
+        }
+        let _ = self.file.flush();
+        let rotated = self.rotated_path();
+        if let Err(error) = std::fs::rename(&self.path, &rotated) {
+            // Keep writing to the handle already open. A log that stops because a rename
+            // failed is worse than one that is a day late in rotating, but it must say so.
+            eprintln!(
+                "log rotation to {} failed ({error}); still writing to {}",
+                rotated.display(),
+                self.path.display()
+            );
+            self.day = today;
+            return;
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            Ok(file) => self.file = file,
+            Err(error) => eprintln!(
+                "log file {} could not be reopened after rotation ({error})",
+                self.path.display()
+            ),
+        }
+        self.day = today;
+        prune_old_logs(&self.path, today, self.retention_days);
+    }
+
+    /// Where this day's records go when the file rolls.
+    fn rotated_path(&self) -> PathBuf {
+        let base = format!("{}.{}", self.path.to_string_lossy(), date_of(self.day));
+        if !Path::new(&base).exists() {
+            return PathBuf::from(base);
+        }
+        // Never overwrite: a second process on one path, or a clock that went backwards,
+        // must not cost a file that is already there.
+        for n in 1..1000 {
+            let candidate = format!("{base}-{n}");
+            if !Path::new(&candidate).exists() {
+                return PathBuf::from(candidate);
+            }
+        }
+        PathBuf::from(format!("{base}-overflow"))
+    }
+}
+
+/// Remove rotated logs older than the window.
+///
+/// A file counts as rotated only when it is `<file>.YYYY-MM-DD` or
+/// `<file>.YYYY-MM-DD-<n>`. The suffix is parsed rather than globbed, because a loose
+/// prefix also matches `arioso.log.json` and a neighbour that is not a log.
+fn prune_old_logs(path: &Path, today: u64, retention_days: u32) {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = file_name
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('.'))
+        else {
+            continue;
+        };
+        let Some(date) = suffix.get(..10) else {
+            continue;
+        };
+        if suffix.len() > 10 && !suffix[10..].starts_with('-') {
+            continue;
+        }
+        let Some(day) = day_from_date(date) else {
+            continue;
+        };
+        if today.saturating_sub(day) > u64::from(retention_days) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn today() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() / SECONDS_PER_DAY)
+}
+
+/// `YYYY-MM-DD` for a day counted from 1970-01-01, in UTC.
+fn date_of(day: u64) -> String {
+    let (year, month, day_of_month) = civil_from_days(day);
+    format!("{year:04}-{month:02}-{day_of_month:02}")
+}
+
+/// The day number of a `YYYY-MM-DD` date, when it is one.
+fn day_from_date(text: &str) -> Option<u64> {
+    let mut parts = text.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    u64::try_from(days_from_civil(year, month, day)).ok()
+}
+
+/// The calendar date of a day number. Howard Hinnant's civil algorithm: exact integer
+/// arithmetic, no dependency, valid for every day this program will ever see.
+fn civil_from_days(days: u64) -> (i64, u32, u32) {
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// The day number of a civil date, the inverse of [`civil_from_days`].
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = (year - era * 400) as u64;
+    let mp = if month > 2 { month - 3 } else { month + 9 } as u64;
+    let doy = (153 * mp + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
 fn init_tracing(config: &Config) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()));
@@ -1024,13 +1243,8 @@ fn init_tracing(config: &Config) {
     // it carries the port line and nothing else, and a log line on that pipe would be read
     // as the port.
     match &config.log.file {
-        Some(path) => match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            Ok(file) => {
-                let writer = std::sync::Mutex::new(file);
+        Some(path) => match RotatingLog::open(path.clone(), config.log.retention_days) {
+            Ok(writer) => {
                 if config.log.format == "json" {
                     tracing_subscriber::fmt()
                         .with_env_filter(filter)
@@ -1122,6 +1336,63 @@ mod tests {
         let named = dir.path().join("en_US-lessac-medium.onnx.json");
         std::fs::write(&named, "{}").unwrap();
         assert_eq!(voice_config_path(&config, dir.path()), Some(named));
+    }
+
+    #[test]
+    fn a_log_rolls_over_at_midnight_and_keeps_the_active_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("arioso.log");
+        let log = RotatingLog::with_day(path.clone(), 7, 20_000).unwrap();
+        log.write_at(b"day one\n", 20_000).unwrap();
+        log.write_at(b"day two\n", 20_001).unwrap();
+
+        // The configured path holds today, and yesterday is a sibling named by its date.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "day two\n");
+        let rotated = dir.path().join(format!("arioso.log.{}", date_of(20_000)));
+        assert_eq!(std::fs::read_to_string(rotated).unwrap(), "day one\n");
+    }
+
+    #[test]
+    fn a_rollover_prunes_past_the_window_and_leaves_neighbours_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("arioso.log");
+        let start = 20_000u64;
+        let log = RotatingLog::with_day(path.clone(), 7, start).unwrap();
+        // A file for each of eleven days, so the window has to be enforced.
+        for offset in 0..=10 {
+            log.write_at(b"x\n", start + offset).unwrap();
+        }
+        // Files that are not this log's rotations, one of which shares its prefix.
+        for name in ["unrelated.log", "arioso.log.bak", "arioso.log.json"] {
+            std::fs::write(dir.path().join(name), "keep\n").unwrap();
+        }
+        log.write_at(b"x\n", start + 11).unwrap();
+
+        let kept: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let today = start + 11;
+        // Seven days back is inside the window; eight is not.
+        assert!(kept.contains(&format!("arioso.log.{}", date_of(today - 7))));
+        assert!(!kept.contains(&format!("arioso.log.{}", date_of(today - 8))));
+        assert!(kept.contains(&"arioso.log".to_owned()));
+        for name in ["unrelated.log", "arioso.log.bak", "arioso.log.json"] {
+            assert!(kept.contains(&name.to_owned()), "{name} was removed");
+        }
+    }
+
+    #[test]
+    fn a_day_number_and_its_date_are_inverses() {
+        // A wrong date in a filename is a log nobody can find again.
+        for day in [0u64, 1, 20_000, 20_739, 29_000] {
+            assert_eq!(day_from_date(&date_of(day)), Some(day), "{day}");
+        }
+        assert_eq!(date_of(19_723), "2024-01-01");
+        assert_eq!(date_of(20_000), "2024-10-04");
+        assert_eq!(day_from_date("not-a-date"), None);
+        assert_eq!(day_from_date("2024-10"), None);
     }
 
     #[test]

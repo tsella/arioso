@@ -530,7 +530,13 @@ JSON, at roughly 33 percent size cost.
   `tts.synthesize`, `stt.transcribe`, `model.download`) and fields for engine,
   model, voice, duration, and bytes.
 - F9.2 `RUST_LOG` and `log.level` both work. `log.format` is `pretty` or `json`.
-- F9.3 Optional file output with daily rotation.
+- F9.3 Optional file output with daily rotation. `log.file` stays the active file and
+  keeps its name, so an operator who tails it is not left watching a file that stopped
+  growing. Yesterday's records move to `<file>.<YYYY-MM-DD>`, and
+  `log.retention_days` (default 7) removes rotated files older than that window. The day
+  boundary is UTC. A rotation that cannot rename keeps writing to the open file and says
+  so on stderr: losing records because the filesystem refused a rename is worse than a
+  file that rotates a day late.
 - F9.4 `log.log_text` defaults to false. Transcripts and synthesized text are not
   logged. Turn it on deliberately when debugging.
 - F9.5 Download and load events are logged at info with byte counts, so a stuck

@@ -426,6 +426,8 @@ pub struct Log {
     pub format: String,
     /// Optional log file. Rotated daily when set.
     pub file: Option<PathBuf>,
+    /// Rotated log files to keep before the oldest are removed.
+    pub retention_days: u32,
     /// Log synthesized and transcribed text. Off by default, because it is private.
     pub log_text: bool,
 }
@@ -436,6 +438,7 @@ impl Default for Log {
             level: "error".into(),
             format: "pretty".into(),
             file: None,
+            retention_days: 7,
             log_text: false,
         }
     }
@@ -762,6 +765,12 @@ impl Config {
                 message: format!("expected 0.5 to 2.0, got {}", self.tts.speed),
             });
         }
+        if self.log.retention_days == 0 {
+            return Err(ConfigError::Invalid {
+                path: "log.retention_days".into(),
+                message: "must be at least 1".into(),
+            });
+        }
         if !AUDIO_FORMATS.contains(&self.tts.format.as_str()) {
             return Err(ConfigError::Invalid {
                 path: "tts.format".into(),
@@ -929,6 +938,16 @@ mod tests {
             err,
             ConfigError::UnsupportedVersion { found: 99, .. }
         ));
+    }
+
+    #[test]
+    fn the_log_keeps_a_week_and_refuses_none() {
+        assert_eq!(Config::default().log.retention_days, 7);
+        let err = Config::from_json(r#"{"log":{"retention_days":0}}"#, &origin()).unwrap_err();
+        assert!(err.to_string().contains("log.retention_days"), "{err}");
+        // A config written before the field existed still loads.
+        let old = Config::from_json(r#"{"log":{"level":"info"}}"#, &origin()).unwrap();
+        assert_eq!(old.log.retention_days, 7);
     }
 
     #[test]
