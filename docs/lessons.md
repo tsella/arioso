@@ -128,6 +128,15 @@ unformatted and the failure surfaced later, in a background job whose output
 arrived out of order. Rule: `cargo fmt --all && cargo clippy --all-targets -- -D
 warnings && cargo test` before `git commit`, in that order.
 
+## A performance claim needs both sides
+
+A pass that removes allocations can say what it removed, and that is a code fact: two
+buffers where one will do, a copy per frame, a lowercase per lookup. It cannot say it made
+the program faster without a number from before the change. This pass took the after
+numbers and not the before ones, so the plan records a baseline and an argument, never a
+speedup. Take the measurement before the first edit, or write down that the claim is
+structural.
+
 ## A probe that sets a clock sets it last
 
 To prove the log rotates, a file was written and its modification time moved back two days
