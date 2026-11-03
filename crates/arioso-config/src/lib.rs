@@ -320,9 +320,11 @@ impl Default for Capture {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Vad {
-    /// `silero` or `energy`.
+    /// Which detector runs. Only `energy` is built in; `silero` is refused rather than
+    /// accepted and ignored.
     pub engine: String,
-    /// Speech probability threshold, 0.0 to 1.0.
+    /// Level above which a frame counts as speech, as a root mean square of samples in the
+    /// range -1.0 to 1.0. The energy detector reads it that way, not as a probability.
     pub threshold: f32,
     /// Shortest run of speech that counts, in milliseconds.
     pub min_speech_ms: u32,
@@ -339,8 +341,10 @@ pub struct Vad {
 impl Default for Vad {
     fn default() -> Self {
         Self {
-            engine: "silero".into(),
-            threshold: 0.5,
+            engine: "energy".into(),
+            // A probability default of 0.5 on an RMS detector would need near-clipping
+            // audio before it called anything speech.
+            threshold: 0.01,
             min_speech_ms: 250,
             min_silence_ms: 700,
             padding_ms: 200,
@@ -732,6 +736,15 @@ impl Config {
                 message: format!("expected 0.5 to 2.0, got {}", self.tts.speed),
             });
         }
+        if self.vad.engine != "energy" {
+            return Err(ConfigError::Invalid {
+                path: "vad.engine".into(),
+                message: format!(
+                    "expected energy, got {:?}; no other detector is built into this binary",
+                    self.vad.engine
+                ),
+            });
+        }
         if !(0.0..=1.0).contains(&self.vad.threshold) {
             return Err(ConfigError::Invalid {
                 path: "vad.threshold".into(),
@@ -810,6 +823,25 @@ mod tests {
         let text = include_str!("../../../config.json.example");
         let parsed: Config = serde_json::from_str(text).expect("the example parses");
         assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn a_vad_engine_that_is_not_built_in_is_refused() {
+        // The config used to ship `silero`, which no backend implements. Accepting the
+        // name and running the energy detector is the defect this refusal replaces.
+        let mut config = Config::default();
+        config.vad.engine = "silero".into();
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("vad.engine"), "{error}");
+        assert!(error.to_string().contains("energy"), "{error}");
+    }
+
+    #[test]
+    fn the_default_vad_threshold_suits_an_rms_detector() {
+        // 0.5 was a probability default for a detector that reads a level; at 0.5 RMS the
+        // segmenter hears nothing short of clipping.
+        assert_eq!(Config::default().vad.engine, "energy");
+        assert!(Config::default().vad.threshold < 0.05);
     }
 
     #[test]

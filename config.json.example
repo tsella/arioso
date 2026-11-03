@@ -52,8 +52,8 @@
     }
   },
   "vad": {
-    "engine": "silero",
-    "threshold": 0.5,
+    "engine": "energy",
+    "threshold": 0.01,
     "frame_ms": 32,
     "min_speech_ms": 250,
     "min_silence_ms": 700,

@@ -46,7 +46,23 @@ fn default_rate() -> u32 {
     STREAM_RATE
 }
 
-/// Upgrade the connection and stream transcripts.
+/// The segmenter's settings, from the ones the operator configured.
+///
+/// Two names differ between the document and the crate: `padding_ms` is audio kept from
+/// before the detected start, which the segmenter calls a preroll, and `max_segment_ms` is
+/// the hard cap on one utterance. Mapping them by position would be a silent bug.
+fn vad_config(vad: &arioso_config::Vad) -> VadConfig {
+    VadConfig {
+        threshold: vad.threshold,
+        frame_ms: vad.frame_ms,
+        min_silence_ms: vad.min_silence_ms,
+        min_speech_ms: vad.min_speech_ms,
+        preroll_ms: vad.padding_ms,
+        max_utterance_ms: vad.max_segment_ms,
+    }
+}
+
+/// Upgrade the connection and transcribe.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
     let Some(permit) = state.open_session() else {
         return crate::too_many_sessions();
@@ -151,7 +167,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
     )
     .await;
 
-    let mut segmenter = Segmenter::new(STREAM_RATE, VadConfig::default());
+    let mut segmenter = Segmenter::new(STREAM_RATE, vad_config(&state.config().vad));
     let interval_ms = state.config().stt.partial_interval_ms.max(50);
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(interval_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -296,6 +312,29 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_segmenter_takes_its_settings_from_the_config() {
+        let vad = arioso_config::Vad {
+            engine: "energy".into(),
+            threshold: 0.02,
+            min_speech_ms: 111,
+            min_silence_ms: 222,
+            padding_ms: 333,
+            max_segment_ms: 444,
+            frame_ms: 20,
+        };
+        let config = vad_config(&vad);
+        assert!((config.threshold - 0.02).abs() < f32::EPSILON);
+        assert_eq!(config.min_speech_ms, 111);
+        assert_eq!(config.min_silence_ms, 222);
+        // `padding_ms` is the preroll, not a tail.
+        assert_eq!(config.preroll_ms, 333);
+        assert_eq!(config.max_utterance_ms, 444);
+        assert_eq!(config.frame_ms, 20);
+    }
+
     use super::*;
 
     #[test]

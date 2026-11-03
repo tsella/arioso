@@ -1369,6 +1369,8 @@ pub struct ConfigPatch {
     pub stt: Option<SttPatch>,
     /// Listener settings.
     pub server: Option<ServerPatch>,
+    /// Voice activity detection settings.
+    pub vad: Option<VadPatch>,
 }
 
 /// Text to speech fields a patch may change.
@@ -1401,6 +1403,28 @@ pub struct SttPatch {
     pub language: Option<String>,
     /// Whether the stream sends partial transcripts.
     pub partials: Option<bool>,
+}
+
+/// Voice activity detection fields a patch may change.
+///
+/// The segmenter is built per connection, so a patch applies to the next stream that opens.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VadPatch {
+    /// Which detector runs. Only `energy` is built in.
+    pub engine: Option<String>,
+    /// Level above which a frame counts as speech, as a root mean square.
+    pub threshold: Option<f32>,
+    /// Shortest run of speech that counts, in milliseconds.
+    pub min_speech_ms: Option<u32>,
+    /// Silence that ends an utterance, in milliseconds.
+    pub min_silence_ms: Option<u32>,
+    /// Audio kept before the detected start, in milliseconds.
+    pub padding_ms: Option<u32>,
+    /// Hard cap on one segment, in milliseconds.
+    pub max_segment_ms: Option<u32>,
+    /// Analysis frame size, in milliseconds.
+    pub frame_ms: Option<u32>,
 }
 
 /// Listener fields a patch may change.
@@ -1458,6 +1482,29 @@ impl ConfigPatch {
             }
             if let Some(partials) = stt.partials {
                 config.stt.partials = partials;
+            }
+        }
+        if let Some(vad) = self.vad {
+            if let Some(engine) = vad.engine {
+                config.vad.engine = engine;
+            }
+            if let Some(threshold) = vad.threshold {
+                config.vad.threshold = threshold;
+            }
+            if let Some(min_speech_ms) = vad.min_speech_ms {
+                config.vad.min_speech_ms = min_speech_ms;
+            }
+            if let Some(min_silence_ms) = vad.min_silence_ms {
+                config.vad.min_silence_ms = min_silence_ms;
+            }
+            if let Some(padding_ms) = vad.padding_ms {
+                config.vad.padding_ms = padding_ms;
+            }
+            if let Some(max_segment_ms) = vad.max_segment_ms {
+                config.vad.max_segment_ms = max_segment_ms;
+            }
+            if let Some(frame_ms) = vad.frame_ms {
+                config.vad.frame_ms = frame_ms;
             }
         }
         if let Some(server) = self.server {
