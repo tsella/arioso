@@ -1639,7 +1639,9 @@ impl ConfigPatch {
 /// Engines this binary can actually serve, and what they are called.
 const TTS_ENGINES: [&str; 1] = ["piper"];
 const STT_ENGINES: [&str; 1] = ["sherpa"];
-const AUDIO_FORMATS: [&str; 4] = ["wav", "pcm", "mp3", "opus"];
+/// Formats the server can produce. `mp3` and `opus` were accepted and never encoded, so a
+/// config that asked for one got a WAV labelled as what it asked for.
+const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
 #[utoipa::path(
     get,
@@ -2247,35 +2249,76 @@ async fn synthesize(
 ) -> Result<Response, ApiError> {
     let text = request.text.trim();
     if text.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "text must not be empty",
-        ));
+        return Err(unprocessable("text must not be empty".to_owned()));
     }
     let max_text_chars = state.config().server.limits.max_text_chars;
     if text.chars().count() > max_text_chars {
-        return Err(ApiError::new(
+        return Err(ApiError::coded(
             StatusCode::UNPROCESSABLE_ENTITY,
+            "too_large",
             format!("text is longer than {max_text_chars} characters"),
         ));
     }
     let speed = request.speed.unwrap_or(state.config().tts.speed);
     if !(0.5..=2.0).contains(&speed) {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("speed {speed} is outside 0.5 to 2.0"),
+        return Err(unprocessable(format!("speed {speed} is outside 0.5 to 2.0")));
+    }
+
+    // Checked before the render, so a missing voice is the code a client switches on rather
+    // than a 422 carrying an operating system path.
+    // Two different failures: a voice the catalog does not know is a bad config value,
+    // and a known voice whose files are absent is a model that is not installed.
+    let spec = state
+        .voice_spec()
+        .map_err(|detail| unprocessable(detail.to_string()))?;
+    if !state.is_installed(&spec) {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "model_not_installed",
+            format!(
+                "voice {} is not on disk; POST /v1/models/{}/download first",
+                spec.id, spec.id
+            ),
         ));
     }
 
     let text = text.to_owned();
     let worker = Arc::clone(&state);
-    let (samples, rate) = tokio::task::spawn_blocking(move || worker.render(&text, speed))
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let rendered = tokio::task::spawn_blocking(move || worker.render(&text, speed)).await;
+    let (samples, rate) = match rendered {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(detail)) => {
+            // The engine's own message can name a path or a file. It goes to the log, and
+            // the client gets a code and a sentence that cannot leak the layout.
+            tracing::error!(%detail, "synthesis failed");
+            return Err(ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "engine_unavailable",
+                "the engine could not synthesize this text; the server log has the detail",
+            ));
+        }
+        Err(join) => {
+            tracing::error!(%join, "the render task failed");
+            return Err(ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "engine_unavailable",
+                "the engine could not synthesize this text; the server log has the detail",
+            ));
+        }
+    };
 
+    // The format the config names, for the two that exist. `pcm` is raw samples, so the
+    // caller needs the rate in the content type to make anything of them.
+    if state.config().tts.format == "pcm" {
+        let content_type = format!("audio/pcm;rate={rate}");
+        return Ok((
+            [(header::CONTENT_TYPE, content_type)],
+            wav::pcm_s16le(&samples),
+        )
+            .into_response());
+    }
     Ok((
-        [(header::CONTENT_TYPE, "audio/wav")],
+        [(header::CONTENT_TYPE, "audio/wav".to_owned())],
         wav::to_bytes(&samples, rate),
     )
         .into_response())
@@ -3122,6 +3165,31 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], 422);
         assert!(json["detail"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn a_known_voice_with_no_files_is_model_not_installed() {
+        // The catalog knows this voice; its files are not on disk. That is a 409 with a
+        // code, not a 422 carrying an operating system path.
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/tts")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "model_not_installed");
+        let detail = json["detail"].as_str().unwrap();
+        assert!(
+            !detail.contains("/tmp") && !detail.contains("tempdir"),
+            "the detail leaked a path: {detail}"
+        );
     }
 
     #[tokio::test]
