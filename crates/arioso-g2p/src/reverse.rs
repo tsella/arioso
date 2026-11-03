@@ -12,7 +12,7 @@
 
 use arioso_core::UserDictionary;
 
-use crate::{arpabet, cmudict::CmuDict, lts};
+use crate::{arpabet, cmudict::CmuDict, inflect, lts};
 
 /// How different two pronunciations may be and still count as the same words.
 const TOLERANCE: f32 = 0.4;
@@ -213,6 +213,11 @@ fn pronounce(word: &str, cmu: &CmuDict) -> Vec<&'static str> {
         if let Some(first) = pronunciations.first() {
             return strip_stress(&arpabet::to_ipa(first));
         }
+    }
+    // The same fallback the voice uses: a regular suffix on an entry, so a transcript of
+    // `avengers` compares against the sounds of `avenger` plus a `z`.
+    if let Some(derived) = inflect::derive(&cleaned, cmu) {
+        return strip_stress(&arpabet::to_ipa(&derived));
     }
     let tokens = lts::to_arpabet(&cleaned);
     if tokens.is_empty() {

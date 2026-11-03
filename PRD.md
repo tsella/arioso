@@ -681,8 +681,18 @@ user needs a way to correct the result without waiting for a release.
 Order of operations, both directions:
 
 - Text to speech: sentence split, then user dictionary, then normalization, then
-  CMUdict, then letter-to-sound, then phonemes.
+  CMUdict, then a regular inflection of a CMUdict entry, then letter-to-sound, then
+  phonemes.
+- The inflection step exists because the dictionary is a word list and not a grammar: it
+  holds `avenger` and not `avengers`, `walk` and not `walked`. Without the step a plural
+  falls to the letter rules, which read `avengers` as `AV-en-ger-s`. A regular suffix
+  (`-s`, `-es`, `-ies`, `-ed`, `-ied`, `-ves`, `-ing`, `-er`, `-est`, `-ly`) is applied to
+  the entry instead, with the voicing the base's last phoneme decides: `-s` is /s/ after a
+  voiceless sound, /z/ after a voiced one, and /ɪz/ after a sibilant. A derived form is not
+  a guess and is not reported as one.
 - Speech to text: transcript, then user dictionary in reverse, then the corrected text.
+  The reverse comparison uses the same inflection step, so a transcript of `avengers`
+  compares against the sounds of `avenger` plus a /z/.
 
 - F14.1 Normalization covers cardinals, currency, ordinals, times, dates, years,
   percentages, units, and a short list of abbreviations. `$3.99` becomes

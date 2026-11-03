@@ -333,23 +333,27 @@ fn text_symbols(
         if cleaned.is_empty() {
             continue;
         }
-        let spoken: Vec<&'static str> = match dictionary.lookup(&cleaned) {
-            Some(pronunciations) => arpabet::to_ipa(&pronunciations[0]),
-            None => {
-                // Not in the dictionary, so spell it out. A guessed word is heard
-                // and named; a skipped one leaves a hole.
-                let guessed = if allow_rules {
-                    arioso_g2p::lts::pronounce(&cleaned)
-                } else {
-                    Vec::new()
-                };
-                if guessed.is_empty() {
-                    report.missing.push(cleaned);
-                } else {
-                    report.guessed.push(cleaned);
-                }
-                guessed
+        let spoken: Vec<&'static str> = if let Some(pronunciations) = dictionary.lookup(&cleaned) {
+            arpabet::to_ipa(&pronunciations[0])
+        } else if let Some(derived) = arioso_g2p::inflect::derive(&cleaned, dictionary) {
+            // A regular suffix on an entry: the dictionary holds `avenger` and not
+            // `avengers`, `walk` and not `walked`. This is not a guess, so it is not
+            // reported as one.
+            arpabet::to_ipa(&derived)
+        } else {
+            // Not in the dictionary and not a regular form, so spell it out. A guessed
+            // word is heard and named; a skipped one leaves a hole.
+            let guessed = if allow_rules {
+                arioso_g2p::lts::pronounce(&cleaned)
+            } else {
+                Vec::new()
+            };
+            if guessed.is_empty() {
+                report.missing.push(cleaned);
+            } else {
+                report.guessed.push(cleaned);
             }
+            guessed
         };
         if spoken.is_empty() {
             continue;
@@ -436,6 +440,23 @@ mod tests {
             "no doubled space: {symbols:?}"
         );
         assert_eq!(symbols.last().copied(), Some("d"), "no trailing space");
+    }
+
+    #[test]
+    fn a_plural_of_a_dictionary_word_is_not_a_guess() {
+        // The dictionary holds `avenger` and not `avengers`. Reading the plural through the
+        // letter rules produced a name nobody has heard; the suffix belongs on the entry.
+        let dictionary = CmuDict::parse("avenger AH0 V EH1 N JH ER0\n");
+        let mut singular = RenderReport::default();
+        let mut plural = RenderReport::default();
+        let options = arioso_core::NormalizeOptions::default();
+        let one = text_symbols("avenger", &dictionary, &mut singular, options, true);
+        let many = text_symbols("avengers", &dictionary, &mut plural, options, true);
+
+        assert!(plural.guessed.is_empty(), "{plural:?}");
+        assert!(plural.missing.is_empty(), "{plural:?}");
+        assert_eq!(&many[..one.len()], &one[..], "the base sounds the same");
+        assert_eq!(&many[one.len()..], &["z"], "and takes the voiced plural");
     }
 
     #[test]

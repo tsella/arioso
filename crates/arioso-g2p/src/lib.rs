@@ -2,6 +2,7 @@
 
 pub mod arpabet;
 pub mod cmudict;
+pub mod inflect;
 pub mod lts;
 pub mod reverse;
 

@@ -145,6 +145,23 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A dictionary is a word list, not a grammar
+
+CMUdict holds `avenger` and not `avengers`. The lookup missed, the letter-to-sound rules took
+over, and they read the plural as `AE1 V EH0 NG ER0 S`: stress on the first syllable, a hard
+`g`, and a name nobody has heard. 103,684 of its 126,052 entries have no plain plural form, so
+this was the normal path for most plurals, not an edge case.
+
+A regular suffix belongs on the entry. Try the stems in the order most likely to be the base
+(`making` is `make` before it is `mak`, `running` is `run` before it is `runn`), then choose the
+sound the base's last phoneme decides: /s/ after a voiceless sound, /z/ after a voiced one,
+/ɪz/ after a sibilant, /t/ or /d/ or /ɪd/ for the past. `knives` also needs the `f` voiced to
+`v` before the plural is chosen.
+
+The rule generalises: when a fallback fires for a word that differs from a known one by a
+regular transformation, the fallback is doing work the language already did, and the result is
+worse than the known entry. Look for the entry behind the word before inventing a pronunciation.
+
 ## No speech is not a failure
 
 `POST /v1/stt` answered `503 engine_unavailable` for a silent recording. The recognizer returns
