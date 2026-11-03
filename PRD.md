@@ -276,7 +276,7 @@ because it runs batch models and natively streaming models behind the same C API
     This is the model family the WebSocket path uses.
   The default batch model is Parakeet v2, because it measured best on both corpora at
   whisper-base speed. The measurements, the languages each model covers, and the
-  licenses are in docs/models.md.
+  licenses are in docs/MODELS.md.
 - F4.2 Batch endpoint accepts `audio/wav`, `audio/mpeg`, `audio/ogg`, and raw PCM.
   Files are transcoded to 16 kHz mono in process.
 - F4.3 Response includes the full text, segment list with start and end times, and
