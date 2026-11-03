@@ -192,6 +192,9 @@ impl Downloader {
             }
         }
 
+        // Set when this run hashed the bytes as they arrived, which makes the read-back
+        // hash unnecessary.
+        let mut streamed_hash: Option<String> = None;
         let mut offset = std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
         if offset > file.size {
             std::fs::remove_file(&part_path)?;
@@ -218,7 +221,7 @@ impl Downloader {
                 }
             };
 
-            let mut handle = if append && offset > 0 {
+            let handle = if append && offset > 0 {
                 tokio::fs::OpenOptions::new()
                     .append(true)
                     .open(&part_path)
@@ -232,20 +235,36 @@ impl Downloader {
                 downloaded: base + offset,
                 total,
             });
+            // Buffered: a network chunk is a few kilobytes and an unbuffered write is a
+            // syscall per chunk.
+            let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, handle);
+            // A download that starts at zero is hashed as it arrives. Reading the finished
+            // file back costs a full pass over 652 MB for the largest model, on the path a
+            // first install always takes.
+            let mut hasher = (offset == 0).then(Sha256::new);
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
-                handle.write_all(&chunk).await?;
+                writer.write_all(&chunk).await?;
+                if let Some(hasher) = hasher.as_mut() {
+                    hasher.update(&chunk);
+                }
                 offset += chunk.len() as u64;
                 progress(Progress {
                     downloaded: base + offset,
                     total,
                 });
             }
-            handle.flush().await?;
+            writer.flush().await?;
+            streamed_hash = hasher.map(|hasher| hex::encode(hasher.finalize()));
         }
 
-        let actual = hash_file_off_thread(&part_path).await?;
+        // A resumed file was hashed from the start by an earlier run, so the bytes already
+        // on disk have to be read to include them. That read stays off the runtime worker.
+        let actual = match streamed_hash {
+            Some(hash) => hash,
+            None => hash_file_off_thread(&part_path).await?,
+        };
         if actual != file.sha256 {
             let _ = std::fs::remove_file(&part_path);
             return Err(DownloadError::Integrity {
