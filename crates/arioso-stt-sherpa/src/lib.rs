@@ -261,21 +261,25 @@ impl Engine {
         if samples.is_empty() {
             return Err(SttError::EmptyAudio);
         }
-        let resampled;
-        let samples = if rate == ENGINE_RATE {
-            samples
-        } else {
-            resampled = resample(samples, rate, ENGINE_RATE);
-            &resampled
-        };
-
         // The engine decodes one window of at most thirty seconds and discards whatever
         // follows, without an error. Handing it an hour of audio returns the first half
         // minute and a success code, so the audio is cut here and the pieces joined.
+        //
+        // The cut is made at the rate the audio arrived in, and only the window about to be
+        // decoded is converted. Resampling the file first held a second copy of the whole
+        // recording: 115 MB for thirty minutes at 48 kHz, against 1.85 MB for one window.
         let mut text = String::new();
-        for window in windows(samples, ENGINE_RATE) {
+        let mut converted: Vec<f32> = Vec::with_capacity(WINDOW_S * ENGINE_RATE as usize);
+        for window in windows(samples, rate) {
+            let audio: &[f32] = if rate == ENGINE_RATE {
+                window
+            } else {
+                converted.clear();
+                resample_into(window, rate, ENGINE_RATE, &mut converted);
+                &converted
+            };
             let stream = self.recognizer.create_stream();
-            stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), window);
+            stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), audio);
             self.recognizer.decode(&stream);
             let Some(result) = stream.get_result() else {
                 continue;
@@ -330,7 +334,7 @@ fn windows(samples: &[f32], rate: u32) -> Vec<&[f32]> {
         // stretch early in the window would otherwise make a tiny piece and waste a decode.
         let floor = start + window / 2;
         let from = edge.saturating_sub(tail).max(floor);
-        let cut = quietest(&samples[from..edge]).map_or(edge, |offset| from + offset);
+        let cut = quietest(&samples[from..edge], rate).map_or(edge, |offset| from + offset);
         pieces.push(&samples[start..cut]);
         start = cut;
     }
@@ -338,18 +342,29 @@ fn windows(samples: &[f32], rate: u32) -> Vec<&[f32]> {
 }
 
 /// Where to cut, as an offset into `slice`: the middle of the quietest 20 ms frame.
-fn quietest(slice: &[f32]) -> Option<usize> {
-    let frame = (ENGINE_RATE / 50) as usize;
+///
+/// `rate` is the rate of `slice`, which is the rate the audio arrived in: the window is cut
+/// before it is converted, so a 48 kHz recording is measured at 48 kHz.
+fn quietest(slice: &[f32], rate: u32) -> Option<usize> {
+    // Ten milliseconds, at whatever rate this is.
+    let half = (rate / 100).max(1) as usize;
+    let frame = half * 2;
     if slice.len() < frame * 2 {
         return None;
     }
+    // Each ten millisecond half is squared once. Summing a fresh twenty millisecond frame
+    // at every half-frame offset squared every sample twice.
+    let mut halves: Vec<f32> = Vec::with_capacity(slice.len() / half);
+    for at in (0..slice.len() - half + 1).step_by(half) {
+        halves.push(slice[at..at + half].iter().map(|s| s * s).sum());
+    }
     let mut best = None;
     let mut best_energy = f32::MAX;
-    for offset in (0..=slice.len() - frame).step_by(frame / 2) {
-        let energy: f32 = slice[offset..offset + frame].iter().map(|s| s * s).sum();
+    for index in 0..halves.len().saturating_sub(1) {
+        let energy = halves[index] + halves[index + 1];
         if energy < best_energy {
             best_energy = energy;
-            best = Some(offset + frame / 2);
+            best = Some(index * half + half);
         }
     }
     best
@@ -394,12 +409,23 @@ fn find(dir: &Path, stem: &str, suffix: &str) -> Option<PathBuf> {
 /// music. A proper polyphase filter belongs here when the streaming path needs one.
 #[must_use]
 pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
+    let mut out = Vec::with_capacity(resampled_len(samples.len(), from, to));
+    resample_into(samples, from, to, &mut out);
+    out
+}
+
+/// The same, into a buffer the caller keeps.
+///
+/// The window path converts one window at a time into the same buffer, so a long recording
+/// never holds a converted copy of itself.
+pub fn resample_into(samples: &[f32], from: u32, to: u32, out: &mut Vec<f32>) {
     if from == to || samples.is_empty() || from == 0 || to == 0 {
-        return samples.to_vec();
+        out.extend_from_slice(samples);
+        return;
     }
     let ratio = f64::from(from) / f64::from(to);
-    let length = ((samples.len() as f64) / ratio).ceil() as usize;
-    let mut out = Vec::with_capacity(length);
+    let length = resampled_len(samples.len(), from, to);
+    out.reserve(length);
     for index in 0..length {
         let position = index as f64 * ratio;
         let left = position.floor() as usize;
@@ -408,12 +434,36 @@ pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
         let b = samples[(left + 1).min(samples.len() - 1)];
         out.push(a + (b - a) * fraction);
     }
-    out
+}
+
+/// How many samples `resample` will produce.
+fn resampled_len(len: usize, from: u32, to: u32) -> usize {
+    if from == to || from == 0 || to == 0 {
+        return len;
+    }
+    let ratio = f64::from(from) / f64::from(to);
+    ((len as f64) / ratio).ceil() as usize
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_is_cut_on_the_same_clock_at_any_rate() {
+        // A cut is chosen in time, not in samples: a 48 kHz recording has to split where a
+        // 16 kHz one would, and the pieces still cover the input exactly.
+        let mut samples = vec![0.5f32; 40 * 48_000];
+        let quiet = 27 * 48_000 + 24_000;
+        for sample in &mut samples[quiet..quiet + 24_000] {
+            *sample = 0.0;
+        }
+        let pieces = windows(&samples, 48_000);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[0].len() + pieces[1].len(), samples.len());
+        let cut_s = pieces[0].len() as f64 / 48_000.0;
+        assert!((27.0..28.0).contains(&cut_s), "cut at {cut_s} s");
+    }
 
     #[test]
     fn resampling_keeps_the_length_in_seconds() {
