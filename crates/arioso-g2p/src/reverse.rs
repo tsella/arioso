@@ -101,7 +101,8 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
                 for slot in &spoken[index..index + width] {
                     heard.extend_from_slice(slot);
                 }
-                let distance = distance_into(form, &heard, &mut previous, &mut current, allowance) as f32;
+                let distance =
+                    distance_into(form, &heard, &mut previous, &mut current, allowance) as f32;
                 if distance > allowed {
                     continue;
                 }
@@ -230,14 +231,8 @@ fn strip_stress(symbols: &[&'static str]) -> Vec<&'static str> {
 }
 
 /// Levenshtein distance between two phoneme sequences.
-fn distance(a: &[&str], b: &[&str]) -> usize {
-    let mut previous: Vec<usize> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    distance_into(a, b, &mut previous, &mut current, usize::MAX)
-}
-
-/// The same, into buffers the caller keeps, giving up once the answer cannot be within
-/// `max`.
+/// Levenshtein distance into buffers the caller keeps, giving up once the answer cannot be
+/// within `max`.
 ///
 /// The row minimum only ever rises, so a row whose minimum already exceeds the allowance
 /// cannot produce a distance that fits. A mismatch that is impossible to accept is
