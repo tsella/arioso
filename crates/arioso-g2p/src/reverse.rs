@@ -41,7 +41,13 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
     for entry in user.entries() {
         for form in entry.forms() {
             let phonemes = pronounce_phrase(form, cmu);
-            let words = form.split_whitespace().count().max(1);
+            // An ARPAbet form has one token per phoneme, so its token count says nothing
+            // about how many words it covers. The term does.
+            let words = if is_arpabet(form) {
+                entry.term.split_whitespace().count().max(1)
+            } else {
+                form.split_whitespace().count().max(1)
+            };
             if phonemes.len() >= MIN_PHONEMES {
                 forms.push((phonemes, words, entry.term.as_str()));
             }
@@ -156,11 +162,23 @@ fn words(text: &str) -> Vec<(usize, usize)> {
 /// word on its own. Smashing them together first sends the whole string to the spelling
 /// rules, which read "ah ree oh so" as the letters of one invented word.
 fn pronounce_phrase(text: &str, cmu: &CmuDict) -> Vec<&'static str> {
+    // A form written in ARPAbet is already a pronunciation. Reading `S EH1 L AA0` as four
+    // English words to pronounce matches nothing, which is why an entry that carries only
+    // phonemes used to work for speaking and never for hearing.
+    if is_arpabet(text) {
+        return strip_stress(&arpabet::to_ipa(text));
+    }
     let mut out = Vec::new();
     for word in text.split_whitespace() {
         out.extend(pronounce(word, cmu));
     }
     out
+}
+
+/// Whether every token in `text` is an ARPAbet phoneme.
+fn is_arpabet(text: &str) -> bool {
+    let mut tokens = text.split_whitespace().peekable();
+    tokens.peek().is_some() && tokens.all(arpabet::is_phoneme)
 }
 
 /// The phonemes of a word, without stress: the dictionary first, then the rules.
@@ -246,6 +264,20 @@ SPEAKS  S P IY1 K S
     }
 
     const TOM: &str = r#"{"version":1,"entries":[{"term":"Tom Sella","spoken":["tom seller"]}]}"#;
+
+    #[test]
+    fn a_phonemes_only_entry_matches_by_sound() {
+        // The entry carries no spelling at all, only the pronunciation the voice is given.
+        // Reading `S EH1 L AA0` as four English words matched nothing, so an entry that
+        // worked for speaking never worked for hearing.
+        let dictionary = user(
+            r#"{"version":1,"entries":[{"term":"Sella","phonemes":["S EH1 L AH0"]}]}"#,
+        );
+        // The entry holds no spelling at all, so a match can only come from the phonemes:
+        // as words, `S EH1 L AH0` pronounces to nothing usable and the form is dropped.
+        let out = correct(&dictionary, &cmu(), "I met sella yesterday");
+        assert_eq!(out, "I met Sella yesterday");
+    }
 
     #[test]
     fn an_exact_spoken_form_is_replaced() {

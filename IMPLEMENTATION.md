@@ -243,9 +243,9 @@ out of a model trained on both:
 ```
 
 Measured: without that file the same audio transcribed `time-traveler` and `gray eyes`; with
-it, `time-traveller` and `grey eyes`. The entry must carry `spoken`. A `phonemes` entry is
-right for speaking and useless here, because the reverse pass pronounces each spoken form
-and compares sounds, so ARPAbet symbols reach it as words to pronounce and match nothing.
+it, `time-traveller` and `grey eyes`. An entry with `spoken` works in both directions. An
+entry with only `phonemes` works too: the reverse pass recognises ARPAbet and compares the
+sounds directly, so a term the recognizer spells its own way still comes back.
 
 ## Test that the voice says the right thing
 
