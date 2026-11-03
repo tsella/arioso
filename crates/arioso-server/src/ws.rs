@@ -141,7 +141,11 @@ async fn run(
     let mut cancelled = false;
     loop {
         let chunk = tokio::select! {
-            chunk = receiver.recv() => chunk,
+            // A control frame is read before the next chunk, every time. With both ready an
+            // unbiased select picks at random, so a `cancel` that arrived while two
+            // rendered sentences sat in the queue could be answered only after megabytes
+            // the client no longer wants had gone down the socket.
+            biased;
             // The socket is read for the whole stream, not only before it starts. A client
             // that cancels halfway through must be heard at the next chunk boundary.
             incoming = socket.recv() => {
@@ -156,6 +160,7 @@ async fn run(
                     Some(Ok(_)) => continue,
                 }
             }
+            chunk = receiver.recv() => chunk,
         };
         let Some((samples, rate)) = chunk else {
             break;
