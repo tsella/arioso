@@ -61,13 +61,13 @@ impl Default for NormalizeOptions {
 }
 
 /// Expand numbers, currency, times, percentages, and common abbreviations,
-/// with the default [`Options`].
+/// with the default [`NormalizeOptions`].
 #[must_use]
 pub fn normalize(text: &str) -> String {
     normalize_with(text, NormalizeOptions::default())
 }
 
-/// Expand with explicit [`Options`].
+/// Expand with explicit [`NormalizeOptions`].
 #[must_use]
 pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
     let expanded = expand_abbreviations(text);
