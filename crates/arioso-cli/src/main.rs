@@ -188,6 +188,7 @@ fn download(config: &Config, id: &str) -> Result<()> {
         dir.display()
     );
 
+    let mirror = config.models.mirror.clone();
     let runtime = tokio::runtime::Runtime::new()?;
     let mut last_reported = u64::MAX;
     let mut progress = |p: Progress| {
@@ -206,7 +207,7 @@ fn download(config: &Config, id: &str) -> Result<()> {
         }
     };
     let paths = runtime.block_on(async {
-        Downloader::new()?
+        Downloader::with_mirror(mirror)?
             .ensure_model(spec, &dir, &mut progress)
             .await
     })?;
@@ -237,6 +238,8 @@ fn serve_here(config: Config, config_path: &Path) -> Result<()> {
         manifest,
         Some(config_path),
     )?);
+    // A config that names models to fetch at start does not wait for a caller to ask.
+    state.spawn_auto_downloads();
     let bind = config.server.bind.clone();
     let tls = config.server.tls.clone();
     let header_timeout = config.server.limits.header_timeout_ms;

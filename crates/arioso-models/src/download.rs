@@ -85,6 +85,25 @@ pub enum DownloadError {
 #[derive(Debug, Clone)]
 pub struct Downloader {
     client: reqwest::Client,
+    /// Base that replaces the origin of every file URL, when an operator runs a mirror.
+    mirror: Option<String>,
+}
+
+/// Rewrite a file URL onto a mirror, keeping the path.
+///
+/// The mirror serves the same paths as the origin, so only the scheme and host change:
+/// `https://example.org/a/b.onnx` on a mirror of `https://mirror.internal` becomes
+/// `https://mirror.internal/a/b.onnx`. A URL with no path keeps its own.
+#[must_use]
+pub fn mirror_url(url: &str, mirror: Option<&str>) -> String {
+    let Some(mirror) = mirror.map(str::trim).filter(|m| !m.is_empty()) else {
+        return url.to_owned();
+    };
+    let Some((_, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let path = rest.find('/').map_or("/", |at| &rest[at..]);
+    format!("{}{}", mirror.trim_end_matches('/'), path)
 }
 
 impl Downloader {
@@ -94,12 +113,21 @@ impl Downloader {
     ///
     /// Returns [`DownloadError::Http`] when the client cannot be built.
     pub fn new() -> Result<Self, DownloadError> {
+        Self::with_mirror(None)
+    }
+
+    /// The same, fetching through `mirror` when one is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DownloadError::Http`] when the client cannot be built.
+    pub fn with_mirror(mirror: Option<String>) -> Result<Self, DownloadError> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("arioso/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .build()?;
-        Ok(Self { client })
+        Ok(Self { client, mirror })
     }
 
     /// Fetch every file of `spec` into `dir`, resuming partial files.
@@ -171,7 +199,8 @@ impl Downloader {
         }
 
         if offset < file.size {
-            let mut request = self.client.get(&file.url);
+            let url = mirror_url(&file.url, self.mirror.as_deref());
+            let mut request = self.client.get(&url);
             if offset > 0 {
                 request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
             }
@@ -312,6 +341,28 @@ mod tests {
     use crate::manifest::{FileSpec, Kind, ModelSpec};
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_mirror_replaces_the_origin_and_keeps_the_path() {
+        let url = "https://huggingface.co/csukuangfj/thing/resolve/main/encoder.onnx";
+        assert_eq!(
+            mirror_url(url, Some("https://mirror.internal")),
+            "https://mirror.internal/csukuangfj/thing/resolve/main/encoder.onnx"
+        );
+        // A trailing slash on the mirror must not double the separator.
+        assert_eq!(
+            mirror_url(url, Some("https://mirror.internal/")),
+            "https://mirror.internal/csukuangfj/thing/resolve/main/encoder.onnx"
+        );
+        // No mirror, or an empty one, leaves the URL alone.
+        assert_eq!(mirror_url(url, None), url);
+        assert_eq!(mirror_url(url, Some("  ")), url);
+        // A URL with no path keeps its own.
+        assert_eq!(
+            mirror_url("https://example.org", Some("http://mirror.lan")),
+            "http://mirror.lan/"
+        );
+    }
 
     fn payload() -> Vec<u8> {
         (0..4096u32).map(|i| (i % 251) as u8).collect()

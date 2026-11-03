@@ -222,6 +222,74 @@ impl AppState {
         }
     }
 
+    /// Start fetching a model, or report the one already in flight.
+    ///
+    /// Returns `Some(progress)` when a download was already running, and `None` when this
+    /// call started one. The task waits for a slot, fetches through the configured mirror,
+    /// and clears the catalog entry whether it worked or not.
+    pub(crate) fn begin_download(self: &Arc<Self>, spec: &ModelSpec) -> Option<(u64, u64)> {
+        let id = spec.id.clone();
+        let total = spec.total_size();
+        if let Some(running) = self.try_start_download(&id, total) {
+            return Some(running);
+        }
+        let state = Arc::clone(self);
+        let dir = self.models_dir.clone();
+        let spec = spec.clone();
+        tokio::spawn(async move {
+            // Wait for a slot before touching the network. The catalog shows this model as
+            // downloading while it waits, which is true: the request was accepted.
+            let slot = Arc::clone(&state.download_slots).acquire_owned().await;
+            let downloader = arioso_models::Downloader::with_mirror(
+                state.config().models.mirror.clone(),
+            );
+            let result = match downloader {
+                Ok(downloader) => {
+                    let reporting = Arc::clone(&state);
+                    let watched = id.clone();
+                    let mut progress = move |p: arioso_models::Progress| {
+                        reporting.note_download(&watched, p.downloaded, p.total);
+                    };
+                    downloader.ensure_model(&spec, &dir, &mut progress).await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(paths) => tracing::info!(
+                    model = %id,
+                    files = paths.len(),
+                    bytes = total,
+                    "model downloaded"
+                ),
+                // The catalog stops showing the download, so the failure has to be visible
+                // somewhere: a caller that asked for a model and got silence has nothing.
+                Err(error) => tracing::error!(model = %id, %error, "model download failed"),
+            }
+            drop(slot);
+            state.finish_download(&id);
+        });
+        None
+    }
+
+    /// Start the downloads the config asks for at start-up.
+    ///
+    /// A server that is told which models it needs should not wait for a caller to ask for
+    /// them. An id that is not in the catalog, or that is already on disk, is skipped.
+    pub fn spawn_auto_downloads(self: &Arc<Self>) {
+        let wanted = self.config().models.auto_download.clone();
+        for id in wanted {
+            let Some(spec) = self.manifest.find(&id).cloned() else {
+                tracing::warn!(model = %id, "auto_download names a model that is not in the catalog");
+                continue;
+            };
+            if self.is_installed(&spec) {
+                continue;
+            }
+            tracing::info!(model = %id, "auto_download started");
+            self.begin_download(&spec);
+        }
+    }
+
     /// Record a download's progress, replacing what was there.
     fn note_download(&self, id: &str, downloaded: u64, total: u64) {
         if let Ok(mut map) = self.downloads.lock() {
@@ -1895,51 +1963,17 @@ async fn start_download(
         .into_response();
     };
     let total = spec.total_size();
-    if let Some((downloaded, total)) = state.try_start_download(&id, total) {
-        return (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "id": id, "state": "downloading", "downloaded": downloaded, "total": total
-            })),
-        )
-            .into_response();
+    let (downloaded, already) = match state.begin_download(&spec) {
+        Some(running) => (running.0, true),
+        None => (0, false),
+    };
+    if already {
+        tracing::debug!(model = %id, "download already in flight");
     }
-
-    let task_state = Arc::clone(&state);
-    let dir = state.models_dir.clone();
-    let task_id = id.clone();
-    tokio::spawn(async move {
-        let id = task_id;
-        // Wait for a slot before touching the network. The catalog shows this model as
-        // downloading while it waits, which is true: the request was accepted.
-        let _slot = Arc::clone(&task_state.download_slots).acquire_owned().await;
-        let result = match arioso_models::Downloader::new() {
-            Ok(downloader) => {
-                let mut progress = |p: arioso_models::Progress| {
-                    task_state.note_download(&id, p.downloaded, p.total);
-                };
-                downloader.ensure_model(&spec, &dir, &mut progress).await
-            }
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(paths) => tracing::info!(
-                model = %id,
-                files = paths.len(),
-                bytes = total,
-                "model downloaded"
-            ),
-            // The catalog stops showing the download, so the failure has to be visible
-            // somewhere: a caller that asked for a model and got silence has nothing.
-            Err(error) => tracing::error!(model = %id, %error, "model download failed"),
-        }
-        task_state.finish_download(&id);
-    });
-
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
-            "id": id, "state": "downloading", "downloaded": 0, "total": total
+            "id": id, "state": "downloading", "downloaded": downloaded, "total": total
         })),
     )
         .into_response()
