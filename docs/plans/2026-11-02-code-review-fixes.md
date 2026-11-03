@@ -113,7 +113,9 @@ Each task is one commit that passes the whole gate: `cargo fmt --all -- --check`
   instead of widening the design.
 - Silero VAD. 2.1 wires the config into the energy segmenter, which is the only backend, and
   2.1's validation refuses the name rather than accepting it.
-- **A number followed directly by a letter still runs together**: `5kg` normalizes to
-  `fivekg`, and `1stand` to `onestand`. Found while fixing 4.1 and left alone, because the fix
-  belongs with unit handling (`5 kg`, `5kg`, `5 kilograms`) rather than with the separator
-  rule, and a half fix there would change every measurement in a sentence.
+- **A number followed directly by a letter ran together**: `5kg` normalized to `fivekg`. Found
+  while fixing 4.1 and left alone there, because the fix belongs with unit handling rather
+  than with the separator rule. It is done now, as F14.1a and F14.1b: a unit after a number is
+  spoken (`5kg`, `190 cm`, `20°C`, `60mph`), and a magnitude after a currency amount is spoken
+  (`$1m`, `$2.5b`). Still run together: a token that is not a known unit, so `5G` reads
+  `fiveG`, and an attributive plural, so `a 5kg box` says `a five kilograms box`.

@@ -661,9 +661,18 @@ Order of operations, both directions:
 - Speech to text: transcript, then user dictionary in reverse, then the corrected text.
 
 - F14.1 Normalization covers cardinals, currency, ordinals, times, dates, years,
-  percentages, and a short list of abbreviations. `$3.99` becomes
+  percentages, units, and a short list of abbreviations. `$3.99` becomes
   `three dollars ninety nine cents`; `2026` becomes `twenty twenty six`; `3rd`
   becomes `third`.
+- F14.1a A unit written after a number is spoken: `5kg` is `five kilograms`, `190cm` is
+  `one hundred ninety centimeters`, `1.5kg` is `one point five kilograms`, `20°C` is
+  `twenty degrees Celsius`, `60mph` is `sixty miles per hour`. The unit is plural unless
+  the number is exactly one. One space before the unit is accepted when the token cannot
+  be a word (`190 cm`, `5 kg`, `5 min`), and refused when it can (`5 in the morning` is
+  not five inches, `2 m of rope` is not two metres), because the two are the same shape.
+- F14.1b A magnitude suffix after a currency amount is spoken: `$1m` is `one million
+  dollars`, `$5k` is `five thousand dollars`, `$2.5b` is `two point five billion dollars`.
+  The suffix is only read after `$`, so `4K` stays a display resolution.
 - F14.2 Normalization is language-specific. English ships in v1; every other language
   passes through unchanged until its rules exist.
 - F14.3 Every expansion is inspectable without listening: `arioso normalize "<text>"`
