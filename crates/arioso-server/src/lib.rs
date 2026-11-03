@@ -1715,8 +1715,21 @@ const STT_ENGINES: [&str; 1] = ["sherpa"];
         never from this document.",
     responses((status = 200, body = serde_json::Value))
 )]
-async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(config_json(&state.config()))
+async fn get_config(State(state): State<Arc<AppState>>) -> Response {
+    // The bytes the client asked for, written once. Going through a `Value` serialised the
+    // config, parsed the text into a tree, and serialised the tree back into a body.
+    match serde_json::to_vec(&*state.config()) {
+        Ok(body) => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "the config could not be serialised");
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "the config could not be written; the server log has the detail",
+            )
+            .into_response()
+        }
+    }
 }
 
 /// The config as JSON, with floats written the way the file writes them.
