@@ -69,22 +69,39 @@ pub fn correct(user: &UserDictionary, cmu: &CmuDict, text: &str) -> String {
     // rejected, because the engine does split and merge words, but it carries a penalty
     // so it only wins when nothing else fits. Without the penalty, "is a Rio so" beats
     // "a Rio so" for the form "ah ree oh so" and eats a word that was really spoken.
+    // Where each word's phonemes start in one flat count, so a window's length is a
+    // subtraction instead of a walk. A window whose length differs from the form by more
+    // than the allowance cannot match, and finding that out costs no edit distance.
+    let mut prefix = Vec::with_capacity(spoken.len() + 1);
+    prefix.push(0usize);
+    for slot in &spoken {
+        prefix.push(prefix.last().copied().unwrap_or(0) + slot.len());
+    }
+
     let mut candidates: Vec<(f32, usize, usize, usize, &str)> = Vec::new();
+    // Reused across every candidate: the inner loop allocated a phoneme vector and two DP
+    // rows for each one, and a transcript of twenty words against ten entries is thousands
+    // of candidates.
+    let mut heard: Vec<&'static str> = Vec::new();
+    let mut previous: Vec<usize> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
     for (form, form_words, term) in &forms {
         let allowed = (form.len() as f32 * TOLERANCE).max(1.0);
+        let allowance = allowed as usize;
         for index in 0..words.len() {
             for width in [*form_words, form_words.saturating_sub(1), form_words + 1] {
                 if width == 0 || index + width > words.len() {
                     continue;
                 }
-                let mut heard: Vec<&'static str> = Vec::new();
+                let heard_len = prefix[index + width] - prefix[index];
+                if heard_len == 0 || form.len().abs_diff(heard_len) > allowance {
+                    continue;
+                }
+                heard.clear();
                 for slot in &spoken[index..index + width] {
                     heard.extend_from_slice(slot);
                 }
-                if heard.is_empty() {
-                    continue;
-                }
-                let distance = distance(form, &heard) as f32;
+                let distance = distance_into(form, &heard, &mut previous, &mut current, allowance) as f32;
                 if distance > allowed {
                     continue;
                 }
@@ -214,17 +231,43 @@ fn strip_stress(symbols: &[&'static str]) -> Vec<&'static str> {
 
 /// Levenshtein distance between two phoneme sequences.
 fn distance(a: &[&str], b: &[&str]) -> usize {
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0usize; b.len() + 1];
+    let mut previous: Vec<usize> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    distance_into(a, b, &mut previous, &mut current, usize::MAX)
+}
+
+/// The same, into buffers the caller keeps, giving up once the answer cannot be within
+/// `max`.
+///
+/// The row minimum only ever rises, so a row whose minimum already exceeds the allowance
+/// cannot produce a distance that fits. A mismatch that is impossible to accept is
+/// rejected after a few rows instead of after the whole matrix.
+fn distance_into(
+    a: &[&str],
+    b: &[&str],
+    previous: &mut Vec<usize>,
+    current: &mut Vec<usize>,
+    max: usize,
+) -> usize {
+    previous.clear();
+    previous.extend(0..=b.len());
+    current.clear();
+    current.resize(b.len() + 1, 0);
     for (i, left) in a.iter().enumerate() {
         current[0] = i + 1;
+        let mut row_min = current[0];
         for (j, right) in b.iter().enumerate() {
             let cost = usize::from(left != right);
-            current[j + 1] = (previous[j] + cost)
+            let value = (previous[j] + cost)
                 .min(previous[j + 1] + 1)
                 .min(current[j] + 1);
+            current[j + 1] = value;
+            row_min = row_min.min(value);
         }
-        std::mem::swap(&mut previous, &mut current);
+        if row_min > max {
+            return max.saturating_add(1);
+        }
+        std::mem::swap(previous, current);
     }
     previous[b.len()]
 }
