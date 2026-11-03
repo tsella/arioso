@@ -510,6 +510,10 @@ client → {"type":"stop"}
 server → {"type":"done","duration":1.85}
 ```
 
+The flush on `stop` is a transcription like any other: if it fails, the session ends on
+`{"type":"error","code":…,"detail":…}` and no `done` follows, because `done` says the work
+finished. Every number in these frames is rounded to a hundredth, `duration` included.
+
 WebSocket TTS protocol:
 
 ```text

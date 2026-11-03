@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::AppState;
+use crate::{AppState, SttFailure};
 
 /// The only rate the streaming path accepts. The engine wants 16 kHz, and resampling a
 /// live stream frame by frame belongs in the capture layer, not here.
@@ -96,6 +96,91 @@ fn seconds(samples: usize) -> f64 {
 
 async fn send(out: &mpsc::Sender<Message>, frame: serde_json::Value) {
     let _ = out.send(Message::Text(frame.to_string().into())).await;
+}
+
+/// A duration or offset in seconds, rounded to a hundredth.
+///
+/// Every other number on this protocol is rounded this way, and a raw `f64` in `duration`
+/// was the one that was not: `0.123456789` next to `0.12` in the same document.
+fn hundredths(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// The code and the safe sentence for a transcription failure.
+///
+/// The engine's own message can name a path or a library symbol, so it goes to the log and
+/// the client gets a stable sentence. The batch route makes the same split, and the two
+/// must not describe one failure differently.
+fn stt_error(failure: &SttFailure) -> (&'static str, String) {
+    match failure {
+        SttFailure::Audio(detail) => ("bad_audio", detail.clone()),
+        SttFailure::Engine(detail) => {
+            tracing::error!(%detail, "the speech engine failed");
+            (
+                "engine_unavailable",
+                "the speech engine failed; the server log has the detail".to_string(),
+            )
+        }
+        SttFailure::NotInstalled(id) => (
+            "model_not_installed",
+            format!("{id} is not installed. Run `arioso models download {id}`."),
+        ),
+    }
+}
+
+/// Transcribe one utterance and send its final frame.
+///
+/// Returns false when the session has to end, which is what an error frame means here: the
+/// stream stops on the frame that says why. The final flush used to discard the failure
+/// and answer `done`, so a client that stopped early on a broken engine was told the
+/// session finished cleanly and lost its only utterance without a word.
+async fn send_utterance(
+    state: &Arc<AppState>,
+    out: &mpsc::Sender<Message>,
+    samples: Vec<f32>,
+    start: usize,
+) -> bool {
+    let length = samples.len();
+    let worker = Arc::clone(state);
+    let result =
+        tokio::task::spawn_blocking(move || worker.transcribe_samples(&samples, STREAM_RATE)).await;
+    match result {
+        Ok(Ok(text)) => {
+            send(
+                out,
+                json!({
+                    "type": "final",
+                    "text": text,
+                    "start": seconds(start),
+                    "end": seconds(start + length),
+                }),
+            )
+            .await;
+            true
+        }
+        Ok(Err(failure)) => {
+            let (code, detail) = stt_error(&failure);
+            send(
+                out,
+                json!({"type": "error", "code": code, "detail": detail}),
+            )
+            .await;
+            false
+        }
+        Err(join) => {
+            tracing::error!(%join, "the transcription task failed");
+            send(
+                out,
+                json!({
+                    "type": "error",
+                    "code": "engine_unavailable",
+                    "detail": "the speech engine failed; the server log has the detail",
+                }),
+            )
+            .await;
+            false
+        }
+    }
 }
 
 async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::OwnedSemaphorePermit) {
@@ -194,6 +279,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                 match message {
                     Message::Binary(bytes) => {
                         let samples = pcm16(&bytes);
+                        let mut failed = false;
                         for event in segmenter.push(&samples) {
                             let Event::Utterance { samples, start } = event else { continue };
                             if samples.len() < MIN_FINAL {
@@ -201,34 +287,13 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                             }
                             last_partial.lock().await.clear();
                             generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            let length = samples.len();
-                            let worker = Arc::clone(&state);
-                            let result = tokio::task::spawn_blocking(move || {
-                                worker.transcribe_samples(&samples, STREAM_RATE)
-                            })
-                            .await;
-                            match result {
-                                Ok(Ok(text)) => {
-                                    send(&out, json!({
-                                        "type": "final",
-                                        "text": text,
-                                        "start": seconds(start as usize),
-                                        "end": seconds(start as usize + length),
-                                    })).await;
-                                }
-                                Ok(Err(failure)) => {
-                                    send(&out, json!({
-                                        "type": "error",
-                                        "detail": failure.to_string(),
-                                    })).await;
-                                }
-                                Err(_) => {
-                                    send(&out, json!({
-                                        "type": "error",
-                                        "detail": "the transcription task failed",
-                                    })).await;
-                                }
+                            if !send_utterance(&state, &out, samples, start as usize).await {
+                                failed = true;
+                                break;
                             }
+                        }
+                        if failed {
+                            break;
                         }
                     }
                     Message::Text(text) => {
@@ -242,28 +307,20 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                             }
                             Some("stop") => {
                                 if let Some(Event::Utterance { samples, start }) = segmenter.flush() {
-                                    let length = samples.len();
-                                    if length >= MIN_FINAL {
-                                        let worker = Arc::clone(&state);
-                                        let result = tokio::task::spawn_blocking(move || {
-                                            worker.transcribe_samples(&samples, STREAM_RATE)
-                                        })
-                                        .await;
-                                        if let Ok(Ok(text)) = result {
-                                            send(&out, json!({
-                                                "type": "final",
-                                                "text": text,
-                                                "start": seconds(start as usize),
-                                                "end": seconds(start as usize + length),
-                                            })).await;
-                                        }
+                                    if samples.len() >= MIN_FINAL
+                                        && !send_utterance(&state, &out, samples, start as usize)
+                                            .await
+                                    {
+                                        // The error frame ended the session; a `done`
+                                        // after it would say the work finished.
+                                        break;
                                     }
                                 }
                                 send(
                                     &out,
                                     json!({
                                         "type": "done",
-                                        "duration": began.elapsed().as_secs_f64(),
+                                        "duration": hundredths(began.elapsed().as_secs_f64()),
                                     }),
                                 )
                                 .await;
@@ -356,6 +413,54 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_final_that_cannot_be_transcribed_answers_with_a_code() {
+        // The final flush discarded the failure and answered `done`, so a client that
+        // stopped early on a broken engine lost its only utterance without a word.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), "hello HH AH0 L OW1\n").unwrap();
+        let mut config = arioso_config::Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        let manifest =
+            arioso_models::Manifest::parse(include_bytes!("../../../models/manifest.json"))
+                .unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let ended = send_utterance(&state, &tx, vec![0.0; STREAM_RATE as usize], 0).await;
+        assert!(!ended, "the session must end on the error");
+
+        let Some(Message::Text(text)) = rx.recv().await else {
+            panic!("no frame arrived");
+        };
+        let frame: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "model_not_installed");
+        let detail = frame["detail"].as_str().unwrap();
+        assert!(detail.contains("models download"), "{detail}");
+        assert!(
+            !detail.contains(dir.path().to_str().unwrap()),
+            "the detail names the filesystem: {detail}"
+        );
+    }
+
+    #[test]
+    fn an_engine_failure_keeps_its_detail_in_the_log() {
+        let (code, detail) = stt_error(&SttFailure::Engine(
+            "onnxruntime: /opt/lib/libonnxruntime.so is missing".to_string(),
+        ));
+        assert_eq!(code, "engine_unavailable");
+        assert!(!detail.contains("onnxruntime"), "{detail}");
+        assert!(!detail.contains('/'), "{detail}");
+    }
+
+    #[test]
+    fn a_duration_is_rounded_to_a_hundredth() {
+        // Every other number on this protocol is rounded this way.
+        assert_eq!(hundredths(0.123_456_789), 0.12);
+        assert_eq!(hundredths(1.855), 1.86);
+    }
 
     #[test]
     fn the_segmenter_takes_its_settings_from_the_config() {
