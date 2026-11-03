@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use arioso_g2p::CmuDict;
-use arioso_stt_sherpa::Whisper;
+use arioso_stt_sherpa::Engine;
 use arioso_tts_piper::{PiperVoice, RenderOptions};
 
 #[test]
@@ -59,7 +59,7 @@ fn a_sentence_survives_the_round_trip() {
             .map(|f| dir.join(&f.name))
             .unwrap()
     };
-    let engine = Whisper::load_files(
+    let engine = Engine::load_files(
         &dir,
         &file("encoder"),
         &file("decoder"),

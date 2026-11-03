@@ -1,13 +1,15 @@
 //! Batch speech to text through sherpa-onnx.
 //!
-//! One engine, one job: take samples at any rate, return text. The model is a Whisper
-//! directory from the sherpa-onnx release, held as a manifest entry so a wrong pair of
-//! files cannot be loaded by accident.
+//! One engine, one job: take samples at any rate, return text. Two families are supported:
+//! Whisper, which the project shipped first, and transducer models (Parakeet, Zipformer),
+//! which the same library loads through a different graph. The manifest names the family,
+//! so a model directory that holds the wrong files is refused rather than guessed at.
 
 use std::path::{Path, PathBuf};
 
 use sherpa_onnx::{
-    OfflineModelConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineWhisperModelConfig,
+    OfflineModelConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig,
+    OfflineWhisperModelConfig,
 };
 
 /// Rate the engine expects. Anything else is resampled on the way in.
@@ -16,8 +18,8 @@ pub const ENGINE_RATE: u32 = 16_000;
 /// What went wrong.
 #[derive(Debug, thiserror::Error)]
 pub enum SttError {
-    /// The model directory does not hold the files a Whisper model needs.
-    #[error("{} does not hold a whisper model: {missing}", dir.display())]
+    /// The model directory does not hold the files the engine needs.
+    #[error("{} does not hold a usable model: {missing}", dir.display())]
     NotAModel {
         /// Directory that was searched.
         dir: PathBuf,
@@ -52,18 +54,121 @@ pub struct Transcript {
     pub text: String,
 }
 
-/// A loaded Whisper model.
-pub struct Whisper {
+/// A loaded model, either family.
+pub struct Engine {
     recognizer: OfflineRecognizer,
 }
 
-impl std::fmt::Debug for Whisper {
+impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Whisper { .. }")
+        f.write_str("Engine { .. }")
     }
 }
 
-impl Whisper {
+/// What one file in a model directory is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Encoder,
+    Decoder,
+    Joiner,
+    Tokens,
+}
+
+/// The role of a file, decided by its name.
+///
+/// The catalog names the files, and every sherpa-onnx export uses the same words for the
+/// parts of a graph, so the name is enough. A joiner is the file that makes a model a
+/// transducer: Whisper has none, Parakeet and Zipformer cannot work without one.
+fn role_of(path: &Path) -> Option<Role> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.contains("joiner") {
+        Some(Role::Joiner)
+    } else if name.contains("encoder") {
+        Some(Role::Encoder)
+    } else if name.contains("decoder") {
+        Some(Role::Decoder)
+    } else if name.contains("tokens") {
+        Some(Role::Tokens)
+    } else {
+        None
+    }
+}
+
+impl Engine {
+    /// Load the model a manifest entry describes.
+    ///
+    /// `model_type` is the sherpa-onnx model type, the same value the manifest carries in
+    /// `meta.model_type`: `whisper`, or a transducer type such as `nemo_transducer` or
+    /// `zipformer`. An absent value means Whisper, which is what every entry written
+    /// before transducers existed means.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SttError::NotAModel`] when a file is missing, and [`SttError::Load`]
+    /// when the recognizer refuses the configuration.
+    pub fn from_manifest_files(
+        dir: &Path,
+        files: &[PathBuf],
+        model_type: Option<&str>,
+        language: Option<&str>,
+        threads: usize,
+    ) -> Result<Self, SttError> {
+        let find = |role: Role| {
+            files
+                .iter()
+                .find(|path| role_of(path) == Some(role))
+                .cloned()
+        };
+        let encoder = find(Role::Encoder).ok_or_else(|| not_a_model(dir, "an encoder *.onnx"))?;
+        let decoder = find(Role::Decoder).ok_or_else(|| not_a_model(dir, "a decoder *.onnx"))?;
+        let tokens = find(Role::Tokens).ok_or_else(|| not_a_model(dir, "a *tokens.txt"))?;
+        let model_type = model_type.unwrap_or("whisper");
+        if model_type == "whisper" {
+            return Self::load_files(dir, &encoder, &decoder, &tokens, language, threads);
+        }
+        let joiner = find(Role::Joiner)
+            .ok_or_else(|| not_a_model(dir, "a joiner *.onnx, which a transducer needs"))?;
+        Self::load_transducer(
+            dir, &encoder, &decoder, &joiner, &tokens, model_type, threads,
+        )
+    }
+
+    /// Load a transducer model: encoder, decoder, joiner, tokens.
+    ///
+    /// `model_type` is the sherpa-onnx name for the graph, `nemo_transducer` for Parakeet
+    /// and `zipformer` for the Zipformer exports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SttError::Load`] when the recognizer refuses the configuration.
+    pub fn load_transducer(
+        dir: &Path,
+        encoder: &Path,
+        decoder: &Path,
+        joiner: &Path,
+        tokens: &Path,
+        model_type: &str,
+        threads: usize,
+    ) -> Result<Self, SttError> {
+        let config = OfflineRecognizerConfig {
+            model_config: OfflineModelConfig {
+                transducer: OfflineTransducerModelConfig {
+                    encoder: Some(encoder.display().to_string()),
+                    decoder: Some(decoder.display().to_string()),
+                    joiner: Some(joiner.display().to_string()),
+                },
+                tokens: Some(tokens.display().to_string()),
+                model_type: Some(model_type.to_owned()),
+                num_threads: i32::try_from(threads).unwrap_or(4),
+                ..OfflineModelConfig::default()
+            },
+            ..OfflineRecognizerConfig::default()
+        };
+        let recognizer =
+            OfflineRecognizer::create(&config).ok_or_else(|| SttError::Load(dir.to_owned()))?;
+        Ok(Self { recognizer })
+    }
+
     /// Load a Whisper model directory.
     ///
     /// The directory is searched for an encoder, a decoder, and a tokens file, in that
@@ -348,7 +453,7 @@ mod tests {
     #[test]
     fn a_directory_without_a_model_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let error = Whisper::load(dir.path(), Some("en"), 1).unwrap_err();
+        let error = Engine::load(dir.path(), Some("en"), 1).unwrap_err();
         assert!(matches!(error, SttError::NotAModel { .. }));
         assert!(error.to_string().contains("encoder"), "{error}");
     }
@@ -359,8 +464,51 @@ mod tests {
         std::fs::write(dir.path().join("tiny.en-encoder.int8.onnx"), b"").unwrap();
         std::fs::write(dir.path().join("base.en-decoder.int8.onnx"), b"").unwrap();
         std::fs::write(dir.path().join("tiny.en-tokens.txt"), b"").unwrap();
-        let error = Whisper::load(dir.path(), Some("en"), 1).unwrap_err();
+        let error = Engine::load(dir.path(), Some("en"), 1).unwrap_err();
         assert!(matches!(error, SttError::Mixed { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_file_is_named_for_the_part_of_the_graph_it_holds() {
+        let role = |name: &str| role_of(Path::new(name));
+        assert_eq!(role("base.en-encoder.int8.onnx"), Some(Role::Encoder));
+        assert_eq!(role("base.en-decoder.int8.onnx"), Some(Role::Decoder));
+        assert_eq!(role("joiner.int8.onnx"), Some(Role::Joiner));
+        assert_eq!(role("tokens.txt"), Some(Role::Tokens));
+        assert_eq!(role("manifest.json"), None);
+    }
+
+    #[test]
+    fn a_transducer_without_a_joiner_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        for path in &paths {
+            std::fs::write(path, b"").unwrap();
+        }
+        let error =
+            Engine::from_manifest_files(dir.path(), &paths, Some("nemo_transducer"), None, 1)
+                .unwrap_err();
+        assert!(matches!(error, SttError::NotAModel { .. }), "{error}");
+        assert!(error.to_string().contains("joiner"), "{error}");
+    }
+
+    #[test]
+    fn a_transducer_entry_without_a_family_is_read_as_whisper() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        for path in &paths {
+            std::fs::write(path, b"").unwrap();
+        }
+        // No family means Whisper, so the stub files reach the engine and it refuses them.
+        // The point of the test is that a joiner is not demanded of an old entry.
+        let error = Engine::from_manifest_files(dir.path(), &paths, None, None, 1).unwrap_err();
+        assert!(matches!(error, SttError::Load(_)), "{error}");
     }
 
     #[test]
@@ -380,7 +528,7 @@ mod tests {
         std::fs::write(dir.path().join("tokens.txt"), b"").unwrap();
         // Loading may fail on a stub model; the empty-audio check is what matters and
         // it must not need a real engine.
-        if let Ok(engine) = Whisper::load(dir.path(), Some("en"), 1) {
+        if let Ok(engine) = Engine::load(dir.path(), Some("en"), 1) {
             assert!(matches!(
                 engine.transcribe(&[], 16_000),
                 Err(SttError::EmptyAudio)

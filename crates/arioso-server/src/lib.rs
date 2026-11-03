@@ -74,7 +74,7 @@ pub struct AppState {
     user: Mutex<UserState>,
     voice: Mutex<Option<PiperVoice>>,
     /// Whisper, loaded on first use. One model, so one slot.
-    stt: Mutex<Option<arioso_stt_sherpa::Whisper>>,
+    stt: Mutex<Option<arioso_stt_sherpa::Engine>>,
     /// Where the config came from, so a patch can be written back. Absent when the
     /// server was started with defaults and no file.
     config_file: Option<std::path::PathBuf>,
@@ -446,8 +446,8 @@ impl AppState {
     /// The engine, loaded on first use.
     fn ensure_engine<'a>(
         &'a self,
-        slot: &'a mut Option<arioso_stt_sherpa::Whisper>,
-    ) -> Result<&'a arioso_stt_sherpa::Whisper, SttFailure> {
+        slot: &'a mut Option<arioso_stt_sherpa::Engine>,
+    ) -> Result<&'a arioso_stt_sherpa::Engine, SttFailure> {
         if slot.is_none() {
             let spec = self
                 .stt_spec()
@@ -463,27 +463,24 @@ impl AppState {
             };
             let threads = std::thread::available_parallelism()
                 .map_or(4, |count| (count.get() / 2).clamp(1, 8));
-            // The manifest names the files, so a directory holding two models still
-            // loads the one the config asks for.
-            let file = |needle: &str| {
-                spec.files
-                    .iter()
-                    .find(|f| f.name.contains(needle))
-                    .map(|f| self.models_dir.join(&f.name))
-            };
-            let engine = match (file("encoder"), file("decoder"), file("tokens")) {
-                (Some(encoder), Some(decoder), Some(tokens)) => {
-                    arioso_stt_sherpa::Whisper::load_files(
-                        &self.models_dir,
-                        &encoder,
-                        &decoder,
-                        &tokens,
-                        language,
-                        threads,
-                    )
-                }
-                _ => arioso_stt_sherpa::Whisper::load(&self.models_dir, language, threads),
-            };
+            // The manifest names the files and the family, so a directory holding two
+            // models still loads the one the config asks for.
+            let paths: Vec<std::path::PathBuf> = spec
+                .files
+                .iter()
+                .map(|f| self.models_dir.join(&f.name))
+                .collect();
+            let model_type = spec
+                .meta
+                .get("model_type")
+                .and_then(serde_json::Value::as_str);
+            let engine = arioso_stt_sherpa::Engine::from_manifest_files(
+                &self.models_dir,
+                &paths,
+                model_type,
+                language,
+                threads,
+            );
             *slot =
                 Some(engine.map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?);
         }
@@ -494,7 +491,7 @@ impl AppState {
     /// Transcribe samples and run the dictionary over the result.
     fn hear(
         &self,
-        engine: &arioso_stt_sherpa::Whisper,
+        engine: &arioso_stt_sherpa::Engine,
         samples: &[f32],
         rate: u32,
     ) -> Result<String, SttFailure> {

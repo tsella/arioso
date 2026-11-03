@@ -926,28 +926,24 @@ fn load_engine(
     model: &str,
     language: Option<&str>,
     threads: usize,
-) -> Result<arioso_stt_sherpa::Whisper> {
+) -> Result<arioso_stt_sherpa::Engine> {
     let manifest_path = dir.join("manifest.json");
     if let Ok(text) = std::fs::read_to_string(&manifest_path) {
         if let Ok(manifest) = arioso_models::Manifest::parse(text.as_bytes()) {
             if let Some(spec) = manifest.models.iter().find(|spec| spec.id == model) {
-                let file = |needle: &str| {
-                    spec.files
-                        .iter()
-                        .find(|f| f.name.contains(needle))
-                        .map(|f| dir.join(&f.name))
-                };
-                if let (Some(encoder), Some(decoder), Some(tokens)) =
-                    (file("encoder"), file("decoder"), file("tokens"))
-                {
-                    return Ok(arioso_stt_sherpa::Whisper::load_files(
-                        dir, &encoder, &decoder, &tokens, language, threads,
-                    )?);
-                }
+                let paths: Vec<std::path::PathBuf> =
+                    spec.files.iter().map(|f| dir.join(&f.name)).collect();
+                let model_type = spec
+                    .meta
+                    .get("model_type")
+                    .and_then(serde_json::Value::as_str);
+                return Ok(arioso_stt_sherpa::Engine::from_manifest_files(
+                    dir, &paths, model_type, language, threads,
+                )?);
             }
         }
     }
-    Ok(arioso_stt_sherpa::Whisper::load(dir, language, threads)?)
+    Ok(arioso_stt_sherpa::Engine::load(dir, language, threads)?)
 }
 
 /// Transcribe a file, with the user dictionary applied to the result.
