@@ -824,6 +824,23 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The config file of the configured voice, when that voice is on disk.
+///
+/// The catalog names the file, so a voice that is merely listed resolves here even before
+/// anything is downloaded. Resolving is not installing: the path comes back only when the
+/// file is there, because the caller reads it and a fresh install that has a dictionary
+/// must not abort `doctor` over a voice nobody has fetched yet.
+fn voice_config_path(config: &Config, models: &Path) -> Option<PathBuf> {
+    let manifest = load_manifest(config).ok()?;
+    let file = manifest
+        .find_voice(&config.tts.voice)?
+        .files
+        .iter()
+        .find(|file| file.name.ends_with(".onnx.json"))?;
+    let path = models.join(&file.name);
+    path.is_file().then_some(path)
+}
+
 /// Report the user dictionary, and the entries the configured voice cannot say.
 fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Result<usize> {
     let path = config.dictionary_path(Some(config_path));
@@ -843,17 +860,7 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     // The voice's symbol inventory lives in its config, so no model is loaded. The catalog
     // names the file: a directory scan matched nothing when `tts.voice` was a catalog id
     // rather than the bare name, and reported a voice that was installed as missing.
-    let voice_config = load_manifest(config).ok().and_then(|manifest| {
-        manifest
-            .find_voice(&config.tts.voice)
-            .and_then(|spec| {
-                spec.files
-                    .iter()
-                    .find(|file| file.name.ends_with(".onnx.json"))
-            })
-            .map(|file| models.join(&file.name))
-    });
-    let Some(voice_config) = voice_config else {
+    let Some(voice_config) = voice_config_path(config, models) else {
         println!(
             "            voice {} is not installed, so entries were not checked",
             config.tts.voice
@@ -1084,5 +1091,44 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MANIFEST: &str = include_str!("../../../models/manifest.json");
+
+    /// A fresh install: the catalog is there, the voice it names is not.
+    fn fresh_install() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), MANIFEST).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.voice = "piper-en_US-lessac-medium".to_owned();
+        (dir, config)
+    }
+
+    #[test]
+    fn a_voice_that_is_listed_but_not_downloaded_has_no_config() {
+        // The catalog names the voice, so it resolves before anything is fetched. Reading
+        // that path aborted `doctor` with ENOENT for anyone who had a dictionary and no
+        // models yet, which is the first run.
+        let (dir, config) = fresh_install();
+        assert_eq!(voice_config_path(&config, dir.path()), None);
+
+        // The file the catalog names is what the check reads, and nothing else counts.
+        let named = dir.path().join("en_US-lessac-medium.onnx.json");
+        std::fs::write(&named, "{}").unwrap();
+        assert_eq!(voice_config_path(&config, dir.path()), Some(named));
+    }
+
+    #[test]
+    fn a_voice_the_catalog_does_not_hold_has_no_config() {
+        let (dir, mut config) = fresh_install();
+        config.tts.voice = "no-such-voice".to_owned();
+        std::fs::write(dir.path().join("en_US-lessac-medium.onnx.json"), "{}").unwrap();
+        assert_eq!(voice_config_path(&config, dir.path()), None);
     }
 }
