@@ -80,12 +80,26 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
     let mut bits = 0u16;
     let mut data: Option<&[u8]> = None;
 
-    let mut at = 12;
-    while at + 8 <= bytes.len() {
+    let mut at: usize = 12;
+    while at
+        .checked_add(8)
+        .is_some_and(|end| end <= bytes.len())
+    {
         let id = &bytes[at..at + 4];
         let size = u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]])
             as usize;
-        let body = bytes.get(at + 8..at + 8 + size).unwrap_or(&[]);
+        // A declared size is attacker controlled: it can be larger than the file, and on a
+        // 32-bit target it can overflow the pointer-sized arithmetic that follows. Both are
+        // refused rather than allowed to wrap or to pass as an empty chunk, because a
+        // truncated data chunk that reads as zero samples is a silent wrong answer.
+        let start = at.checked_add(8).ok_or_else(|| invalid("chunk offset overflows"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| invalid("chunk size overflows"))?;
+        if end > bytes.len() {
+            return Err(invalid("chunk runs past the end of the file"));
+        }
+        let body = &bytes[start..end];
         match id {
             b"fmt " => {
                 if body.len() < 16 {
@@ -99,7 +113,10 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
             b"data" => data = Some(body),
             _ => {}
         }
-        at += 8 + size + (size & 1);
+        // Chunks are word aligned: an odd size carries one pad byte.
+        at = end
+            .checked_add(size & 1)
+            .ok_or_else(|| invalid("chunk offset overflows"))?;
     }
 
     let data = data.ok_or_else(|| invalid("no data chunk"))?;
@@ -227,6 +244,79 @@ mod tests {
         let samples = [0.0, 0.5, -0.5];
         let wav = to_bytes(&samples, 16_000);
         assert_eq!(&wav[44..], pcm_s16le(&samples).as_slice());
+    }
+
+    /// A RIFF header with one chunk of the given id and declared size, and `body` bytes.
+    fn chunked(id: &[u8; 4], declared: u32, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(id);
+        bytes.extend_from_slice(&declared.to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    fn fmt_body() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        body.extend_from_slice(&1u16.to_le_bytes()); // mono
+        body.extend_from_slice(&16_000u32.to_le_bytes());
+        body.extend_from_slice(&32_000u32.to_le_bytes());
+        body.extend_from_slice(&2u16.to_le_bytes());
+        body.extend_from_slice(&16u16.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn a_chunk_larger_than_the_file_is_refused() {
+        // The declared size is the whole of `u32`, which on a 32-bit target would wrap the
+        // offset arithmetic and on any target runs past the buffer.
+        let mut bytes = chunked(b"fmt ", u32::MAX, &fmt_body());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        let error = read_bytes(&bytes).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("past the end"), "{error}");
+    }
+
+    #[test]
+    fn a_truncated_data_chunk_is_refused_rather_than_read_as_silence() {
+        // The header promises 400 bytes; the file carries 4. Reading it as an empty body
+        // would decode to no samples and report success.
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&fmt_body());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&400u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        let error = read_bytes(&bytes).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+    }
+
+    #[test]
+    fn an_odd_chunk_size_still_finds_the_next_chunk() {
+        // A 5 byte chunk carries one pad byte, and the data chunk after it must be read.
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&fmt_body());
+        bytes.extend_from_slice(b"LIST");
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"hello");
+        bytes.push(0); // the pad byte
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        let (samples, rate) = read_bytes(&bytes).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples.len(), 2);
     }
 
     #[test]
