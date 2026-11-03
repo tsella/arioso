@@ -199,6 +199,19 @@ struct Scanned {
     end: usize,
 }
 
+/// Whether the comma at `index` is a thousands separator.
+///
+/// It has to be followed by exactly three digits and then something that is not a digit.
+/// Taking any comma turned `In 2026, hello` into `In two thousand twenty six hello`: the
+/// comma was eaten and the year changed reading from `twenty twenty six`.
+fn is_thousands_separator(chars: &[char], index: usize) -> bool {
+    let digits = chars
+        .get(index + 1..index + 4)
+        .is_some_and(|run| run.iter().all(char::is_ascii_digit));
+    let ends = !chars.get(index + 4).is_some_and(char::is_ascii_digit);
+    digits && ends
+}
+
 /// Read digits, optional thousands separators, and an optional decimal part.
 fn scan_number(chars: &[char], start: usize) -> Option<Scanned> {
     let mut index = start;
@@ -213,7 +226,7 @@ fn scan_number(chars: &[char], start: usize) -> Option<Scanned> {
                 .checked_add(u64::from(ch as u8 - b'0'))?;
             digits += 1;
             index += 1;
-        } else if ch == ',' && digits > 0 {
+        } else if ch == ',' && digits > 0 && is_thousands_separator(chars, index) {
             separated = true;
             index += 1;
         } else {
@@ -301,6 +314,21 @@ fn scan_time(chars: &[char], start: usize) -> Option<(u64, u64, u64, usize)> {
 
 /// Read an ordinal suffix and return it with the index after.
 fn scan_ordinal_suffix(chars: &[char], start: usize) -> Option<(&'static str, usize)> {
+    // The suffix has to end the word, with one exception: an adverb keeps it, because
+    // `2ndly` is `secondly` and a voice should say that. Without the boundary, `1stand`
+    // reads as `first` + `and` and the reader hears `firstand`.
+    let lower = |offset: usize| {
+        chars
+            .get(start + offset)
+            .map(|ch| ch.to_ascii_lowercase())
+    };
+    let follows_alnum = chars.get(start + 2).is_some_and(|ch| ch.is_alphanumeric());
+    let adverb = lower(2) == Some('l')
+        && lower(3) == Some('y')
+        && !chars.get(start + 4).is_some_and(|ch| ch.is_alphanumeric());
+    if follows_alnum && !adverb {
+        return None;
+    }
     let rest: String = chars.get(start..start + 2)?.iter().collect();
     let suffix = match rest.to_lowercase().as_str() {
         "st" => "st",
@@ -512,6 +540,28 @@ fn scan_marker(chars: &[char], start: usize) -> Option<(bool, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comma_after_a_year_is_not_a_thousands_separator() {
+        // The comma was eaten and the year changed reading: `two thousand twenty six`
+        // instead of `twenty twenty six`.
+        assert_eq!(normalize("In 2026, hello"), "In twenty twenty six, hello");
+        assert_eq!(normalize("2026"), "twenty twenty six");
+        // A real separator still works, in both forms.
+        assert_eq!(normalize("1,000 items"), "one thousand items");
+        assert_eq!(normalize("12,345,678"), "twelve million three hundred forty five thousand six hundred seventy eight");
+        // A comma between digits that is not a group of three is left alone.
+        assert!(!normalize("1,2 things").contains("twelve"));
+    }
+
+    #[test]
+    fn an_ordinal_suffix_must_end_its_word() {
+        // `1stand` used to read as `first` + `and`.
+        assert_eq!(normalize("1stand"), "onestand");
+        assert_eq!(normalize("the 1st and the 2nd"), "the first and the second");
+        // An adverb keeps its ordinal, because `secondly` is the word.
+        assert_eq!(normalize("2ndly"), "secondly");
+    }
 
     #[test]
     fn cardinals() {
