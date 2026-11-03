@@ -98,9 +98,11 @@ ones that did.
   this machine. The level is kept for the fused kernels, not for a measured win.
 
 One change was reverted after it was measured. Bounding the ONNX intra-op threads to half
-the cores, to leave room for a server's other work, cost **26% of synthesis time** on four
-cores: 36.5 s against 28.9 s. The thread count is every core now, because one voice
-synthesizes one request at a time and the graph is the only work in flight.
+the cores cost between a fifth and a quarter of the synthesis time on four cores: 36.5 s and
+36.8 s on two runs against 28.7 s to 30.2 s on three runs of the older build, for the same
+316 s of audio. The reasoning behind the bound, leaving room for the server's other work,
+was wrong for this design: one voice synthesizes one request at a time, so the graph is the
+only work in flight. The count is every core now.
 
 ## Limits
 

@@ -151,7 +151,8 @@ impl PiperVoice {
         // Level 3 fuses the graph; the default is Level 1, which leaves the fused kernels
         // unused. The thread count is set rather than left to the runtime, and it is every
         // core: one voice synthesizes one request at a time, so the graph is the only work
-        // in flight. Halving it cost 26% of synthesis time on a four core machine.
+        // in flight. Halving it cost a fifth to a quarter of the synthesis time on a four
+        // core machine.
         let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?

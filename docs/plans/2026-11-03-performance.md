@@ -53,8 +53,9 @@ eleven phonemes), and synthesis time itself (29.9 s against 29.0 s, inside a plu
 three percent spread).
 
 One change was reverted after it was measured. Bounding the ONNX intra-op threads to half
-the cores cost 26 percent of synthesis time on four cores: 36.5 s against 28.9 s for the
-same 316 s of audio. The reasoning behind the bound, leaving room for the server's other
+the cores cost between a fifth and a quarter of the synthesis time on four cores: 36.5 s and
+36.8 s on two runs against 28.7 s to 30.2 s on three runs of the older build, for the same
+316 s of audio. The reasoning behind the bound, leaving room for the server's other
 work, was wrong for this design: one voice synthesizes one request at a time, so the graph
 is the only work in flight. The count is every core now.
 
