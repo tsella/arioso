@@ -269,10 +269,14 @@ The engine is sherpa-onnx (Apache-2.0). It gives one dependency for both paths,
 because it runs batch models and natively streaming models behind the same C API.
 
 - F4.1 Two model families, selected per model, not per request:
-  - Batch: Whisper (multilingual, best accuracy) and SenseVoice (fast, Chinese
-    and English) for uploaded files.
+  - Batch: Whisper and transducer models (Parakeet, and Zipformer run offline) for
+    uploaded files. The family comes from the catalog entry, in `meta.model_type`;
+    an entry without it is read as Whisper.
   - Streaming: Zipformer transducer models, which emit partials as audio arrives.
     This is the model family the WebSocket path uses.
+  The default batch model is Parakeet v2, because it measured best on both corpora at
+  whisper-base speed. The measurements, the languages each model covers, and the
+  licenses are in docs/models.md.
 - F4.2 Batch endpoint accepts `audio/wav`, `audio/mpeg`, `audio/ogg`, and raw PCM.
   Files are transcoded to 16 kHz mono in process.
 - F4.3 Response includes the full text, segment list with start and end times, and
@@ -365,7 +369,7 @@ because it runs batch models and natively streaming models behind the same C API
   "stt": {
     "enabled": true,
     "engine": "sherpa",
-    "batch_model": "sherpa-whisper-base",
+    "batch_model": "sherpa-parakeet-tdt-0.6b-v2-en",
     "stream_model": "sherpa-zipformer-en",
     "language": "auto",
     "partials": true,

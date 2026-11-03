@@ -412,6 +412,8 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 More worked examples, with the real output of each, are in [examples.md](examples.md).
 Guidance for putting this in your own program, with a use case per shape, is in
 [IMPLEMENTATION.md](IMPLEMENTATION.md). The product requirements are in [PRD.md](PRD.md).
+Which models are measured, what they cost, which languages they cover, and the evidence
+behind the defaults is in [docs/models.md](docs/models.md).
 The execution plan is in [docs/plans/](docs/plans/). Mistakes that cost time, and the rules
 that prevent repeats, are in [docs/lessons.md](docs/lessons.md). If you are changing this
 repository, read [AGENTS.md](AGENTS.md).

@@ -49,18 +49,35 @@ controls how numbers, times and money are spoken.
 ## Transcribe a recording
 
 ```rust
-use arioso_stt_sherpa::{resample, Whisper};
+use arioso_stt_sherpa::Engine;
 
 let (samples, rate) = arioso_tts_piper::wav::read(&clip)?;
-let samples = resample(&samples, rate, 16_000);
-let engine = Whisper::load(&model_dir, Some("en"), 4)?;
-let transcript = engine.transcribe(&samples, 16_000)?;
+let engine = Engine::load(&model_dir, Some("en"), 4)?;
+let transcript = engine.transcribe(&samples, rate)?;
 println!("{}", transcript.text);
 ```
 
-The engine takes a directory, because a Whisper model is several files. Load it once: the
-engine holds the weights, and a second load doubles the memory for no gain. A language
-hint raises accuracy on short clips; leave it out and the model decides.
+The engine takes a directory, because a model is several files. Load it once: the engine
+holds the weights, and a second load doubles the memory for no gain. A language hint raises
+accuracy on short clips; leave it out and the model decides.
+
+`Engine::load` reads a Whisper directory. A transducer (Parakeet, Zipformer) needs a joiner
+as well, so it is loaded by name:
+
+```rust
+use arioso_stt_sherpa::Engine;
+
+let engine = Engine::load_transducer(
+    &model_dir, &encoder, &decoder, &joiner, &tokens, "nemo_transducer", 4,
+)?;
+```
+
+A caller that holds the catalog entry does not have to decide: `Engine::from_manifest_files`
+takes the entry's file list and its `meta.model_type`, and picks the right family. That is
+what the server and the CLI do.
+
+`transcribe` takes any sample rate and cuts long audio into 29 second windows itself, so one
+call handles a 27 minute recording. The windows end in pauses where the audio has them.
 
 ## Give a program in another language a voice
 

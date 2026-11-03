@@ -206,3 +206,31 @@ rule refused it.
 
 Resolve the bind once, before the rules run, and let every rule ask the resolved address.
 One resolution, one answer, and nothing gets to skip a check by being unreadable.
+
+## A model card is not a measurement
+
+Three engines were compared on two corpora before any of them was wired in: whisper base,
+whisper small, Parakeet v2 and v3, Zipformer. Parakeet won both, at whisper-base speed. The
+larger Whisper lost to the smaller one on both corpora, by dropping words rather than
+mishearing them. The fastest model, Zipformer, was the worst on conversation.
+
+The rules that came out of it: measure on the corpus the product will see, because
+contemporary speech and 1895 prose do not score the same; feed every engine the same cuts,
+because a harness that cuts at fixed marks and a project that cuts at pauses are not
+measuring the same thing; and report the plain number beside the folded one, because a
+spelling difference is not a listening error.
+
+## A vendor's speed claim is about their hardware
+
+BlueTTS calls itself the fastest open source TTS. On four CPU cores it took 6.7 times the
+synthesis time of the piper voice it was compared against, and five times the memory. It was
+the more intelligible of the two by a point, which is a real reason to offer it and no
+reason to repeat the claim.
+
+## Punctuation is the pacing signal
+
+A text chunker that splits on a period and a space drops the full stops. The engine then
+receives unpunctuated run-on text, speaks it at 305 words per minute instead of 229, and the
+round trip scored 36 percent instead of 4.88. The tell was that the same 600 characters
+synthesized alone came back clean: when a defect depends on how pieces are assembled and not
+on the pieces, the assembly is the suspect.
