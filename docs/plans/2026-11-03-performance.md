@@ -49,7 +49,7 @@ targets. Every row is in `BENCHMARK.md`.
 
 Three changes measured flat and are recorded as flat: the `Arc<Config>` (the route costs
 285 us, the copy was a few of them), the `i64` phoneme sequence (one allocation per chunk of
-eleven phonemes), and synthesis time itself (29.9 s against 29.0 s, inside a plus or minus
+eleven phonemes), and synthesis time itself (30.0 s against 29.0 s, inside a plus or minus
 three percent spread).
 
 One change was reverted after it was measured. Bounding the ONNX intra-op threads to half

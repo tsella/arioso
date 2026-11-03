@@ -29,7 +29,7 @@ at, not a workstation, so the numbers are pessimistic on purpose.
 
 | what | audio | wall | RTF | peak RSS |
 | --- | --- | --- | --- | --- |
-| synthesis, `en_US-joe-medium` | 316.44 s | 29.9 s | 0.095 | 522 MB |
+| synthesis, `en_US-joe-medium` | 316.44 s | 30.0 s | 0.095 | 522 MB |
 | transcription, `sherpa-whisper-tiny-en` | 600.00 s | 81.2 s | 0.135 | 548 MB |
 
 ## Server
@@ -94,7 +94,7 @@ ones that did.
   converting a `u32` one saves one allocation per chunk, and 11 phonemes is too small a
   chunk to show it: 0.26 µs against 0.25 µs.
 - **Synthesis time.** The graph now runs at optimization level 3, and the end-to-end time is
-  29.9 s against 29.0 s on the older build: inside the run-to-run spread, which is ±3% on
+  30.0 s against 29.0 s on the older build: inside the run-to-run spread, which is ±3% on
   this machine. The level is kept for the fused kernels, not for a measured win.
 
 One change was reverted after it was measured. Bounding the ONNX intra-op threads to half
