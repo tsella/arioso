@@ -11,18 +11,18 @@ no audio leaving the box.
 Named for the musical term: a melodious, singing style of delivery.
 
 arioso is a Rust library and a single binary. It speaks with Piper voices and listens with
-Whisper, streams both ways over WebSocket, and gives you a place to correct the
-pronunciation of your own names in both directions.
+Parakeet or Whisper through sherpa-onnx, streams both ways over WebSocket, and gives you a
+place to correct the pronunciation of your own names in both directions.
 
 ```console
 $ arioso say "hello world. this is arioso speaking locally."
-wrote arioso.wav (2.11 s at 22050 Hz)
-1 word(s) not in the dictionary, spoken by spelling rules: arioso
+wrote out.wav (3.16 s at 22050 Hz)
 ```
 
-That line is the point of the dictionary section below: a word the built-in dictionary
-does not hold is spoken by spelling rules, and named, so a guess is never silent. The
-length moves by a few hundredths between runs, because the model samples noise.
+A word the built-in dictionary does not hold is spoken by spelling rules and named on a
+second line, so a guess is never silent. `arioso` is in the shipped dictionary, which is why
+this run has no such line. The length moves by a few hundredths between runs, because the
+model samples noise.
 
 ## Why this exists
 
@@ -31,9 +31,8 @@ server. That is fine for a shopping list and wrong for a support call, a medical
 anything under a confidentiality agreement. arioso keeps the sentence on the machine that
 read it.
 
-It is not a cloud service in a box. It runs a 63 MiB voice on the CPU, at about a twelfth
-of real time on a four-core N150 with no GPU. You trade voice quality and latency for
-that.
+It is not a cloud service in a box. It runs a 60 MiB voice on the CPU, at about a tenth of
+real time on a four-core N150 with no GPU. You trade voice quality and latency for that.
 
 ## Status
 
@@ -44,9 +43,9 @@ Working today:
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
 - A user dictionary for names and jargon, reloaded without a restart
 - Spelling rules for words the dictionary does not hold, reported, never silent
-- Speech to text: Whisper through sherpa-onnx, batch, from a WAV file
+- Speech to text: Parakeet or Whisper through sherpa-onnx, batch, from a WAV file
 - `arioso doctor`, which says what is wrong before a request fails
-- 144 tests
+- 288 tests
 
 Not built yet:
 
@@ -58,7 +57,8 @@ Not built yet:
 
 ## Requirements
 
-- Rust 1.91 or newer
+- Rust 1.85 or newer, the floor the workspace declares. 1.91 is the only version this
+  project builds and tests on
 - ONNX Runtime 1.22, unpacked into `vendor/onnxruntime`
 - A Piper voice and the CMU dictionary, about 64 MiB together
 
@@ -133,36 +133,28 @@ It costs three dollars and ninety nine cents on the third at two thirty in the a
 
 ## Voices
 
-Four voices beyond the default, all verified by SHA-256 against the manifest:
+The catalog's voices, all verified by SHA-256 against the manifest:
 
 | id | tier | rate | licence | commercial |
 | --- | --- | --- | --- | --- |
-| `piper-en_US-lessac-medium` | medium | 22.05 kHz | Blizzard-2013 | no |
+| `piper-en_US-lessac-medium` | medium, the default | 22.05 kHz | Blizzard-2013 | no |
 | `piper-en_US-ljspeech-high` | high | 22.05 kHz | public domain | yes |
 | `piper-en_US-joe-medium` | medium | 22.05 kHz | CC0 | yes |
 | `piper-en_US-kathleen-low` | low | 16 kHz | CC0 | yes |
 | `piper-en_GB-alba-medium` | medium | 22.05 kHz | CC BY 4.0 | yes |
 
-Pick one with `ARIOSO_TTS_VOICE` or `tts.voice`. Measured on four cores with no GPU, same
-sentence, model load included:
-
-| voice | wall clock | audio | real time factor |
-| --- | --- | --- | --- |
-| `en_US-kathleen-low` | 2.40 s | 5.38 s | 0.45 |
-| `en_US-joe-medium` | 2.47 s | 4.92 s | 0.50 |
-| `en_GB-alba-medium` | 2.47 s | 4.83 s | 0.51 |
-| `en_US-lessac-medium` | 2.53 s | 5.03 s | 0.50 |
-| `en_US-ljspeech-high` | 5.77 s | 5.83 s | 0.99 |
-
-The high tier costs twice the time of medium and is not twice the voice. The low tier is
-the fastest and the smallest file, at 16 kHz.
+Pick one with `ARIOSO_TTS_VOICE` or `tts.voice`. Measured cost per voice, with model load
+included, is in [MODELS.md](MODELS.md): the four medium and low voices sit within a fifth of
+each other, and the high tier costs about five times as much. The low tier is also the
+smallest file, at 16 kHz.
 
 ## Speech to text
 
 `arioso transcribe` takes a WAV file, mono, 16-bit PCM or 32-bit float, at any rate. The
-audio is resampled to 16 kHz and read by Whisper base, the catalog default at 153 MiB.
-Whisper tiny is in the catalog too, at 99 MiB, and it is not as accurate: on the same
-recording it wrote "Tonseller built REO so" where base wrote "Tom Sella built a Rio so".
+audio is resampled to 16 kHz and read by the model in `stt.batch_model`, which defaults to
+Parakeet v2 at 631 MiB. Whisper base and tiny are in the catalog at 153 and 99 MiB for a
+smaller install; tiny is the least accurate of the three, and on the same recording it wrote
+"Tonseller built REO so" where base wrote "Tom Sella built a Rio so".
 
 ```console
 $ arioso transcribe hello.wav
@@ -174,7 +166,7 @@ The quick brown fox jumps over the lazy dog.
 ```console
 $ curl -X POST --data-binary @hello.wav -H 'Content-Type: audio/wav' \
     http://127.0.0.1:10101/v1/stt
-{"seconds":2.67,"text":"The quick brown fox jumps over the lazy dog."}
+{"text":"The quick brown fox jumps over the lazy dog.","seconds":2.67}
 ```
 
 `GET /v1/stt/ws` streams. The client sends a start frame, then 16 kHz mono `s16le` PCM,
@@ -190,6 +182,9 @@ server → {"type":"final","text":"The quick brown fox jumps over the lazy dog."
 client → {"type":"cancel"}
 server → {"type":"cancelled"}
 ```
+
+A failure answers `{"type":"error","code":...,"detail":...}` with a sentence safe to show a
+user, and ends the session: no `done` follows, because `done` says the work finished.
 
 Utterances are cut by an energy voice activity detector, so a pause ends one and starts
 the next. The final lands about 660 ms after the endpoint on four cores with whisper
@@ -207,23 +202,31 @@ letters.
 | Route | Method | Returns |
 | --- | --- | --- |
 | `/healthz` | GET | `ok`, once the process is up |
-| `/readyz` | GET | The voice, whether it is installed, and the dictionary state |
+| `/readyz` | GET | `200 ready`, or `503` with the reason: the voice, the speech model, both installation flags, the dictionary state, and how many models are installed |
 | `/v1/info` | GET | Version, target, and the engines built into this binary |
 | `/v1/engines` | GET | What each engine can do, and whether one is loaded |
-| `/v1/models` | GET | Every model in the manifest, with size and license |
+| `/v1/models` | GET | Every model in the manifest, with kind, engine, licence, bytes, whether it is installed, and whether commercial use is allowed |
+| `/v1/models/{id}/download` | POST | Start a download; `202` with progress, `409` if one is already running |
+| `/v1/models/{id}/warm` | POST | Load a model before the first request needs it |
+| `/v1/models/{id}` | DELETE | Remove a model and its partial file, and unload it |
 | `/v1/voices` | GET | Voices with licence, rate, and which one is active |
 | `/v1/config` | GET, PATCH | The config; a patch changes it without a restart |
-| `/v1/tts` | POST | `audio/wav` for `{"text": "...", "speed": 1.0}` |
+| `/v1/tts` | POST | Audio for `{"text": "...", "speed": 1.0}`, as `wav` or `pcm` per `tts.format` |
 | `/v1/tts/ws` | GET | Upgrade to WebSocket, then one PCM frame per sentence |
 | `/v1/stt` | POST | A transcript for a WAV body |
 | `/v1/stt/ws` | GET | Upgrade to WebSocket, then partial and final transcripts |
+| `/v1/stop` | POST | `202`, then drain in-flight work and exit |
+| `/v1/abort` | POST | `202`, then exit at once |
 | `/docs` | GET | Swagger UI over the document below |
 | `/openapi.json` | GET | The OpenAPI 3.1 document |
 
-The document is generated from the handlers, so a route cannot exist without appearing in
-it. A route belonging to a disabled engine is left out, because it is not registered.
+The document is generated from the route table, so a route cannot exist without appearing
+in it. Every route is registered whatever the config says; a route belonging to a disabled
+engine answers `404` with code `engine_disabled`, and leaves the document while the engine
+is off.
 
-Errors use RFC 9457 problem details, with `status`, `title`, and `detail`.
+Errors use RFC 9457 problem details: `status`, `title`, `detail`, and a `code` a client can
+branch on without reading the sentence.
 
 ### Changing the config while it runs
 
@@ -262,9 +265,11 @@ the engines here are piper","status":422,...}
 
 Kokoro is M4. Until then the switch mechanism works and has one destination.
 
-The WebSocket stream sends a `start` frame with the sample rate, one binary frame per
-sentence, and an `end` frame with the counts. Audio starts before the last sentence is
-synthesized, because the queue between them holds two frames.
+The WebSocket stream sends a `start` frame with the sample rate and the sample format
+(`pcm_s16le`), one binary frame per sentence, and an `end` frame with the chunk and sample
+counts. Audio starts before the last sentence is synthesized, because the queue between
+them holds two frames. A `{"type":"cancel"}` frame stops the render and answers `{"type":"cancelled"}`. A
+failure answers `{"type":"error","detail":...}` and ends the stream.
 
 ## Sidecar mode
 
@@ -313,11 +318,18 @@ Every setting has an environment override, and the environment wins over the fil
 | Variable | Setting |
 | --- | --- |
 | `ARIOSO_SERVER_BIND` | `server.bind` |
+| `ARIOSO_AUTH_MODE` | `server.auth.mode` |
 | `ARIOSO_MODELS_DIR` | `models.dir` |
+| `ARIOSO_TTS_ENABLED` | `tts.enabled` |
+| `ARIOSO_TTS_ENGINE` | `tts.engine` |
 | `ARIOSO_TTS_VOICE` | `tts.voice` |
 | `ARIOSO_TTS_SPEED` | `tts.speed`, from 0.5 to 2.0 |
 | `ARIOSO_TTS_TIME_OF_DAY` | `tts.time_of_day` |
 | `ARIOSO_TTS_DICTIONARY` | `tts.dictionary` |
+| `ARIOSO_STT_ENABLED` | `stt.enabled` |
+| `ARIOSO_STT_ENGINE` | `stt.engine` |
+| `ARIOSO_LOG_LEVEL` | `log.level` |
+| `ARIOSO_LOG_FORMAT` | `log.format` |
 
 ## The user dictionary
 
@@ -372,11 +384,12 @@ Error: 1 problem(s) found
 
 ## Voices and licenses
 
-Piper voices carry their own licenses, and they are not all permissive. The default in the
-manifest, `en_US-lessac-medium`, is **Blizzard-2013, research only**. Before you ship
-anything, pick a voice whose license fits: `ljspeech` is public domain, `libritts` is
-CC BY 4.0, and `joe`, `mike`, `kathleen`, and `reza_ibrahim` are CC0. `arioso models list`
-prints the license of every model.
+Piper voices carry their own licenses, and they are not all permissive. The default voice,
+`en_US-lessac-medium`, is **Blizzard-2013, research only**, so the default is the one voice
+in the catalog you cannot ship. Before you ship anything, pick one whose license fits:
+`ljspeech` is public domain, `alba` is CC BY 4.0, and `joe` and `kathleen` are CC0.
+`arioso models list` prints the license of every model, and `/v1/models` says whether
+commercial use is allowed.
 
 The code is MIT. The CMU dictionary is BSD-2-Clause. Piper's runtime is MIT; the training
 code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
@@ -390,12 +403,12 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
   dictionary entry replaces the guess with the truth.
 - One voice is loaded at a time, so concurrent requests queue. Each voice costs about
   60 MB, which is a memory decision before it is a code one.
-- One Whisper model per models directory. The loader searches the directory flat, so a
-  second model would resolve to whichever name sorts first.
+- The speech model is resolved through the manifest, so several can sit in one models
+  directory and `stt.batch_model` picks between them.
 - The manifest is not signed yet, so a download trusts the SHA-256 in the manifest file
   itself.
-- The server binds to loopback. Binding it elsewhere is your call, and the bearer token
-  policy in `server.auth` is the only thing standing there.
+- The server binds to loopback. Binding it elsewhere is your call: set `server.auth` to a
+  token, and `server.tls` to a certificate and key, before you do.
 
 ## Layout
 
@@ -406,7 +419,9 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 | `arioso-core` | Sentence splitting, chunking, normalization, the user dictionary |
 | `arioso-g2p` | Phoneme id map, CMUdict, ARPAbet to IPA |
 | `arioso-tts-piper` | Piper VITS inference through ONNX Runtime; the one text to audio path |
-| `arioso-server` | axum router: `/healthz`, `/readyz`, `/v1/models`, `POST /v1/tts`, `GET /v1/tts/ws` |
+| `arioso-stt-sherpa` | Speech to text through sherpa-onnx: Parakeet transducers and Whisper |
+| `arioso-vad` | Energy voice activity detection, and the rule that cuts an utterance |
+| `arioso-server` | axum router, the engines behind it, the downloader, and the WebSocket paths |
 | `arioso-cli` | The `arioso` binary |
 
 More worked examples, with the real output of each, are in [EXAMPLES.md](EXAMPLES.md).

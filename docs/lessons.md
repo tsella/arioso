@@ -145,6 +145,14 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A default that moves leaves the prose behind
+
+The speech model's default moved from Whisper base to Parakeet v2, and the README went on
+saying Whisper base for two releases. Nothing tests prose, so nothing failed. When a
+default changes, grep the documentation for the old value in the same commit: the model id,
+the voice id, the port, the test count, the route list. A number in a README is a claim
+about the binary, and it rots the moment the binary moves.
+
 ## A probe that sets a clock sets it last
 
 To prove the log rotates, a file was written and its modification time moved back two days
