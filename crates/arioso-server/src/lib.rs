@@ -1151,6 +1151,19 @@ async fn security_headers(
 ///
 /// A queue would be kinder and worse: the caller would wait an unbounded time behind
 /// sessions that end when a document ends. A refusal with a code lets the client decide.
+/// Refuse a route whose engine is switched off, as a 404 like an absent route.
+///
+/// The route exists, so a client that guessed it gets the same answer as one that guessed
+/// wrong: the engine is not on, and there is nothing there.
+pub(crate) fn engine_disabled(what: &str) -> axum::response::Response {
+    ApiError::coded(
+        StatusCode::NOT_FOUND,
+        "engine_disabled",
+        format!("{what} is switched off; PATCH /v1/config turns it on"),
+    )
+    .into_response()
+}
+
 pub(crate) fn too_many_sessions() -> axum::response::Response {
     ApiError::coded(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1162,8 +1175,10 @@ pub(crate) fn too_many_sessions() -> axum::response::Response {
 
 /// Build the router.
 ///
-/// A disabled engine does not register its routes, so `stt.enabled: false` answers 404
-/// on the speech to text path rather than pretending the feature exists.
+/// Every route is registered whatever the config says, and each engine handler checks
+/// `enabled` when it runs. Registering at startup made `PATCH /v1/config` a one-way switch:
+/// a server started with an engine off could never turn it on, and one started with it on
+/// kept serving after it was turned off.
 pub fn router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
@@ -1186,28 +1201,28 @@ pub fn router(state: Arc<AppState>) -> Router {
     // wants. `server.docs: false` leaves it out entirely, so the paths answer 404 rather
     // than 401 and the surface is not described to anyone.
     if state.config().server.docs {
+        // Built per request, so a patch that turns an engine off takes its paths out of
+        // the document at the same moment it starts answering 404.
+        router = router.route("/openapi.json", get(openapi_json));
+        // The UI keeps its own copy, under a path that cannot collide with the route above.
         router = router.merge(
-            utoipa_swagger_ui::SwaggerUi::new("/docs").url("/openapi.json", document(&state)),
+            utoipa_swagger_ui::SwaggerUi::new("/docs").url("/docs/openapi.json", document(&state)),
         );
     }
 
-    if state.config().tts.enabled {
-        router = router
-            .route("/v1/tts", post(synthesize))
-            .route("/v1/tts/ws", get(ws_handler));
-    }
-    if state.config().stt.enabled {
-        // The body is audio, so the default 2 MiB limit is too small. The limit follows
-        // stt.max_audio_s: a config that allows an hour of audio and then refuses the body
-        // at ten minutes is two limits that disagree, and the one the user can set is the
-        // one that does not decide.
-        let limit = max_audio_bytes(state.config().stt.max_audio_s);
-        router = router.route(
-            "/v1/stt",
-            post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
-        );
-        router = router.route("/v1/stt/ws", get(stt_ws_handler));
-    }
+    router = router
+        .route("/v1/tts", post(synthesize))
+        .route("/v1/tts/ws", get(ws_handler));
+    // The body is audio, so the default 2 MiB limit is too small. The limit follows
+    // stt.max_audio_s: a config that allows an hour of audio and then refuses the body
+    // at ten minutes is two limits that disagree, and the one the user can set is the
+    // one that does not decide.
+    let limit = max_audio_bytes(state.config().stt.max_audio_s);
+    router = router.route(
+        "/v1/stt",
+        post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
+    );
+    router = router.route("/v1/stt/ws", get(stt_ws_handler));
 
     // The limiter wraps every route, including the ones a client can afford to hammer:
     // /healthz is the cheapest way to make the server do work, which makes it the first
@@ -1793,7 +1808,12 @@ async fn patch_config(
     Ok(Json(config_json(&next)))
 }
 
-/// The API document, cut down to the routes this server actually registered.
+/// The API document for this server, as it stands.
+async fn openapi_json(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::to_value(document(&state)).unwrap_or_default())
+}
+
+/// The API document, cut down to the routes this server actually serves.
 ///
 /// The document is built from the handlers, so it names every route the crate can serve.
 /// A disabled engine has no route, and a document promising one would send a client to a
@@ -2247,6 +2267,13 @@ async fn synthesize(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TtsRequest>,
 ) -> Result<Response, ApiError> {
+    if !state.config().tts.enabled {
+        return Err(ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "engine_disabled",
+            "text to speech is switched off; PATCH /v1/config turns it on",
+        ));
+    }
     let text = request.text.trim();
     if text.is_empty() {
         return Err(unprocessable("text must not be empty".to_owned()));
@@ -2355,6 +2382,13 @@ async fn transcribe_audio(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<SttResponse>, ApiError> {
+    if !state.config().stt.enabled {
+        return Err(ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "engine_disabled",
+            "speech to text is switched off; PATCH /v1/config turns it on",
+        ));
+    }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -3165,6 +3199,80 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], 422);
         assert!(json["detail"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn a_patch_can_turn_an_engine_off_and_on_again() {
+        // Routes are registered whatever the config says, so the switch works both ways.
+        // Registering at startup made it one-way in each direction.
+        let (state, _dir) = state();
+        let app = router(Arc::clone(&state));
+        let (status, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"tts":{"enabled":false}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = call(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/tts")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "engine_disabled");
+
+        // The document follows the same state.
+        let (_, body) = call(
+            app.clone(),
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            document["paths"].get("/v1/tts").is_none(),
+            "a switched-off route is still described"
+        );
+
+        // And back on.
+        let (status, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"tts":{"enabled":true}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/v1/tts")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await;
+        // The voice is not installed here, so the answer is 409 rather than 404: the
+        // route is live again.
+        assert_eq!(status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
     }
 
     #[tokio::test]

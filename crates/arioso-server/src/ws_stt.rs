@@ -64,6 +64,9 @@ fn vad_config(vad: &arioso_config::Vad) -> VadConfig {
 
 /// Upgrade the connection and transcribe.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+    if !state.config().stt.enabled {
+        return crate::engine_disabled("speech to text");
+    }
     let Some(permit) = state.open_session() else {
         return crate::too_many_sessions();
     };

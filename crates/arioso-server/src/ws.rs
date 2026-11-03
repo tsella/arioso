@@ -28,6 +28,9 @@ pub(crate) struct StreamRequest {
 
 /// Upgrade the connection and stream.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+    if !state.config().tts.enabled {
+        return crate::engine_disabled("text to speech");
+    }
     let Some(permit) = state.open_session() else {
         return crate::too_many_sessions();
     };
