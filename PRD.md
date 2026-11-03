@@ -356,15 +356,15 @@ because it runs batch models and natively streaming models behind the same C API
     "bind": "127.0.0.1:10101",
     "auth": { "mode": "none", "token_env": "ARIOSO_TOKEN" },
     "openapi": true,
-    "cors_origins": []
+    "cors_origins": [],
+    "limits": { "max_text_chars": 4000 }
   },
   "tts": {
     "enabled": true,
     "engine": "piper",
     "voice": "en_US-lessac-medium",
     "speed": 1.0,
-    "format": "wav",
-    "max_chars": 4000
+    "format": "wav"
   },
   "stt": {
     "enabled": true,

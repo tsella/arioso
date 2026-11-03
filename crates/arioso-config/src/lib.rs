@@ -209,8 +209,10 @@ pub struct Tts {
     pub speed: f32,
     /// Output format: `wav`, `pcm`, `mp3`, or `opus`.
     pub format: String,
-    /// Longest accepted input, in characters.
-    pub max_chars: u32,
+    /// The old limit. Read so a config written before it moved still loads, then folded
+    /// into `server.limits.max_text_chars`, which is the one the routes enforce.
+    #[serde(default, skip_serializing, rename = "max_chars")]
+    pub legacy_max_chars: Option<u32>,
     /// Path to the user dictionary. Defaults to `dictionary.json` beside the
     /// config file.
     #[serde(default)]
@@ -234,7 +236,7 @@ impl Default for Tts {
             voice: "en_US-lessac-medium".into(),
             speed: 1.0,
             format: "wav".into(),
-            max_chars: 4000,
+            legacy_max_chars: None,
             dictionary: None,
             time_of_day: true,
         }
@@ -519,6 +521,16 @@ impl Config {
         Self::from_json(&text, path)
     }
 
+    /// Move a limit that used to live under `tts` into the one the routes read.
+    ///
+    /// `tts.max_chars` was never enforced. A config that sets it gets the value it asked
+    /// for, in the field that works, rather than a silent no-op.
+    fn fold_legacy_limits(&mut self) {
+        if let Some(chars) = self.tts.legacy_max_chars.take() {
+            self.server.limits.max_text_chars = chars as usize;
+        }
+    }
+
     /// Parse a config document. `origin` is used for error messages only.
     ///
     /// # Errors
@@ -526,10 +538,11 @@ impl Config {
     /// Returns [`ConfigError`] on malformed JSON, an unknown schema version, or
     /// a value that fails validation.
     pub fn from_json(text: &str, origin: &Path) -> Result<Self, ConfigError> {
-        let cfg: Self = serde_json::from_str(text).map_err(|source| ConfigError::Parse {
+        let mut cfg: Self = serde_json::from_str(text).map_err(|source| ConfigError::Parse {
             path: origin.to_path_buf(),
             source,
         })?;
+        cfg.fold_legacy_limits();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -823,6 +836,16 @@ mod tests {
         let text = include_str!("../../../config.json.example");
         let parsed: Config = serde_json::from_str(text).expect("the example parses");
         assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn an_old_tts_max_chars_still_takes_effect() {
+        // The field was never read. A config that set it got nothing, so the value moves
+        // into the limit the routes enforce instead of being dropped.
+        let text = r#"{"tts":{"max_chars":1234}}"#;
+        let config = Config::from_json(text, std::path::Path::new("test.json")).unwrap();
+        assert_eq!(config.server.limits.max_text_chars, 1234);
+        assert_eq!(config.tts.legacy_max_chars, None, "the old field is consumed");
     }
 
     #[test]
