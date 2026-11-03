@@ -4,6 +4,9 @@ A review of the whole workspace found fourteen defects: configured controls that
 and then ignored, state races, and two contracts that the code does not keep. This plan
 verifies each one against the tree before touching it, then fixes them in severity order.
 
+Every task below is done. The commit that carries it is named beside it, and the two places
+where the work went past the plan are recorded at the end rather than smoothed over.
+
 ## Verification
 
 Every finding was checked against the code at `v0.1.3`, not taken on trust. Two were
@@ -52,48 +55,65 @@ Each task is one commit that passes the whole gate: `cargo fmt --all -- --check`
 
 ### Phase 1
 
-- [ ] 1.1 C1: checked arithmetic in the WAV chunk walk; a chunk that runs past the buffer is
-      `InvalidData`; tests for `u32::MAX` and for a truncated `data` chunk.
-- [ ] 1.2 C2: refuse to warm an STT model that is not `stt.batch_model` (`409
-      not_active_model`); run both warm paths on `spawn_blocking`.
-- [ ] 1.3 C3 + H7: one lock for check-and-insert; a semaphore from
-      `models.max_concurrent_downloads`; `hash_file` on `spawn_blocking`.
-- [ ] 1.4 C4: `select!` on the socket and the render channel; `cancel` stops the render at the
-      next chunk, answers `{"type":"cancelled"}`, and frees the session permit.
+- [x] 1.1 C1: checked arithmetic in the WAV chunk walk; a chunk that runs past the buffer is
+      `InvalidData`; tests for `u32::MAX` and for a truncated `data` chunk. — `18bf2d5`
+- [x] 1.2 C2: refuse to warm an STT model that is not `stt.batch_model` (`409
+      not_active_model`); run both warm paths on `spawn_blocking`. — `7fd677e`
+- [x] 1.3 C3 + H7: one lock for check-and-insert; a semaphore from
+      `models.max_concurrent_downloads`; `hash_file` on `spawn_blocking`. — `5cdf815`
+- [x] 1.4 C4: `select!` on the socket and the render channel; `cancel` stops the render at the
+      next chunk, answers `{"type":"cancelled"}`, and frees the session permit. — `3148fb5`
 
 ### Phase 2
 
-- [ ] 2.1 H1: build the VAD config from `config.vad`, map its fields, and give the energy
-      backend a default threshold that works out of the box.
-- [ ] 2.2 H2: delete removes `.part` files and drops a loaded voice or STT model.
-- [ ] 2.3 H3: mirror rewriting, a download semaphore, and `auto_download` at start.
-- [ ] 2.4 H4 + H5: `/readyz` reports STT and answers 503 when an enabled engine is missing;
-      `/v1/models` reports download state and progress.
-- [ ] 2.5 H6: one limit. `tts.max_chars` is removed and an old config that carries it still
-      loads.
+- [x] 2.1 H1: build the VAD config from `config.vad`, map its fields, and give the energy
+      backend a default threshold that works out of the box. — `2d97f05`
+- [x] 2.2 H2: delete removes `.part` files and drops a loaded voice or STT model. — `09cedb3`
+- [x] 2.3 H3: mirror rewriting, a download semaphore, and `auto_download` at start. — `6994faa`
+- [x] 2.4 H4 + H5: `/readyz` reports STT and answers 503 when an enabled engine is missing;
+      `/v1/models` reports download state and progress. — `b03a8b8`
+- [x] 2.5 H6: one limit. `tts.max_chars` is removed and an old config that carries it still
+      loads. — `d9d9955`
 
 ### Phase 3
 
-- [ ] 3.1 M1: coded errors in `synthesize`, `409 model_not_installed` instead of a 422 with a
-      path, and `pcm` honoured when `tts.format` asks for it.
-- [ ] 3.2 M2: an ARPAbet form is converted to unstressed IPA instead of being pronounced as
-      words, with a round-trip test.
-- [ ] 3.3 M3: `provisional: true` on partials, a `done` frame on `stop`, and an idle timeout.
-- [ ] 3.4 M4: routes always registered; handlers check `enabled` and answer 404; the document
-      is built per request.
-- [ ] 3.5 M5: words logged only with `log.log_text`; `x-request-id` on every response.
+- [x] 3.1 M1: coded errors in `synthesize`, `409 model_not_installed` instead of a 422 with a
+      path, and `pcm` honoured when `tts.format` asks for it. — `2e6084d`
+- [x] 3.2 M2: an ARPAbet form is converted to unstressed IPA instead of being pronounced as
+      words, with a round-trip test. — `67f7d0f`
+- [x] 3.3 M3: `provisional: true` on partials, a `done` frame on `stop`, and an idle timeout.
+      — `60c2b3a`
+- [x] 3.4 M4: routes always registered; handlers check `enabled` and answer 404; the document
+      is built per request. — `07ae220`
+- [x] 3.5 M5: words logged only with `log.log_text`; `x-request-id` on every response. — `8d8805e`
 
 ### Phase 4
 
-- [ ] 4.1 L3: a comma is a thousands separator only when exactly three digits follow it; an
-      ordinal suffix must end at a word boundary.
-- [ ] 4.2 L1 + L2: `ModelSpec::is_installed` and `Manifest::find_voice` in `arioso-models`,
-      used by the CLI and the server; `doctor` resolves the voice through the manifest.
+- [x] 4.1 L3: a comma is a thousands separator only when exactly three digits follow it; an
+      ordinal suffix must end at a word boundary. — `5c6a8ab`
+- [x] 4.2 L1 + L2: `ModelSpec::is_installed` and `Manifest::find_voice` in `arioso-models`,
+      used by the CLI and the server; `doctor` resolves the voice through the manifest. — `6e20452`
+
+## What the work added to the plan
+
+- **A new limit, `server.limits.idle_timeout_ms`.** F11.3 asks for a 30 second idle close and
+  the code had no clock at all, only a first-message timeout. 3.3 could not be done with a
+  constant: the value belongs in the config with the other limits.
+- **`AUDIO_FORMATS` narrowed, not extended.** 3.1 asked for `pcm`; the same change had to
+  remove `mp3` and `opus` from the accepted set, because a format the config accepts and the
+  server cannot produce is the defect this review is about.
+- **`ApiError::new` deleted.** After 3.1 no route used it, and clippy refuses a private
+  function with no caller. One constructor that writes a code, and none that does not.
 
 ## What is not in scope
 
-- `tts.format` for `mp3` and `opus`. The config allows them and nothing encodes them. 3.1
+- `tts.format` for `mp3` and `opus`. The config allowed them and nothing encodes them. 3.1
   narrows the allowed set to what exists rather than pretending.
 - A model slot per id. Warming and loading stay single-slot; 1.2 makes the refusal honest
   instead of widening the design.
-- Silero VAD. 2.1 wires the config into the energy segmenter, which is the only backend.
+- Silero VAD. 2.1 wires the config into the energy segmenter, which is the only backend, and
+  2.1's validation refuses the name rather than accepting it.
+- **A number followed directly by a letter still runs together**: `5kg` normalizes to
+  `fivekg`, and `1stand` to `onestand`. Found while fixing 4.1 and left alone, because the fix
+  belongs with unit handling (`5 kg`, `5kg`, `5 kilograms`) rather than with the separator
+  rule, and a half fix there would change every measurement in a sentence.

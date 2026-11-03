@@ -1,6 +1,6 @@
 # arioso: Product Requirements Document
 
-Version 0.3 (draft for review) · 2 November 2026 · Owner: Tom Sella
+Version 0.4 · 2 November 2026 · Owner: Tom Sella
 
 ---
 
@@ -237,9 +237,14 @@ Requirements:
 Each model moves through `not_installed → downloading → verifying → loading →
 ready`, or `failed { reason }`.
 
-- F2.1 `GET /readyz` returns 200 only when every enabled engine has its model
-  loaded and warm.
-- F2.2 `GET /v1/models` reports state and progress for every known model.
+- F2.1 `GET /readyz` answers 200 only when every enabled engine has its model on disk,
+  and 503 with `voice_missing` or `stt_missing` otherwise. An engine that is switched off
+  does not count against readiness. The status code is the answer: an orchestrator reads
+  the code, not the body.
+- F2.2 `GET /v1/models` reports state and progress for every known model: `state`
+  (`installed`, `downloading`, `not_installed`), `downloaded`, `bytes`, and
+  `commercial_use`. A caller polling after a download does not re-POST to find out whether
+  anything is happening.
 - F2.3 The library exposes the same state as a `watch` channel, so an app can draw
   a progress bar and enable its UI at the right moment.
 - F2.4 A failed model does not take down the server. The affected engine reports
@@ -253,7 +258,10 @@ ready`, or `failed { reason }`.
   16 kHz for low. Voice IDs are the upstream names (`en_US-lessac-medium`).
 - F3.3 Kokoro: 54 voices, 24 kHz, English plus seven other languages. Voice IDs are
   the upstream names (`af_heart`, `am_michael`).
-- F3.4 Controls: voice, speed (0.5 to 2.0), and format (`pcm`, `wav`, `mp3`, `opus`).
+- F3.4 Controls: voice, speed (0.5 to 2.0), and format (`wav`, `pcm`). `pcm` is raw
+  16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
+  `opus` are not implemented: the config refuses them rather than answering with WAV bytes
+  labelled as what was asked for.
 - F3.5 Long text is split at sentence boundaries and synthesized incrementally, so
   first audio arrives before the last sentence is computed.
 - F3.6 Streaming: chunked HTTP for progressive download, and a WebSocket that
@@ -302,9 +310,11 @@ because it runs batch models and natively streaming models behind the same C API
 
 ### F5. Voice activity detection
 
-- F5.1 Backends: `silero` (default, the ONNX model sherpa-onnx ships) and `energy`
-  (RMS threshold, no model). The Silero path reuses the sherpa-onnx runtime rather
-  than loading a second ONNX session.
+- F5.1 Backends: `energy` (RMS threshold, no model) is the only one built into this
+  binary and is the default. `silero` is the intended default for v1, reusing the
+  sherpa-onnx runtime rather than loading a second ONNX session; until that path exists
+  `vad.engine: "silero"` is refused at validation, because a config that loads and does
+  nothing reads as working.
 - F5.2 Configurable: `threshold`, `min_speech_ms`, `min_silence_ms`, `padding_ms`,
   `max_segment_ms`, and `frame_ms`.
 - F5.3 VAD gates the streaming STT pipeline. Audio before speech confirmation is
@@ -357,7 +367,7 @@ because it runs batch models and natively streaming models behind the same C API
     "auth": { "mode": "none", "token_env": "ARIOSO_TOKEN" },
     "openapi": true,
     "cors_origins": [],
-    "limits": { "max_text_chars": 4000 }
+    "limits": { "max_text_chars": 4000, "idle_timeout_ms": 30000 }
   },
   "tts": {
     "enabled": true,
@@ -388,8 +398,8 @@ because it runs batch models and natively streaming models behind the same C API
     }
   },
   "vad": {
-    "engine": "silero",
-    "threshold": 0.5,
+    "engine": "energy",
+    "threshold": 0.01,
     "min_speech_ms": 250,
     "min_silence_ms": 700,
     "padding_ms": 200,
@@ -450,7 +460,13 @@ HTTP, JSON, versioned under `/v1`.
 Error model: RFC 9457 problem details, with a stable `code` field:
 `model_not_installed`, `model_integrity_failed`, `engine_unavailable`,
 `engine_busy`, `cancelled`, `unsupported_voice`, `unsupported_format`, `bad_audio`,
-`queue_full`, `too_large`, `session_limit`.
+`queue_full`, `too_large`, `session_limit`, `invalid_value`, `unknown_model`,
+`engine_disabled`, `idle_timeout`.
+
+Every route answers with a coded problem document. There is no constructor that writes a
+problem without a code, because one route that used it gave a client `"code": null` for the
+four cases it most wanted to switch on: empty text, text over the limit, a speed out of
+range, and a voice that is not installed.
 
 Audio contract, stated once and enforced everywhere:
 
@@ -474,6 +490,12 @@ Cancellation: both WebSockets accept `{"type":"cancel"}`. The server stops at th
 next chunk boundary and replies `{"type":"cancelled"}`. Dropping the socket has
 the same effect, and the engine releases its permit either way.
 
+Engine switches take effect at once. Every route is registered whatever the config says, and
+the handler for a disabled engine answers `404 engine_disabled`: registering at startup made
+`PATCH /v1/config` one-way, so an engine switched off at start could never be turned on and
+one switched on kept serving after it was switched off. The API document is built per request
+for the same reason, so a path leaves it at the moment it starts refusing.
+
 WebSocket STT protocol:
 
 ```text
@@ -482,7 +504,7 @@ client → {"type":"start","language":"auto","sample_rate":16000,
           "sources":["mic","loopback"],"mode":"separate"}   # Windows dual capture
 server → {"type":"ready","session":"01J...","sources":["mic","loopback"]}
 client → <binary PCM frames, 16 kHz mono s16le>
-server → {"type":"partial","text":"hello wor","t":1.20}
+server → {"type":"partial","text":"hello wor","t":1.20,"provisional":true}
 server → {"type":"final","text":"hello world","start":0.0,"end":1.85}
 client → {"type":"stop"}
 server → {"type":"done","duration":1.85}
@@ -556,9 +578,11 @@ JSON, at roughly 33 percent size cost.
   session model. Configurable per engine.
 - F11.2 Requests beyond the permits wait in a bounded queue, default depth 32.
   A full queue returns `429 engine_busy` with `Retry-After`.
-- F11.3 WebSocket sessions are capped (default 8) and idle sessions close after 30
-  seconds without audio or control messages. Exceeding the cap returns
-  `session_limit` before the upgrade completes.
+- F11.3 WebSocket sessions are capped (default 8) and idle sessions close after
+  `server.limits.idle_timeout_ms` without audio or control messages, default 30000. The
+  clock resets on every audio frame and every control frame, and applies to the whole
+  session, not only to the first message. Exceeding the cap returns `session_limit`
+  before the upgrade completes.
 - F11.4 Cancellation is honored within one chunk. A cancelled request frees its
   permit before the response is written.
 - F11.5 The server reports current queue depth and permit saturation on

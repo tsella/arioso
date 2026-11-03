@@ -5,6 +5,18 @@ the rule that prevents the repeat. New entries go at the top of their section.
 
 ## Testing and verification
 
+**A gate reads every result, not the ones you expect to pass.** The four checks ran as one
+chain writing `FMT=`, `CLIPPY=`, `TEST=` and `DOC=` markers. Three were read. `FMT=1` sat in
+the log while six files were committed unformatted, and a later `cargo fmt --all` produced a
+54-line diff across five commits' worth of work. Read all four markers, and treat a marker
+that is not `0` as a failure whatever the other three say.
+
+**A test that proves a refusal does not need the real file.** Proving that warming the wrong
+speech model is refused wanted a model on disk, and the model in the catalog is 631 MiB.
+Writing it to a temp directory turned a 0.06 s suite into a minute and proved nothing that an
+empty file at a declared size of zero does not. Zero the sizes in the test's own copy of the
+manifest, write empty files, and keep one helper for every install-state test.
+
 **A test that has never run is not a test.** The `arioso-tts-piper` tests used
 `tempfile` without the dev-dependency. Only `cargo build` had been run on that
 crate, so the workspace suite broke two commits later. Rule: run `cargo test -p
@@ -234,3 +246,22 @@ receives unpunctuated run-on text, speaks it at 305 words per minute instead of 
 round trip scored 36 percent instead of 4.88. The tell was that the same 600 characters
 synthesized alone came back clean: when a defect depends on how pieces are assembled and not
 on the pieces, the assembly is the suspect.
+
+## A default belongs to the implementation that reads it
+
+`vad.threshold` shipped as `0.5`, which is a Silero speech probability. The only detector in
+the binary is an RMS energy segmenter where 0.01 is speech, so the config validated cleanly
+for months while the field was ignored, and wiring it in with that default would have made the
+segmenter deaf to everything short of clipping. The same commit that wires a config field has
+to read its default against the code that will now use it. The same review found
+`tts.format` accepting `mp3` and `opus` while the route always wrote WAV: a value the config
+accepts and the server cannot produce is the same lie as a field nothing reads.
+
+## A boundary rule fixes one case and breaks the next
+
+An ordinal suffix matched anywhere, so `1stand` read as `first` plus `and`. Requiring a word
+boundary fixed that and turned `2ndly` from `secondly` into `twondly`, which was the correct
+answer before the fix. Check both directions of a rule before committing it: the input that
+motivated the change, and the input that was already right. The exception kept here is
+deliberate — an adverb ending in `ly` keeps its ordinal — and it is written in the commit
+message so the next reader knows it is a decision.
