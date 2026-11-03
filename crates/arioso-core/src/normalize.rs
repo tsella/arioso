@@ -348,6 +348,14 @@ pub fn normalize(text: &str) -> String {
 #[must_use]
 pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
     let expanded = expand_abbreviations(text);
+    // Nothing to expand: no digit to read and no currency to speak. Collecting the text
+    // into `Vec<char>` costs four bytes a character, and most sentences reach here.
+    if !expanded
+        .bytes()
+        .any(|byte| byte.is_ascii_digit() || byte == b'$')
+    {
+        return expanded;
+    }
     let chars: Vec<char> = expanded.chars().collect();
     let mut out = String::with_capacity(expanded.len() * 2);
     let mut index = 0;
@@ -440,6 +448,11 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
 
 /// Expand the abbreviations in [`ABBREVIATIONS`], keeping the source capital.
 fn expand_abbreviations(text: &str) -> String {
+    // Every abbreviation ends in a full stop, so text without one has nothing to expand.
+    // Lowercasing it first allocated a copy of every sentence that needed no work.
+    if !text.contains('.') {
+        return text.to_owned();
+    }
     let lower = text.to_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
