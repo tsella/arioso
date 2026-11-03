@@ -349,11 +349,14 @@ the way a Whisper decoder can, and they are much cheaper per second of audio.
 
 | engine | model | size on disk | note |
 | --- | --- | --- | --- |
-| whisper | `base.en` int8 | 160 MiB | the project default |
+| whisper | `base.en` int8 | 147 MiB | the project default |
 | whisper | `small.en` int8 | 358 MiB | not in the catalog |
-| parakeet | `parakeet-tdt-0.6b-v2` int8 | 661 MiB | English |
-| parakeet | `parakeet-tdt-0.6b-v3` int8 | 674 MiB | 25 European languages |
-| zipformer | `zipformer-en-2023-06-26` int8 | 307 MiB | streaming family, offline variant |
+| parakeet | `parakeet-tdt-0.6b-v2` int8 | 631 MiB | English |
+| parakeet | `parakeet-tdt-0.6b-v3` int8 | 641 MiB | 25 European languages |
+| zipformer | `zipformer-en-2023-06-26` int8 | 68 MiB | streaming family, offline variant |
+
+Sizes are the files each run actually loaded. The Zipformer download is 307 MiB because the
+archive also carries the float32 graphs; only the int8 set is used here.
 
 All five ran through sherpa-onnx 2.0.1, the version in the workspace lock file, driven by a
 scratch binary outside the repository. Four threads, no GPU.
