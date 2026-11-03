@@ -155,7 +155,7 @@ impl Downloader {
 
         if final_path.exists() {
             let meta = std::fs::metadata(&final_path)?;
-            if meta.len() == file.size && hash_file(&final_path)? == file.sha256 {
+            if meta.len() == file.size && hash_file_off_thread(&final_path).await? == file.sha256 {
                 progress(Progress {
                     downloaded: base + file.size,
                     total,
@@ -216,7 +216,7 @@ impl Downloader {
             handle.flush().await?;
         }
 
-        let actual = hash_file(&part_path)?;
+        let actual = hash_file_off_thread(&part_path).await?;
         if actual != file.sha256 {
             let _ = std::fs::remove_file(&part_path);
             return Err(DownloadError::Integrity {
@@ -243,6 +243,20 @@ impl Downloader {
             total,
         });
         Ok(final_path)
+    }
+}
+
+/// Hash a file without holding a runtime worker.
+///
+/// The largest file in the catalog is 652 MB. Reading and hashing that on a Tokio worker
+/// thread stalls every other task the runtime is serving for as long as it takes, and the
+/// hash runs on both the resume path and the finish path.
+async fn hash_file_off_thread(path: &Path) -> Result<String, DownloadError> {
+    let path = path.to_owned();
+    let hashed = tokio::task::spawn_blocking(move || hash_file(&path)).await;
+    match hashed {
+        Ok(result) => Ok(result?),
+        Err(error) => Err(DownloadError::Io(std::io::Error::other(error))),
     }
 }
 

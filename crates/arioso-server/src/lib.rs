@@ -100,6 +100,9 @@ pub struct AppState {
     /// somewhere other than the handler. It is a map rather than a channel because the
     /// catalog has to answer "what is happening" without a subscriber.
     downloads: std::sync::Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
+    /// Caps how many models are fetched at once. A catalog entry is hundreds of megabytes,
+    /// and an unbounded fan-out saturates the link and the disk for everything else.
+    download_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -126,6 +129,11 @@ impl AppState {
         let models_dir = models_dir(&config);
         let sessions = Arc::new(tokio::sync::Semaphore::new(
             config.server.limits.max_connections,
+        ));
+        // Read before the config moves into the state, and capped at one so a zero can
+        // never make the semaphore refuse every download forever.
+        let download_slots = Arc::new(tokio::sync::Semaphore::new(
+            config.models.max_concurrent_downloads.max(1) as usize,
         ));
         let limiter = RateLimiter::new(
             config.server.limits.requests_per_second,
@@ -182,6 +190,7 @@ impl AppState {
             sessions,
             handle: std::sync::OnceLock::new(),
             downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            download_slots,
             manifest,
             models_dir,
         })
@@ -192,6 +201,27 @@ impl AppState {
     /// Cloned rather than borrowed so a caller never holds the lock across an await.
     /// A poisoned lock still yields the value: the config is plain data, so a panic in
     /// another task cannot leave it inconsistent.
+    /// Claim the download of `id`, or report the one already in flight.
+    ///
+    /// The check and the insert happen under one lock. Taken separately, two requests that
+    /// both saw "not running" would both spawn a task, and the two tasks would write the
+    /// same `.part` file at the same time.
+    fn try_start_download(&self, id: &str, total: u64) -> Option<(u64, u64)> {
+        match self.downloads.lock() {
+            Ok(mut map) => {
+                if let Some(running) = map.get(id) {
+                    return Some(*running);
+                }
+                map.insert(id.to_owned(), (0, total));
+                None
+            }
+            // A poisoned lock means another task panicked holding it. Reporting the
+            // download as already running refuses this request instead of risking a second
+            // writer, which is the safe direction to fail in.
+            Err(_) => Some((0, total)),
+        }
+    }
+
     /// Record a download's progress, replacing what was there.
     fn note_download(&self, id: &str, downloaded: u64, total: u64) {
         if let Ok(mut map) = self.downloads.lock() {
@@ -1765,7 +1795,8 @@ async fn start_download(
         )
         .into_response();
     };
-    if let Some((downloaded, total)) = state.download_progress(&id) {
+    let total = spec.total_size();
+    if let Some((downloaded, total)) = state.try_start_download(&id, total) {
         return (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
@@ -1775,13 +1806,14 @@ async fn start_download(
             .into_response();
     }
 
-    let total = spec.total_size();
-    state.note_download(&id, 0, total);
     let task_state = Arc::clone(&state);
     let dir = state.models_dir.clone();
     let task_id = id.clone();
     tokio::spawn(async move {
         let id = task_id;
+        // Wait for a slot before touching the network. The catalog shows this model as
+        // downloading while it waits, which is true: the request was accepted.
+        let _slot = Arc::clone(&task_state.download_slots).acquire_owned().await;
         let result = match arioso_models::Downloader::new() {
             Ok(downloader) => {
                 let mut progress = |p: arioso_models::Progress| {
@@ -3108,6 +3140,29 @@ mod tests {
         assert!(
             dir.path().join("unrelated.bin").exists(),
             "a file the manifest does not name was removed"
+        );
+    }
+
+    #[test]
+    fn only_one_caller_can_start_a_download_of_one_model() {
+        // Check and insert under one lock. Taken apart, two requests both saw "not
+        // running" and both spawned a task writing the same .part file.
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        assert_eq!(state.try_start_download(&id, 100), None, "the first caller owns it");
+        let second = state.try_start_download(&id, 100);
+        assert_eq!(second, Some((0, 100)), "the second caller must be refused");
+        state.note_download(&id, 40, 100);
+        assert_eq!(
+            state.try_start_download(&id, 100),
+            Some((40, 100)),
+            "a third caller sees the progress, not a fresh start"
+        );
+        state.finish_download(&id);
+        assert_eq!(
+            state.try_start_download(&id, 100),
+            None,
+            "a finished download can be started again"
         );
     }
 
