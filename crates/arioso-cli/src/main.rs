@@ -1015,8 +1015,46 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
 fn init_tracing(config: &Config) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()));
-    // stderr, always. stdout belongs to the caller: in sidecar mode it carries the port
-    // line and nothing else, and a log line on that pipe would be read as the port.
+    // stderr unless the config names a file. stdout belongs to the caller: in sidecar mode
+    // it carries the port line and nothing else, and a log line on that pipe would be read
+    // as the port.
+    match &config.log.file {
+        Some(path) => match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(file) => {
+                let writer = std::sync::Mutex::new(file);
+                if config.log.format == "json" {
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .with_writer(writer)
+                        .json()
+                        .init();
+                } else {
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .with_writer(writer)
+                        .init();
+                }
+            }
+            Err(error) => {
+                // A log file that cannot be opened must not stop the process, but it must
+                // not be silent either: the operator asked for a file and gets stderr.
+                eprintln!(
+                    "log.file {} could not be opened ({error}); logging to stderr",
+                    path.display()
+                );
+                init_tracing_to_stderr(config, filter);
+            }
+        },
+        None => init_tracing_to_stderr(config, filter),
+    }
+}
+
+/// The default sink.
+fn init_tracing_to_stderr(config: &Config, filter: EnvFilter) {
     if config.log.format == "json" {
         tracing_subscriber::fmt()
             .with_env_filter(filter)

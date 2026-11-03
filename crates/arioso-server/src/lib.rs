@@ -743,11 +743,22 @@ impl AppState {
                 |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
             )
             .map_err(|error| error.to_string())?;
+        // The words themselves are text, and F9.9 says text is not logged unless the
+        // operator turned `log.log_text` on. The counts are not text, so they always go.
+        let log_text = self.config().log.log_text;
         if !report.guessed.is_empty() {
-            tracing::debug!(guessed = ?report.guessed, "words spoken by spelling rules");
+            if log_text {
+                tracing::debug!(guessed = ?report.guessed, "words spoken by spelling rules");
+            } else {
+                tracing::debug!(count = report.guessed.len(), "words spoken by spelling rules");
+            }
         }
         if !report.missing.is_empty() {
-            tracing::debug!(missing = ?report.missing, "words nothing could pronounce");
+            if log_text {
+                tracing::debug!(missing = ?report.missing, "words nothing could pronounce");
+            } else {
+                tracing::debug!(count = report.missing.len(), "words nothing could pronounce");
+            }
         }
         if !report.unusable.is_empty() {
             tracing::warn!(entries = ?report.unusable, "user dictionary entries the voice cannot say");
@@ -1124,6 +1135,51 @@ async fn require_auth(
 }
 
 /// Add the response headers that cost nothing and close the cheap classes of browser bug.
+/// Give every request an id, and say what it was.
+///
+/// A client that reports a bad answer needs something to quote. An id the client sent is
+/// kept when it is a plain token, so a caller can follow its own request through the log;
+/// anything else is replaced, because a header is not a place to put a newline.
+async fn request_id(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let sent = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        })
+        .map(str::to_owned);
+    let id = sent.unwrap_or_else(|| {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        format!("{:08x}{:04x}", seq as u32, (nanos & 0xffff) as u16)
+    });
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let span = tracing::info_span!("request", request_id = %id, %method, %path);
+    let mut response = {
+        use tracing::Instrument;
+        next.run(request).instrument(span).await
+    };
+    if let Ok(value) = axum::http::HeaderValue::from_str(&id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
+}
+
 async fn security_headers(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1237,6 +1293,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             require_auth,
         ))
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn(request_id))
         .with_state(state)
 }
 
@@ -2480,8 +2537,18 @@ mod tests {
     }
 
     async fn call(app: Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
+        let (status, body, _) = call_with_headers(app, request).await;
+        (status, body)
+    }
+
+    /// The same, keeping the headers, for tests that are about a header.
+    async fn call_with_headers(
+        app: Router,
+        request: Request<Body>,
+    ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .into_body()
             .collect()
@@ -2489,7 +2556,7 @@ mod tests {
             .unwrap()
             .to_bytes()
             .to_vec();
-        (status, body)
+        (status, body, headers)
     }
 
     #[tokio::test]
@@ -3199,6 +3266,47 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], 422);
         assert!(json["detail"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_a_request_id() {
+        let (state, _dir) = state();
+        let app = router(state);
+        let (_, _, headers) = call_with_headers(
+            app.clone(),
+            Request::builder().uri("/healthz").body(Body::empty()).unwrap(),
+        )
+        .await;
+        let generated = headers
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("an id is generated when the client sends none")
+            .to_owned();
+        assert!(!generated.is_empty());
+
+        // A token the client sends is kept, so it can follow its own request.
+        let (_, _, headers) = call_with_headers(
+            app.clone(),
+            Request::builder()
+                .uri("/healthz")
+                .header("x-request-id", "abc-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(headers.get("x-request-id").unwrap(), "abc-123");
+
+        // A header that could break the response or the log is replaced, not echoed.
+        let (_, _, headers) = call_with_headers(
+            app,
+            Request::builder()
+                .uri("/healthz")
+                .header("x-request-id", "bad id with spaces")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(headers.get("x-request-id").unwrap(), "bad id with spaces");
     }
 
     #[tokio::test]
