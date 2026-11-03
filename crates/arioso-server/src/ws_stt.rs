@@ -5,7 +5,7 @@
 //! never hold up the audio coming in.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arioso_vad::{Config as VadConfig, Event, Segmenter};
 use axum::extract::State;
@@ -172,6 +172,11 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(interval_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let partials = state.config().stt.partials;
+    // A socket that opens and then says nothing holds a session permit and an engine slot
+    // for as long as the process runs. F11.3 puts a clock on it.
+    let idle = Duration::from_millis(state.config().server.limits.idle_timeout_ms);
+    let mut last_heard = Instant::now();
+    let began = Instant::now();
     // Bumped when an utterance is finalised, so a partial still running for it is
     // dropped instead of arriving after the final.
     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -182,6 +187,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
         tokio::select! {
             incoming = stream.next() => {
                 let Some(Ok(message)) = incoming else { break };
+                last_heard = Instant::now();
                 match message {
                     Message::Binary(bytes) => {
                         let samples = pcm16(&bytes);
@@ -250,6 +256,14 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                                         }
                                     }
                                 }
+                                send(
+                                    &out,
+                                    json!({
+                                        "type": "done",
+                                        "duration": began.elapsed().as_secs_f64(),
+                                    }),
+                                )
+                                .await;
                                 break;
                             }
                             _ => {}
@@ -259,7 +273,27 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                     _ => {}
                 }
             }
-            _ = tick.tick(), if partials => {
+            _ = tick.tick() => {
+                // The clock runs whether or not partials are on, because the permit it
+                // protects is held either way.
+                if last_heard.elapsed() > idle {
+                    send(
+                        &out,
+                        json!({
+                            "type": "error",
+                            "code": "idle_timeout",
+                            "detail": format!(
+                                "no audio or control message for {} s",
+                                idle.as_secs()
+                            ),
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+                if !partials {
+                    continue;
+                }
                 let Some((buffer, _)) = segmenter.open() else { continue };
                 if buffer.len() < MIN_PARTIAL {
                     continue;
@@ -292,7 +326,13 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                         }
                         last.clone_from(&text);
                     }
-                    send(&out, json!({"type": "partial", "text": text, "t": at})).await;
+                    // Provisional, per F4.5: a client that appends partials to a
+                    // transcript has to know that this text replaces the last one.
+                    send(
+                        &out,
+                        json!({"type": "partial", "text": text, "t": at, "provisional": true}),
+                    )
+                    .await;
                 });
             }
         }

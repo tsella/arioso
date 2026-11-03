@@ -138,6 +138,11 @@ pub struct Limits {
     /// bounds the work and the memory of a single call. A client with more text sends it in
     /// pieces, or streams it over the WebSocket, which sends a frame per sentence.
     pub max_text_chars: usize,
+    /// How long a streaming session may go without audio or a control message.
+    ///
+    /// A socket that opens and then says nothing holds a session permit and an engine slot.
+    /// The clock resets on every audio frame and every control frame.
+    pub idle_timeout_ms: u64,
     /// How long a graceful stop waits for in-flight work before ending it.
     ///
     /// A stop that waits forever is not a stop, and one that ends immediately drops
@@ -154,6 +159,7 @@ impl Default for Limits {
             burst: 100,
             max_connections: 512,
             header_timeout_ms: 10_000,
+            idle_timeout_ms: 30_000,
             shutdown_grace_ms: 5_000,
         }
     }
@@ -774,6 +780,12 @@ impl Config {
             return Err(ConfigError::Invalid {
                 path: "vad.max_segment_ms".into(),
                 message: "must be at least vad.min_speech_ms".into(),
+            });
+        }
+        if self.server.limits.idle_timeout_ms < 1_000 {
+            return Err(ConfigError::Invalid {
+                path: "server.limits.idle_timeout_ms".into(),
+                message: "must be at least 1000; a shorter clock drops active sessions".into(),
             });
         }
         if self.models.max_concurrent_downloads == 0 {
