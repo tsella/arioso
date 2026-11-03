@@ -65,9 +65,10 @@ pub enum ServerError {
 /// Shared server state.
 #[derive(Debug)]
 pub struct AppState {
-    /// Mutable so PATCH /v1/config can change it without a restart. Read through
-    /// `config()`, which clones, so no lock is held across an await.
-    config: std::sync::RwLock<Config>,
+    /// Mutable so PATCH /v1/config can change it without a restart. Held behind an `Arc`
+    /// so a reader takes a reference instead of copying fourteen strings: `config()` runs
+    /// several times per request, including in the rate limiter on every `/healthz`.
+    config: std::sync::RwLock<Arc<Config>>,
     manifest: Manifest,
     models_dir: PathBuf,
     dictionary: CmuDict,
@@ -81,7 +82,7 @@ pub struct AppState {
     /// Per-client request budgets, from `server.limits`.
     limiter: RateLimiter,
     /// The bearer token, when one was configured and found in the environment.
-    token: Option<String>,
+    token: Option<Arc<str>>,
     /// Permits for long-lived streaming sessions.
     ///
     /// A socket that stays open for the length of a document is the resource that
@@ -183,10 +184,10 @@ impl AppState {
             }),
             voice: Mutex::new(None),
             stt: Mutex::new(None),
-            config: std::sync::RwLock::new(config),
+            config: std::sync::RwLock::new(Arc::new(config)),
             config_file,
             limiter,
-            token,
+            token: token.map(Arc::from),
             sessions,
             handle: std::sync::OnceLock::new(),
             downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -324,8 +325,8 @@ impl AppState {
     }
 
     /// The bearer token this process requires, when one was configured.
-    pub(crate) fn token(&self) -> Option<String> {
-        self.token.clone()
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     /// The address a request is charged to.
@@ -355,11 +356,15 @@ impl AppState {
             .map_or(unknown, |info| info.0.ip())
     }
 
-    pub(crate) fn config(&self) -> Config {
+    /// The config, as a shared handle.
+    ///
+    /// Cloning an `Arc` is one atomic increment. Cloning the `Config` was a deep copy of
+    /// every string and path in it, several times per request.
+    pub(crate) fn config(&self) -> Arc<Config> {
         self.config
             .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            .map(|guard| Arc::clone(&guard))
+            .unwrap_or_else(|poisoned| Arc::clone(&poisoned.into_inner()))
     }
 
     /// Drop the loaded voice, so the next request loads the one the config now names.
@@ -378,18 +383,20 @@ impl AppState {
 
     /// Replace the config.
     fn set_config(&self, config: Config) {
+        let next = Arc::new(config);
         match self.config.write() {
-            Ok(mut guard) => *guard = config,
-            Err(poisoned) => *poisoned.into_inner() = config,
+            Ok(mut guard) => *guard = next,
+            Err(poisoned) => *poisoned.into_inner() = next,
         }
     }
 
     /// The voice the config asks for.
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
-        let voice = self.config().tts.voice;
+        let config = self.config();
+        let voice = &config.tts.voice;
         self.manifest
-            .find_voice(&voice)
-            .ok_or(ServerError::NoVoice(voice))
+            .find_voice(voice)
+            .ok_or_else(|| ServerError::NoVoice(voice.clone()))
     }
 
     /// The speech to text model the config asks for.
@@ -467,13 +474,14 @@ impl AppState {
     }
 
     fn stt_spec(&self) -> Result<&ModelSpec, ServerError> {
-        let model = self.config().stt.batch_model;
+        let config = self.config();
+        let model = &config.stt.batch_model;
         self.manifest
             .models
             .iter()
             .filter(|m| m.kind == Kind::Stt && m.engine == "sherpa")
-            .find(|m| m.id == model)
-            .ok_or(ServerError::NoSttModel(model))
+            .find(|m| &m.id == model)
+            .ok_or_else(|| ServerError::NoSttModel(model.clone()))
     }
 
     /// Transcribe WAV bytes, loading the engine on first use.
@@ -544,7 +552,8 @@ impl AppState {
             if !self.is_installed(spec) {
                 return Err(SttFailure::NotInstalled(spec.id.clone()));
             }
-            let configured = self.config().stt.language;
+            let config = self.config();
+            let configured = &config.stt.language;
             let language = if configured == "auto" {
                 None
             } else {
@@ -1817,7 +1826,8 @@ async fn patch_config(
     Json(patch): Json<ConfigPatch>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let persist = patch.persist;
-    let mut next = state.config();
+    // One deep copy per patch: patches are rare, reads are not.
+    let mut next = (*state.config()).clone();
     let touched = patch.apply(&mut next);
     validate(&next, &state)?;
 
@@ -1837,14 +1847,15 @@ async fn patch_config(
         })?;
     }
 
-    state.set_config(next.clone());
+    let body = config_json(&next);
+    state.set_config(next);
     if touched.voice {
         state.drop_voice();
     }
     if touched.stt {
         state.drop_stt();
     }
-    Ok(Json(config_json(&next)))
+    Ok(Json(body))
 }
 
 /// The API document for this server, as it stands.
