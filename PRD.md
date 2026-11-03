@@ -1,6 +1,6 @@
 # arioso: Product Requirements Document
 
-Version 0.4 · 2 November 2026 · Owner: Tom Sella
+Version 0.5 · 3 November 2026 · Owner: Tom Sella
 
 ---
 

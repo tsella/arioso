@@ -422,13 +422,13 @@ section of the README before shipping anything.
 
 ## 15. The API surface
 
-Start the server, then read what it can do instead of guessing. This run had
-`stt.enabled: false`, which is why one engine answers.
+Start the server, then read what it can do instead of guessing. Both engines answer
+because both are enabled; with `stt.enabled: false` the list is `["piper"]`.
 
 ```console
 $ arioso serve &
 $ curl -sS http://127.0.0.1:10101/v1/info
-{"version":"0.1.0","target":"x86_64-linux","engines":["piper"]}
+{"version":"0.1.4","target":"x86_64-linux","engines":["piper","sherpa-whisper"]}
 ```
 
 ```console
