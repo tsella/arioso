@@ -1,8 +1,10 @@
 # Examples
 
 Every block below is a real run on Linux, x86-64, four cores, no GPU, with the
-`en_US-lessac-medium` voice. The output is copied from the terminal, not retyped.
-Paths such as `/tmp/arioso-say.Uk3iWZ` are the model directory used during the capture.
+`en_US-lessac-medium` voice pinned explicitly. The output is copied from the terminal, not
+retyped. The shipped default is `en_US-joe-medium`, so a run without `tts.voice` set will
+show that voice where these blocks show lessac. Paths such as `/tmp/arioso-say.Uk3iWZ` are
+the model directory used during the capture.
 
 ## 1. Speak a sentence
 

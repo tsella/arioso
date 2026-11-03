@@ -27,7 +27,7 @@
   "tts": {
     "enabled": true,
     "engine": "piper",
-    "voice": "en_US-lessac-medium",
+    "voice": "en_US-joe-medium",
     "speed": 1.0,
     "format": "wav",
     "dictionary": null,

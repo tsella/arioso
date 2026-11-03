@@ -3069,6 +3069,9 @@ mod tests {
     #[tokio::test]
     async fn readiness_reports_a_missing_voice() {
         let (state, _dir) = state();
+        // Read from the config rather than naming the default, so changing the default is a
+        // one line change and not a failure in a readiness test.
+        let expected = format!("piper-{}", state.config().tts.voice);
         let (status, body) = call(
             router(state),
             Request::builder()
@@ -3082,7 +3085,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "voice_missing");
-        assert_eq!(json["voice"], "piper-en_US-lessac-medium");
+        assert_eq!(json["voice"], expected);
         assert_eq!(json["voice_installed"], false);
     }
 

@@ -246,7 +246,10 @@ impl Default for Tts {
         Self {
             enabled: true,
             engine: "piper".into(),
-            voice: "en_US-lessac-medium".into(),
+            // CC0, so the default voice can be used in a shipped product. lessac is
+            // Blizzard-2013, research only, and was the default until it was noticed that
+            // the one voice you cannot ship was the one everybody got.
+            voice: "en_US-joe-medium".into(),
             speed: 1.0,
             format: "wav".into(),
             legacy_max_chars: None,

@@ -91,7 +91,7 @@ cargo test
 
 ```bash
 arioso models list
-arioso models download piper-en_US-lessac-medium
+arioso models download piper-en_US-joe-medium
 arioso say "hello world. this is arioso speaking locally." --out hello.wav
 arioso serve        # http://127.0.0.1:10101
 ```
@@ -99,7 +99,7 @@ arioso serve        # http://127.0.0.1:10101
 ```console
 $ arioso models list
 id                                 kind        size  license    state
-piper-en_US-lessac-medium          tts     60.3 MiB  Blizzard-2013 installed
+piper-en_US-joe-medium             tts     60.3 MiB  CC0-1.0    installed
 ```
 
 Then, from another shell:
@@ -137,9 +137,9 @@ The catalog's voices, all verified by SHA-256 against the manifest:
 
 | id | tier | rate | licence | commercial |
 | --- | --- | --- | --- | --- |
-| `piper-en_US-lessac-medium` | medium, the default | 22.05 kHz | Blizzard-2013 | no |
+| `piper-en_US-lessac-medium` | medium | 22.05 kHz | Blizzard-2013 | no |
 | `piper-en_US-ljspeech-high` | high | 22.05 kHz | public domain | yes |
-| `piper-en_US-joe-medium` | medium | 22.05 kHz | CC0 | yes |
+| `piper-en_US-joe-medium` | medium, the default | 22.05 kHz | CC0 | yes |
 | `piper-en_US-kathleen-low` | low | 16 kHz | CC0 | yes |
 | `piper-en_GB-alba-medium` | medium | 22.05 kHz | CC BY 4.0 | yes |
 
@@ -305,7 +305,7 @@ The config file lives at `~/.local/share/arioso/config.json` on Linux,
   "tts": {
     "enabled": true,
     "engine": "piper",
-    "voice": "en_US-lessac-medium",
+    "voice": "en_US-joe-medium",
     "speed": 1.0,
     "time_of_day": true,
     "dictionary": null
@@ -384,12 +384,13 @@ Error: 1 problem(s) found
 
 ## Voices and licenses
 
-Piper voices carry their own licenses, and they are not all permissive. The default voice,
-`en_US-lessac-medium`, is **Blizzard-2013, research only**, so the default is the one voice
-in the catalog you cannot ship. Before you ship anything, pick one whose license fits:
-`ljspeech` is public domain, `alba` is CC BY 4.0, and `joe` and `kathleen` are CC0.
-`arioso models list` prints the license of every model, and `/v1/models` says whether
-commercial use is allowed.
+Piper voices carry their own licenses, and they are not all permissive. The default,
+`en_US-joe-medium`, is CC0, so what ships is shippable. `en_US-lessac-medium` is
+**Blizzard-2013, research only**: it is in the catalog because it is the voice Piper's own
+examples use, and it is the one voice here you cannot ship. The rest are permissive:
+`ljspeech` is public domain, `alba` is CC BY 4.0, and `kathleen` is CC0. `arioso models
+list` prints the license of every model, and `/v1/models` says whether commercial use is
+allowed.
 
 The code is MIT. The CMU dictionary is BSD-2-Clause. Piper's runtime is MIT; the training
 code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.

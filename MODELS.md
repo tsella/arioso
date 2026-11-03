@@ -70,8 +70,8 @@ every number.
 
 | id | languages | license | size | round trip | RTF | memory |
 | --- | --- | --- | --- | --- | --- | --- |
-| `piper-en_US-joe-medium` | en-US | CC0-1.0 voice, GPL-3.0 engine | 60 MiB | 5.88% | **0.089** | 290 MiB |
-| `piper-en_US-lessac-medium`, the shipped default | en-US | Blizzard-2013 voice, research only | 60 MiB | not scored | 0.109 | 368 MB |
+| `piper-en_US-joe-medium`, the shipped default | en-US | CC0-1.0 voice, GPL-3.0 engine | 60 MiB | 5.88% | **0.089** | 290 MiB |
+| `piper-en_US-lessac-medium` | en-US | Blizzard-2013 voice, research only | 60 MiB | not scored | 0.109 | 368 MB |
 | BlueTTS 2.5, voice `adam` | he, en, es, it, de | MIT engine, LibriTTS voice | 269 MiB | **4.88%** | 0.600 | 1.5 GiB |
 
 The piper row is the project default and was measured through this repository's own server.
@@ -131,15 +131,13 @@ Speech to text defaults to Parakeet v2:
 That is the shipped default. It costs a 631 MiB download. A caller who wants the small one
 sets `stt.batch_model` to `sherpa-whisper-base-en` and downloads 153 MiB instead.
 
-Text to speech ships `piper-en_US-lessac-medium`, and that is a problem worth naming: it is
-Blizzard-2013, research only, so the default voice cannot be used in a shipped product.
-`piper-en_US-joe-medium` is the voice to pick instead. It is the cheapest that is still
-intelligible, its license allows commercial use, and the accuracy gap to BlueTTS is one
-point against a sevenfold cost. BlueTTS is the right second engine for a caller who wants a
-better voice and will pay for it in a Python sidecar.
+Text to speech ships `piper-en_US-joe-medium`. It is the cheapest voice that is still
+intelligible, its license is CC0 so it can be used in a shipped product, and the accuracy gap
+to BlueTTS is one point against a sevenfold cost. BlueTTS is the right second engine for a
+caller who wants a better voice and will pay for it in a Python sidecar.
 
-Changing the default is a config change and a decision, not a measurement, so it has not
-been made here.
+`piper-en_US-lessac-medium` stays in the catalog and is no longer the default: it is
+Blizzard-2013, research only, and a default is what every caller gets without choosing.
 
 Nothing in the catalog is a model whose numbers were taken from a model card. If a model
 here has no row, it has not been measured, and the table says so rather than implying a
