@@ -273,6 +273,6 @@ every commit.
 
 ## Where to look next
 
-`README.md` for the whole surface. `examples.md` for worked calls with real output.
+`README.md` for the whole surface. `EXAMPLES.md` for worked calls with real output.
 `PRD.md` for what the product promises. `docs/security.md` for the exposure decisions.
 `AGENTS.md` if you are changing this repository rather than using it.

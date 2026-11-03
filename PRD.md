@@ -276,7 +276,7 @@ because it runs batch models and natively streaming models behind the same C API
     This is the model family the WebSocket path uses.
   The default batch model is Parakeet v2, because it measured best on both corpora at
   whisper-base speed. The measurements, the languages each model covers, and the
-  licenses are in docs/MODELS.md.
+  licenses are in MODELS.md.
 - F4.2 Batch endpoint accepts `audio/wav`, `audio/mpeg`, `audio/ogg`, and raw PCM.
   Files are transcoded to 16 kHz mono in process.
 - F4.3 Response includes the full text, segment list with start and end times, and
@@ -787,7 +787,7 @@ and cannot do about a flood.
 - F16.3 ALPN offers `h2` and `http/1.1`.
 - F16.4 Two documented paths to a certificate: certbot for a public hostname, and a
   locally generated pair for a LAN or a development machine. Both examples are run in CI
-  or in `examples.md` against a real server before they are published.
+  or in `EXAMPLES.md` against a real server before they are published.
 - F16.5 The default bind stays loopback. Exposing the port is an explicit edit, and the
   README says what that exposes.
 - F16.6 Every route has a body limit. The speech route raises it deliberately, and the

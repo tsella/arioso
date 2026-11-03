@@ -185,7 +185,8 @@ other services, no home paths, no personal data in the title, the body, or the d
    names, ports, home paths, or personal data in code, comments, docs, commits, or
    history. State the reason without the private fact.
 4. **Docs match the code in the same commit.** `PRD.md` holds requirements,
-   `docs/plans/` holds tasks with ticks, `examples.md` holds measured transcripts,
+   `docs/plans/` holds tasks with ticks, `EXAMPLES.md` holds measured transcripts,
+   `MODELS.md` holds the measurements behind the model defaults,
    `docs/lessons.md` holds what a change taught, `docs/security.md` holds the threat
    notes. A behaviour change that is not in the docs is not finished.
 5. **Conventional commits, one logical change each.** `feat`, `fix`, `docs`, `chore`,
