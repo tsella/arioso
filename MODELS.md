@@ -68,6 +68,11 @@ every number.
 
 ## Text to speech
 
+The catalog holds all 178 Piper voices, across 53 languages, with their hashes, sizes, sample
+rates, speaker counts and the licence each card states. This table carries only the voices that
+were measured here. A voice in the catalog and not in this table is untested, not endorsed: the
+catalog says what a voice is, this file says what it scored.
+
 | id | languages | license | size | round trip | RTF | memory |
 | --- | --- | --- | --- | --- | --- | --- |
 | `piper-en_US-joe-medium`, the shipped default | en-US | CC0-1.0 voice, GPL-3.0 engine | 60 MiB | 5.88% | **0.089** | 290 MiB |
@@ -112,6 +117,24 @@ file.
 
 Parakeet v2 was not re-measured in this pass. Its row above stands as measured on the
 corpora, and it is the default because it wins on accuracy at whisper-base speed.
+
+## The rest of the catalog
+
+Adding the other 177 voices changed what a reader can assume, so three facts belong here rather
+than in a table with a hundred blank cells:
+
+- **Licence.** 82 voices state a licence that allows commercial use, 20 are CC-BY-NC, 8 CC-BY-SA,
+  7 CC-BY, 6 Apache, 3 research only. 73 state nothing on the card, and the catalog records those
+  as `unknown` with `commercial_use: false` rather than guessing from the dataset. Most English
+  cards also name a parent model that is research only; that is kept in `meta.finetuned_from`,
+  because a voice finetuned from a research-only corpus needs a decision before it ships.
+- **Rate.** 138 voices are 22.05 kHz, 39 are 16 kHz, one is 44.1 kHz (`fr_FR-tom-medium`). Read
+  the rate from the voice's config; the quality tier does not decide it.
+- **Speakers.** 26 voices are multi-speaker, and their names are in the catalog, so a caller
+  picks `prudence` rather than guessing at an integer.
+
+None of the 177 has a round trip measurement, and this file will not invent one. The first voice
+that is proposed as a default needs a row here, measured the way the rows above were.
 
 ## Recommended configuration
 

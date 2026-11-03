@@ -2,13 +2,19 @@
 
 use arioso_models::Manifest;
 
+/// How many mutations to try. The manifest is a quarter of a megabyte, so a cut every five
+/// bytes was fifty thousand parses of a growing document: the sample is spread over the whole
+/// file instead, which still reaches the last voice and every kind of damage.
+const CASES: usize = 300;
+
 fn mutations(valid: &str) -> Vec<String> {
     let bytes = valid.as_bytes();
+    let step = (bytes.len() / CASES).max(1);
     let mut out = Vec::new();
-    for cut in (0..bytes.len()).step_by(5) {
+    for cut in (0..bytes.len()).step_by(step) {
         out.push(String::from_utf8_lossy(&bytes[..cut]).into_owned());
     }
-    for at in (0..bytes.len()).step_by(9) {
+    for at in (0..bytes.len()).step_by(step) {
         let mut copy = bytes.to_vec();
         copy[at] = b'\0';
         out.push(String::from_utf8_lossy(&copy).into_owned());

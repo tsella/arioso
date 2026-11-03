@@ -77,7 +77,17 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
     /// List catalog models and whether they are installed.
-    List,
+    List {
+        /// Only models for this language code, such as `en_US` or `pt`.
+        #[arg(long)]
+        language: Option<String>,
+        /// Only speech to text, or only text to speech.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only models whose files are on disk.
+        #[arg(long)]
+        installed: bool,
+    },
     /// Download one model, resuming where a previous run stopped.
     Download {
         /// Model id from the manifest.
@@ -100,7 +110,18 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Models { command } => match command {
-            ModelsCommand::List => list_models(&config),
+            ModelsCommand::List {
+                language,
+                kind,
+                installed,
+            } => list_models(
+                &config,
+                ModelFilter {
+                    language: language.as_deref(),
+                    kind: kind.as_deref(),
+                    installed_only: installed,
+                },
+            ),
             ModelsCommand::Download { id } => download(&config, &id),
         },
         Command::Doctor => doctor(&config, &config_path),
@@ -155,24 +176,76 @@ fn load_manifest(config: &Config) -> Result<Manifest> {
     })
 }
 
-fn list_models(config: &Config) -> Result<()> {
+/// Which models `arioso models list` prints.
+struct ModelFilter<'a> {
+    /// A language code or its family: `en_US` matches one voice set, `pt` matches every
+    /// Portuguese one.
+    language: Option<&'a str>,
+    /// `tts` or `stt`.
+    kind: Option<&'a str>,
+    /// Skip anything that is not on disk.
+    installed_only: bool,
+}
+
+fn list_models(config: &Config, filter: ModelFilter<'_>) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
-    println!(
+    // Written through a locked handle and errors dropped: `arioso models list | head` closes
+    // the pipe, and a catalog of 181 rows is exactly what a person pipes.
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(
+        out,
         "{:<34} {:<5} {:>10}  {:<10} state",
         "id", "kind", "size", "license"
     );
+    let mut shown = 0;
     for model in &manifest.models {
         let installed = model_installed(model, &dir);
-        let state = if installed { "installed" } else { "missing" };
-        println!(
+        let kind = format!("{:?}", model.kind).to_lowercase();
+        if filter.installed_only && !installed {
+            continue;
+        }
+        if filter.kind.is_some_and(|wanted| wanted != kind) {
+            continue;
+        }
+        if let Some(wanted) = filter.language {
+            let wanted = wanted.replace('_', "-");
+            // A catalog with 178 voices is unreadable as one list, so the filter is the
+            // difference between a catalog and a wall.
+            let languages = model
+                .meta
+                .get("languages")
+                .and_then(serde_json::Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|code| {
+                            let code = code.replace('_', "-");
+                            code.eq_ignore_ascii_case(&wanted)
+                                || code
+                                    .split('-')
+                                    .next()
+                                    .is_some_and(|family| family.eq_ignore_ascii_case(&wanted))
+                        })
+                })
+                .unwrap_or(false);
+            if !languages {
+                continue;
+            }
+        }
+        shown += 1;
+        let _ = writeln!(
+            out,
             "{:<34} {:<5} {:>10}  {:<10} {}",
             model.id,
-            format!("{:?}", model.kind).to_lowercase(),
+            kind,
             human_bytes(model.total_size()),
             model.license,
-            state
+            if installed { "installed" } else { "missing" }
         );
+    }
+    if shown == 0 {
+        let _ = writeln!(out, "no models match");
     }
     Ok(())
 }

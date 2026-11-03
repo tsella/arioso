@@ -254,8 +254,12 @@ ready`, or `failed { reason }`.
 
 - F3.1 Engines: `piper` and `kokoro` in v1. Selection is per request and by default
   from config.
-- F3.2 Piper: 178 voices across 53 languages, 22.05 kHz for medium and high tiers,
-  16 kHz for low. Voice IDs are the upstream names (`en_US-lessac-medium`).
+- F3.2 Piper: 178 voices across 53 languages, all of them in the catalog. Sample rate follows
+  the quality tier: 22.05 kHz for 124 medium and most high voices, 16 kHz for the low and x_low
+  ones, and one outlier at 44.1 kHz (`fr_FR-tom-medium`). The rate is read from the voice's own
+  config, never assumed from the tier. Voice IDs are the upstream names
+  (`en_US-lessac-medium`), one of which is not ASCII (`pt_PT-tugão-medium`), so ids are matched
+  and encoded as UTF-8 end to end.
 - F3.3 Kokoro: 54 voices, 24 kHz, English plus seven other languages. Voice IDs are
   the upstream names (`af_heart`, `am_michael`).
 - F3.4 Controls: voice, speed (0.5 to 2.0), speaker (`sid`), and format (`wav`, `pcm`). `pcm` is raw
@@ -277,6 +281,15 @@ ready`, or `failed { reason }`.
   voice accepts only 0 and refuses the rest by name.
 - F3.9 Text passes through normalization and the user dictionary before phonemization.
   See F14.
+
+- F3.12 `arioso models list` filters by language (a code or a family), by kind, and by whether
+  the files are on disk, because 178 rows is a catalog only with a filter.
+
+- F3.11 Twenty-six voices are multi-speaker, and each carries its speaker names in the catalog.
+  Eighty-two voices state a licence that allows commercial use; seventy-three state none, which
+  the catalog records as `unknown` with `commercial_use: false` rather than guessing. The card's
+  parent model is kept in `meta.finetuned_from`, because most English voices are finetuned from
+  a research-only corpus and that has to be read before anything ships.
 
 ### F4. Speech to text
 

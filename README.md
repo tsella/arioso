@@ -133,7 +133,15 @@ It costs three dollars and ninety nine cents on the third at two thirty in the a
 
 ## Voices
 
-The catalog's voices, all verified by SHA-256 against the manifest:
+The catalog holds all 178 Piper voices across 53 languages, each verified by SHA-256 against
+the manifest. Filter the list rather than reading it:
+
+```console
+$ arioso models list --kind tts --language pt
+$ arioso models list --language en --installed
+```
+
+Five English voices, as a starting point:
 
 | id | tier | rate | licence | commercial |
 | --- | --- | --- | --- | --- |
@@ -142,6 +150,15 @@ The catalog's voices, all verified by SHA-256 against the manifest:
 | `piper-en_US-joe-medium` | medium, the default | 22.05 kHz | CC0 | yes |
 | `piper-en_US-kathleen-low` | low | 16 kHz | CC0 | yes |
 | `piper-en_GB-alba-medium` | medium | 22.05 kHz | CC BY 4.0 | yes |
+
+Twenty-six voices are multi-speaker and take `--sid` or `"sid"` on the request; the names are in
+the catalog, so a picker does not have to ask for an integer. `piper-pt_PT-tugão-medium` is the
+one id with a letter outside ASCII, and it is tested end to end: download, hash, and speech.
+
+Eighty-two voices state a licence that allows commercial use. Seventy-three state none, which
+the catalog records as `unknown` with `commercial_use: false` rather than guessing, and most
+English cards name a parent model that is research only, kept in `meta.finetuned_from`. Read both
+before shipping a voice in a product.
 
 Pick one with `ARIOSO_TTS_VOICE` or `tts.voice`. Measured cost per voice, with model load
 included, is in [MODELS.md](MODELS.md): the four medium and low voices sit within a fifth of

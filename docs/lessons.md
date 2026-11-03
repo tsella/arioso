@@ -145,6 +145,22 @@ a reason other than a measurement is a performance change that has to be measure
 run the end-to-end number with the bound and without it, on the smallest machine the project
 supports. A design argument that sounds careful is not evidence.
 
+## A catalog of 178 is a different object from a catalog of 5
+
+Adding every Piper voice changed three things that a five-voice catalog hid.
+
+A voice name can contain a letter outside ASCII (`pt_PT-tugão-medium`). Every URL built from it
+has to be percent-encoded per path segment, and the identifier has to survive a path parameter,
+a JSON body and a file name. Test the one with the accent, not a sample of five.
+
+A voice's licence is in its `MODEL_CARD`, as a markdown bullet (`* License: CC0`), not as YAML.
+Most cards carry none, and the honest value for those is `unknown` with `commercial_use: false`,
+not a guess from the dataset. Most English voices also name a parent model that is research only,
+so the parent is recorded beside the licence: it has to be read before anything ships.
+
+A list of 178 rows is only usable with a filter, and a piped list is normal, so a closed pipe is
+not an error. Both were invisible at five.
+
 ## An accented letter is spoken, not dropped
 
 The spelling rules read ASCII. A Portuguese or French word is not in an English dictionary, so it

@@ -3120,10 +3120,21 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let first = &json["models"][0];
-        assert_eq!(first["id"], "piper-en_US-lessac-medium");
-        assert_eq!(first["kind"], "tts");
-        assert_eq!(first["installed"], false);
+        let models = json["models"].as_array().expect("models is a list");
+        // The catalog is sorted by language, so the first entry is not a fixed voice. The
+        // test names the voice it wants instead of trusting the order.
+        assert!(models.len() >= 5, "the catalog holds five voices at least");
+        assert!(
+            models[0]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("piper-"))
+        );
+        let lessac = models
+            .iter()
+            .find(|model| model["id"] == "piper-en_US-lessac-medium")
+            .expect("lessac is in the catalog");
+        assert_eq!(lessac["kind"], "tts");
+        assert_eq!(lessac["installed"], false);
     }
 
     #[tokio::test]
