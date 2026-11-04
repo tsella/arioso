@@ -1,5 +1,6 @@
 //! Shared text handling for arioso.
 
+pub mod alloc_count;
 pub mod chunk;
 pub mod dictionary;
 pub mod normalize;
