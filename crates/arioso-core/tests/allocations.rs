@@ -5,7 +5,7 @@
 //! says how many it now costs.
 
 use arioso_core::alloc_count::{Counting, measure_warm};
-use arioso_core::{NormalizeOptions, chunk_text, normalize_with};
+use arioso_core::{NormalizeOptions, chunk_text, normalize_with, sentences};
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -96,6 +96,26 @@ fn an_ordinal_and_an_attached_unit_are_spoken_without_temporary_strings() {
 }
 
 #[test]
+fn sentence_splitting_does_not_lowercase_the_word_before_every_period() {
+    // Two hundred periods, none of them after an abbreviation. The old `closes_sentence`
+    // allocated a lowercase copy of the preceding word at each one.
+    let document = PLAIN.repeat(200);
+    let (pieces, stats) = measure_warm(|| sentences(&document));
+    eprintln!("sentences 200: {stats:?} pieces={}", pieces.len());
+    assert_eq!(pieces.len(), 200);
+    assert!(
+        stats.allocations <= 7,
+        "splitting costs {} allocations: {stats:?}",
+        stats.allocations
+    );
+    assert!(
+        stats.bytes <= 8_128,
+        "splitting requests {} bytes: {stats:?}",
+        stats.bytes
+    );
+}
+
+#[test]
 fn a_long_document_is_chunked_without_quadratic_scanning() {
     let document = PLAIN.repeat(200);
     let (chunks, stats) = measure_warm(|| chunk_text(&document, 200));
@@ -105,5 +125,10 @@ fn a_long_document_is_chunked_without_quadratic_scanning() {
         stats.allocations <= 5,
         "chunking costs {} allocations: {stats:?}",
         stats.allocations
+    );
+    assert!(
+        stats.bytes <= 1_984,
+        "chunking requests {} bytes: {stats:?}",
+        stats.bytes
     );
 }

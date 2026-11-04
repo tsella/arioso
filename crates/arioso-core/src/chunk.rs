@@ -94,12 +94,15 @@ fn closes_sentence(text: &str, index: usize, ch: char) -> bool {
         // p.m., e.g., U.S.A. all end in a single letter.
         Some(_) => {
             let word = preceding_word(&text[..index]);
-            word.chars().count() > 1 && !ABBREVIATIONS.contains(&word.to_lowercase().as_str())
+            word.chars().count() > 1
+                && !ABBREVIATIONS
+                    .iter()
+                    .any(|short| short.eq_ignore_ascii_case(word))
         }
     }
 }
 
-/// The run of letters just before `text`'s end, lowercased by the caller.
+/// The run of letters just before `text`'s end, in the case it was written.
 fn preceding_word(text: &str) -> &str {
     let start = text
         .char_indices()
@@ -111,16 +114,36 @@ fn preceding_word(text: &str) -> &str {
 
 /// Byte length of the longest acceptable prefix of `s`.
 fn best_cut(s: &str, limit: usize) -> usize {
-    if s.chars().count() <= limit {
+    best_cut_counted(s, limit, &mut 0)
+}
+
+/// The same, adding the number of characters read to `examined`.
+///
+/// The first version counted every character left in the document on every call, to learn
+/// what the loop below learns within `limit` characters, which made chunking quadratic in
+/// the length of the input. The count here stops at the limit, and the test that asserts a
+/// bound on it is the reason the counter exists.
+fn best_cut_counted(s: &str, limit: usize, examined: &mut usize) -> usize {
+    // The byte index of the character after the limit, or `s.len()` when there is none.
+    let mut boundary = s.len();
+    for (seen, (index, _)) in s.char_indices().enumerate() {
+        *examined += 1;
+        if seen == limit {
+            boundary = index;
+            break;
+        }
+    }
+    if boundary == s.len() {
         return s.len();
     }
 
     let mut sentence_end = None;
     let mut space_end = None;
-    for (consumed, (index, ch)) in s.char_indices().enumerate() {
-        if consumed == limit {
+    for (index, ch) in s.char_indices() {
+        if index >= boundary {
             break;
         }
+        *examined += 1;
         let after = index + ch.len_utf8();
         if matches!(ch, '.' | '!' | '?' | '…') {
             sentence_end = Some(after);
@@ -134,9 +157,11 @@ fn best_cut(s: &str, limit: usize) -> usize {
         // Keep the trailing space with the sentence it follows, so the next
         // chunk does not begin with one.
         let mut used = s[..cut].chars().count();
+        *examined += used;
         while used < limit {
             match s[cut..].chars().next() {
                 Some(ch) if ch.is_whitespace() => {
+                    *examined += 1;
                     cut += ch.len_utf8();
                     used += 1;
                 }
@@ -150,9 +175,42 @@ fn best_cut(s: &str, limit: usize) -> usize {
         return cut;
     }
 
-    s.char_indices()
-        .nth(limit)
-        .map_or(s.len(), |(index, _)| index)
+    boundary
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::best_cut_counted;
+
+    #[test]
+    fn chunking_a_long_document_reads_a_bounded_number_of_characters() {
+        // Two thousand sentences, cut into hundreds of chunks. The first version counted
+        // every character left in the document on every call, so the characters read grew
+        // with the square of the input. This bound is linear in the document.
+        let document = "The quick brown fox jumps over the lazy dog. ".repeat(2000);
+        let limit = 200;
+        let mut examined = 0;
+        let mut start = 0;
+        let mut chunks = 0;
+        while start < document.len() {
+            let take = best_cut_counted(&document[start..], limit, &mut examined);
+            assert!(take > 0, "a chunk must advance");
+            assert!(
+                document[start..start + take].chars().count() <= limit,
+                "chunk {chunks} is over the limit"
+            );
+            start += take;
+            chunks += 1;
+        }
+        let chars = document.chars().count();
+        assert_eq!(start, document.len(), "the chunks must cover the document");
+        assert!(chunks > 100, "expected many chunks, got {chunks}");
+        eprintln!("{chunks} chunks, {examined} characters read for {chars}");
+        assert!(
+            examined <= 4 * chars,
+            "{chunks} chunks read {examined} characters for a {chars} character document"
+        );
+    }
 }
 
 #[cfg(test)]
