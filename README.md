@@ -52,12 +52,12 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 459 tests
+- 475 tests
 
-Not built yet:
+Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 
-- The Piper and sherpa-onnx engines on iOS and Android: each links a prebuilt native library
-  that needs a build for the target, and no such build is wired here yet
+- The Piper and sherpa-onnx engines on iOS and Android: each links a prebuilt native
+  library that needs a build for the target, and no such build is wired here yet
 - Silero voice activity detection, which the PRD names as the default over the energy
   detector that ships
 - A release signing key: the manifest loader verifies a detached signature when one is
@@ -76,9 +76,9 @@ the workspace, where `.cargo/config.toml` and the linker both find it:
 ```bash
 mkdir -p vendor
 curl -sSL -o /tmp/ort.tgz \
-  https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
+  https://github.com/microsoft/onnxruntime/releases/download/v1.30.1/onnxruntime-linux-x64-1.30.1.tgz
 tar xzf /tmp/ort.tgz -C vendor
-mv vendor/onnxruntime-linux-x64-1.22.0 vendor/onnxruntime
+mv vendor/onnxruntime-linux-x64-1.30.1 vendor/onnxruntime
 ```
 
 `vendor/` is gitignored. The build sets `ORT_LIB_LOCATION` from it, and two rpaths record
@@ -201,7 +201,7 @@ the releases that already exist, and one build carries exactly one key.
 
 ## Voices
 
-The catalog holds all 178 Piper voices across 53 languages, each verified by SHA-256 against
+The catalog holds all 178 Piper voices across 58 languages, each verified by SHA-256 against
 the manifest. Filter the list rather than reading it:
 
 ```console
@@ -395,8 +395,7 @@ a refusal out of `arioso_last_error`, and frees everything. `abi/smoke.sh` build
 compiles that program against it, and runs it; CI does the same on Linux and macOS, where the
 program is executed rather than only linked.
 
-Not in this version, and named so the absence is a decision: a download progress callback,
-because downloads already have an event stream over HTTP, and a mobile smoke test, because a
+Not in this version, and named so the absence is a decision: a mobile smoke test, because a
 simulator run needs a machine this project does not have. `mobile.yml` still builds the
 library for iOS and Android.
 
@@ -429,7 +428,7 @@ The config file lives at `~/.local/share/arioso/config.json` on Linux,
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server": { "bind": "127.0.0.1:10101", "first_message_timeout_ms": 10000 },
   "tts": {
     "enabled": true,
@@ -548,12 +547,14 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 | `arioso-models` | Model manifest, cache layout, resumable downloader, integrity checks |
 | `arioso-core` | Sentence splitting, chunking, normalization, the user dictionary |
 | `arioso-g2p` | Phoneme id map, CMUdict, ARPAbet to IPA |
-| `arioso-tts-piper` | Piper VITS inference through ONNX Runtime; the one text to audio path |
+| `arioso-tts-piper` | Piper VITS inference through ONNX Runtime |
+| `arioso-tts-kokoro` | Kokoro-82M inference through ONNX Runtime; fifty-four styles in one archive |
 | `arioso-stt-sherpa` | Speech to text through sherpa-onnx: Parakeet transducers and Whisper |
 | `arioso-vad` | Energy voice activity detection, and the rule that cuts an utterance |
 | `arioso-server` | axum router, the engines behind it, the downloader, and the WebSocket paths |
 | `arioso-abi` | The C surface: the exported functions, and the header generated from them |
 | `arioso-cli` | The `arioso` binary |
+| `arioso-speaks` | The terminal front end: voices, phonemes, playback, save |
 
 More worked examples, with the real output of each, are in [EXAMPLES.md](EXAMPLES.md).
 Guidance for putting this in your own program, with a use case per shape, is in

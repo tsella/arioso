@@ -277,7 +277,7 @@ ready`, or `failed { reason }`.
   holds that engine. A `PATCH /v1/config` that changes it drops the slot, so the next
   request loads the other engine; editing the file takes a restart, because the server
   reads it at start.
-- F3.2 Piper: 178 voices across 53 languages, all of them in the catalog. Sample rate follows
+- F3.2 Piper: 178 voices across 58 languages, all of them in the catalog. Sample rate follows
   the quality tier: 22.05 kHz for 124 medium and most high voices, 16 kHz for the low and x_low
   ones, and one outlier at 44.1 kHz (`fr_FR-tom-medium`). The rate is read from the voice's own
   config, never assumed from the tier. Voice IDs are the upstream names

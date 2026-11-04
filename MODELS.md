@@ -70,7 +70,7 @@ every number.
 
 ## Text to speech
 
-The catalog holds all 178 Piper voices, across 53 languages, with their hashes, sizes, sample
+The catalog holds all 178 Piper voices, across 58 languages, with their hashes, sizes, sample
 rates, speaker counts and the licence each card states, and one Kokoro entry: `kokoro-82m` is
 one model holding 54 voice styles, so its `tts.voice` names a style inside the archive rather
 than a catalog id. This table carries only the voices that
