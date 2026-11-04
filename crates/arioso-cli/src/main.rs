@@ -8,7 +8,7 @@ use arioso_config::Config;
 use arioso_g2p::CmuDict;
 use arioso_models::{
     CheckedManifest, Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX,
-    SignatureState, models_dir, signature_path,
+    SignatureState, generate_keypair, models_dir, sign_manifest_file, signature_path,
 };
 use arioso_tts_kokoro::KokoroVoice;
 use arioso_tts_piper::{PiperVoice, form_symbols};
@@ -108,6 +108,20 @@ enum ModelsCommand {
         /// Model id from the manifest.
         id: String,
     },
+    /// Mint the Ed25519 keypair that signs a released manifest.
+    Keygen {
+        /// Where to write the private key. Refuses a path that already exists.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Sign a manifest, writing the detached signature beside it as <manifest>.sig.
+    Sign {
+        /// Manifest to sign.
+        manifest: PathBuf,
+        /// Private key written by `arioso models keygen`.
+        #[arg(long)]
+        key: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,6 +152,8 @@ fn main() -> Result<()> {
                 },
             ),
             ModelsCommand::Download { id } => download(&config, &id),
+            ModelsCommand::Keygen { out } => keygen(out),
+            ModelsCommand::Sign { manifest, key } => sign(&manifest, &key),
         },
         Command::Doctor { strict } => doctor(&config, &config_path, strict),
         Command::Say {
@@ -211,6 +227,42 @@ fn load_manifest_checked(config: &Config) -> Result<CheckedManifest> {
             path.display()
         )
     })
+}
+
+/// Where `arioso models keygen` writes when `--out` is left out.
+const DEFAULT_SIGNING_KEY: &str = "arioso-signing.key";
+
+/// Mint a release keypair, printing the public half and nothing else on stdout.
+///
+/// The private half goes to a file the operator chose, and nowhere else: not the log, not
+/// stderr, not a summary. The one line on stdout is the exact string that belongs in
+/// `RELEASE_PUBKEY_HEX`, so a release script can capture it without parsing prose.
+fn keygen(out: Option<PathBuf>) -> Result<()> {
+    let path = out.unwrap_or_else(|| PathBuf::from(DEFAULT_SIGNING_KEY));
+    let public = generate_keypair(&path)?;
+    println!("{public}");
+    eprintln!(
+        "private key written to {} (0600 on unix); never commit it",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Sign a manifest in place, writing `<manifest>.sig` beside it.
+///
+/// The public key is printed next to the path because the operator's next act is to compare
+/// it with the constant compiled into the build they are about to ship.
+fn sign(manifest: &Path, key: &Path) -> Result<()> {
+    let signed = sign_manifest_file(manifest, key)?;
+    println!("wrote {}", signed.signature_path.display());
+    println!("public key {}", signed.public_key_hex);
+    if !RELEASE_PUBKEY_HEX.trim().is_empty() && RELEASE_PUBKEY_HEX.trim() != signed.public_key_hex {
+        eprintln!(
+            "warning: this build compiles in {}, so it will refuse this signature",
+            RELEASE_PUBKEY_HEX
+        );
+    }
+    Ok(())
 }
 
 /// Which models `arioso models list` prints.
