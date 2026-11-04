@@ -37,7 +37,7 @@ the same. Without it, `arioso-tts-piper` fails to link.
 | crate | owns |
 | --- | --- |
 | `arioso-config` | the config file, its schema, every validation rule |
-| `arioso-models` | the model catalog, the manifest, resumable downloads |
+| `arioso-models` | the model catalog, the manifest, resumable downloads, signing |
 | `arioso-core` | text normalization, sentence splitting, one written form to several spoken forms |
 | `arioso-g2p` | grapheme to phoneme: the dictionary, then the letter-to-sound rules |
 | `arioso-tts-piper` | the Piper engine, synthesis, WAV output |
@@ -45,11 +45,12 @@ the same. Without it, `arioso-tts-piper` fails to link.
 | `arioso-stt-sherpa` | the sherpa-onnx engine, transcription |
 | `arioso-vad` | voice activity detection for streaming |
 | `arioso-server` | the HTTP and WebSocket routes, auth, TLS, limits |
+| `arioso-abi` | the C surface: eleven exported functions, and the header generated from them |
 | `arioso-cli` | the binary: commands, sidecar, PID files, logging setup |
 
-Dependency direction is downward: `arioso-cli` and `arioso-server` at the top,
-`arioso-core` and `arioso-config` near the bottom. A new engine crate depends on nothing
-above it.
+Dependency direction is downward: `arioso-cli`, `arioso-server` and `arioso-abi` at the
+top, `arioso-core` and `arioso-config` near the bottom. A new engine crate depends on
+nothing above it.
 
 ## The gate
 
@@ -129,16 +130,48 @@ model also carries `meta.model_type`, which decides the graph: `whisper`, a tran
 `nemo_transducer` or `zipformer`, or `zipformer_streaming` for an export built for online
 decoding. A streaming entry is loaded once and decoded as audio arrives, and `stt.stream_model`
 names it; leave that empty and the socket stays on `stt.batch_model`. Hash the files you
-actually downloaded, not the sizes in the model card.
-
-**Change how text is spoken.** Normalization lives in `arioso-core`, phonemes in
-`arioso-g2p`. Dictionary entries win over rules. One written form may map to several
-spoken forms, tried in order. Whatever you change, add a test with the exact sentence and
-the exact expected phonemes.
+actually downloaded, not the sizes in the model card. Then sign the manifest with the release
+key (`arioso models sign models/manifest.json --key <key file>`), because a build with a key
+compiled in refuses a manifest whose sibling `.sig` is missing or does not verify.
 
 **Add an engine.** New crate implementing the same trait as `arioso-tts-piper`, wire it
 into `arioso-server` behind a config value, keep the license permissive or gate it behind
 a feature. Add the model entries.
+
+## Using it from C
+
+`crates/arioso-abi` builds `libarioso` as a shared library, a static library, and an rlib.
+The surface is `include/arioso.h`, and that file is generated from the Rust doc comments, so
+change the Rust and regenerate; a hand edit is overwritten by the CI check that diffs the
+committed header against a fresh one.
+
+```bash
+cargo build --profile c-abi            # catch_unwind cannot catch in an aborting build
+abi/generate-header.sh                 # rewrite include/arioso.h, then commit it
+abi/smoke.sh                           # compile and run the C program against the static lib
+```
+
+Four rules hold the surface together. Nothing allocated by the library is freed by the
+caller's allocator; `arioso_free` is the only way. No panic crosses the boundary, which is
+why the profile is `c-abi` and not `release`. Errors are a negative code plus a sentence from
+`arioso_last_error`, which is thread-local and must not be freed. A callback that returns
+nonzero cancels, and the call returns `ARIOSO_CANCELLED`, which is not a failure.
+
+What v1 leaves out is deliberate: no download progress callback, and no on-device smoke test
+for the mobile builds. `PRD.md` F10.8 records both, with the reason.
+
+## Signing the manifest
+
+`arioso models keygen --out <file>` mints an Ed25519 keypair and prints the public key as the
+hex string that goes into `RELEASE_PUBKEY_HEX` in `crates/arioso-models/src/manifest.rs`. The
+private key is written once, with owner-only permissions, and never printed. `arioso models
+sign <manifest> --key <file>` writes the sibling `.sig` over the manifest's bytes as they sit
+on disk.
+
+A build with a key compiled in refuses a manifest that does not prove itself. A build with no
+key loads it, reports `unsigned` in `doctor`, and warns at startup, because silence there is
+how an unsigned release ships by accident. Never commit a key or a test fixture that contains
+one; tests mint a throwaway pair in a temporary directory.
 
 ## Submitting a pull request
 
@@ -222,6 +255,13 @@ other services, no home paths, no personal data in the title, the body, or the d
   missing static library, delete `target/sherpa-onnx-prebuilt` and the crate's build
   fingerprint.
 - **Test models directories leak between runs.** Clear `ARIOSO_*` before the suite.
+- **`catch_unwind` catches nothing in an aborting build.** The release profile aborts, so
+  the C surface is built with `--profile c-abi`, which inherits release and unwinds. Build
+  the other profile and the panic guard becomes a comment.
+- **A generated header that is hand-edited is a header that lies.** Change the Rust, run
+  `abi/generate-header.sh`, and commit the result; CI diffs it.
+- **`cargo build` can report "Finished" without relinking** when the shell has a stale
+  `CARGO_TARGET_DIR`. Check the binary's timestamp, not the exit code, before a live test.
 
 ## Where the truth lives
 
