@@ -214,6 +214,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arioso-tts-kokoro"
+version = "0.1.7"
+dependencies = [
+ "arioso-core",
+ "arioso-g2p",
+ "ort",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "arioso-tts-piper"
 version = "0.1.7"
 dependencies = [

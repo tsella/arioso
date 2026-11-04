@@ -1,0 +1,22 @@
+[package]
+name = "arioso-tts-kokoro"
+description = "Kokoro voice inference for arioso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+arioso-core.workspace = true
+arioso-g2p.workspace = true
+ort.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
