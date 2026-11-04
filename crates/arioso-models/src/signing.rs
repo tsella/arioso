@@ -32,6 +32,14 @@ pub enum SigningError {
         /// Underlying error.
         source: std::io::Error,
     },
+    /// The file is not a manifest, so a signature over it would prove nothing.
+    #[error("{path} is not a manifest: {detail}")]
+    NotAManifest {
+        /// The file that was read.
+        path: PathBuf,
+        /// What the parser said.
+        detail: String,
+    },
     /// The key file is not one raw 32-byte seed.
     #[error("{path} is not a private key: expected {PRIVATE_KEY_LEN} raw bytes, found {found}")]
     BadKey {
@@ -133,13 +141,24 @@ pub fn sign_manifest_file(manifest: &Path, key: &Path) -> Result<SignedManifest,
         path: manifest.to_path_buf(),
         source,
     })?;
+    // The bytes that get signed are the bytes on disk, but a file that is not a manifest is
+    // not a release: signing one would put a valid signature on a document that cannot load.
+    crate::manifest::Manifest::parse(&bytes).map_err(|error| SigningError::NotAManifest {
+        path: manifest.to_path_buf(),
+        detail: error.to_string(),
+    })?;
     let signature = hex::encode(signing.sign(&bytes).to_bytes());
     let signature_path = crate::manifest::signature_path(manifest);
-    std::fs::write(&signature_path, format!("{signature}\n")).map_err(|source| {
-        SigningError::Io {
-            path: signature_path.clone(),
-            source,
-        }
+    // Written beside the target and renamed, so a reader sees the old signature or the new
+    // one and never half a file.
+    let temporary = signature_path.with_extension("sig.tmp");
+    std::fs::write(&temporary, format!("{signature}\n")).map_err(|source| SigningError::Io {
+        path: temporary.clone(),
+        source,
+    })?;
+    std::fs::rename(&temporary, &signature_path).map_err(|source| SigningError::Io {
+        path: signature_path.clone(),
+        source,
     })?;
     Ok(SignedManifest {
         signature_path,
@@ -240,6 +259,30 @@ mod tests {
             std::fs::read(&key).unwrap(),
             before,
             "the key was rewritten"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_manifest_is_not_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("release.key");
+        generate_keypair(&key).unwrap();
+        let path = dir.path().join("manifest.json");
+        // Valid JSON, but not a manifest: the `models` field is the wrong type.
+        std::fs::write(&path, br#"{"schema_version": 1, "models": "nope"}"#).unwrap();
+
+        let error = sign_manifest_file(&path, &key).unwrap_err();
+        assert!(
+            matches!(error, SigningError::NotAManifest { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("manifest.json"),
+            "the refusal names the file: {error}"
+        );
+        assert!(
+            !crate::manifest::signature_path(&path).exists(),
+            "a refused signing writes no signature"
         );
     }
 
