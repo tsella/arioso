@@ -29,7 +29,7 @@ cargo build --release
 ./target/release/arioso serve                       # HTTP on 127.0.0.1:10101
 ```
 
-A build needs a native ONNX Runtime. Put release 1.22.0 at `vendor/onnxruntime`. CI does
+A build needs a native ONNX Runtime. Put release 1.30.1 at `vendor/onnxruntime`. CI does
 the same. Without it, `arioso-tts-piper` fails to link.
 
 ## Crates
@@ -258,6 +258,9 @@ other services, no home paths, no personal data in the title, the body, or the d
 - **`catch_unwind` catches nothing in an aborting build.** The release profile aborts, so
   the C surface is built with `--profile c-abi`, which inherits release and unwinds. Build
   the other profile and the panic guard becomes a comment.
+- **A validation at one caller is a validation the next caller skips.** `check_sid` was
+  asked by the HTTP route and the socket, and not by the render both of them call, so a
+  third caller got a silent fallback. Put the rule on the path every caller takes.
 - **A generated header that is hand-edited is a header that lies.** Change the Rust, run
   `abi/generate-header.sh`, and commit the result; CI diffs it.
 - **`cargo build` can report "Finished" without relinking** when the shell has a stale
