@@ -1208,8 +1208,25 @@ struct Bucket {
 pub struct RateLimiter {
     per_second: f64,
     burst: f64,
-    buckets: Mutex<std::collections::HashMap<std::net::IpAddr, Bucket>>,
+    buckets: Mutex<Buckets>,
 }
+
+/// The bucket table, and when it was last swept.
+///
+/// The sweep time lives beside the table so one lock covers both: two locks would let a
+/// request see a swept table and a stale timestamp, and sweep again for nothing.
+#[derive(Debug)]
+struct Buckets {
+    map: std::collections::HashMap<std::net::IpAddr, Bucket>,
+    last_sweep: std::time::Instant,
+}
+
+/// The table never holds more than this, however many addresses a burst brings.
+///
+/// A public server sees an address once and never again; without a bound the table is a
+/// leak an attacker controls. 4,096 buckets is a few hundred kilobytes and far more than
+/// the number of clients one host serves at once.
+const MAX_BUCKETS: usize = 4_096;
 
 impl RateLimiter {
     /// Build a limiter from the configured rate and burst.
@@ -1218,7 +1235,23 @@ impl RateLimiter {
         Self {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
-            buckets: Mutex::new(std::collections::HashMap::new()),
+            buckets: Mutex::new(Buckets {
+                map: std::collections::HashMap::new(),
+                last_sweep: std::time::Instant::now(),
+            }),
+        }
+    }
+
+    /// How long an empty bucket takes to refill.
+    ///
+    /// A bucket idle for this long is indistinguishable from a new one, so it is what the
+    /// sweep drops and how often the sweep is worth running. A rate of zero never refills,
+    /// so nothing is ever idle enough to drop.
+    fn refill_interval(&self) -> std::time::Duration {
+        if self.per_second > 0.0 {
+            std::time::Duration::from_secs_f64(self.burst / self.per_second)
+        } else {
+            std::time::Duration::MAX
         }
     }
 
@@ -1229,14 +1262,31 @@ impl RateLimiter {
     pub fn take(&self, client: std::net::IpAddr) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        // A table that grows with every address ever seen is a leak. Dropping the buckets
-        // that have been idle long enough to be full again costs one pass and bounds it.
-        if buckets.len() > 1024 {
-            buckets.retain(|_, bucket| {
+        let refill = self.refill_interval();
+        // A table that grows with every address ever seen is a leak, so buckets idle long
+        // enough to be full again are dropped. At most one pass per refill interval: during
+        // a burst no bucket is idle enough to drop, so a pass per request removed nothing
+        // and repeated the full scan.
+        if now.duration_since(buckets.last_sweep) >= refill {
+            buckets.map.retain(|_, bucket| {
                 now.duration_since(bucket.last).as_secs_f64() * self.per_second < self.burst
             });
+            buckets.last_sweep = now;
         }
-        let bucket = buckets.entry(client).or_insert(Bucket {
+        // The sweep is not enough on its own: a burst of distinct addresses is all active,
+        // so nothing is idle and the map would grow without bound. At the cap, the least
+        // recently used entry makes room for a new client.
+        if buckets.map.len() >= MAX_BUCKETS && !buckets.map.contains_key(&client) {
+            if let Some(oldest) = buckets
+                .map
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last)
+                .map(|(address, _)| *address)
+            {
+                buckets.map.remove(&oldest);
+            }
+        }
+        let bucket = buckets.map.entry(client).or_insert(Bucket {
             tokens: self.burst,
             last: now,
         });
@@ -4607,6 +4657,45 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "not_active_model");
+    }
+
+    /// The bucket table has a fixed maximum, however many distinct addresses arrive.
+    #[test]
+    fn the_rate_limiter_table_stops_at_its_cap() {
+        let limiter = RateLimiter::new(1, 1);
+        let address = |index: u32| std::net::IpAddr::V4(std::net::Ipv4Addr::from(index));
+        for index in 1..=(MAX_BUCKETS as u32 + 64) {
+            limiter.take(address(index));
+        }
+        let buckets = limiter.buckets.lock().unwrap();
+        assert_eq!(buckets.map.len(), MAX_BUCKETS);
+    }
+
+    /// At the cap, a new client evicts the bucket that has gone unused longest.
+    #[test]
+    fn the_rate_limiter_evicts_the_least_recently_used_client() {
+        let limiter = RateLimiter::new(1, 1);
+        let address = |index: u32| std::net::IpAddr::V4(std::net::Ipv4Addr::from(index));
+        let first = address(1);
+        limiter.take(first);
+        for index in 2..=(MAX_BUCKETS as u32) {
+            limiter.take(address(index));
+        }
+        // Timestamps from a fast loop can tie, so the oldest bucket is aged explicitly.
+        {
+            let mut buckets = limiter.buckets.lock().unwrap();
+            buckets.map.get_mut(&first).unwrap().last =
+                std::time::Instant::now() - std::time::Duration::from_secs(60);
+        }
+        let newcomer = address(MAX_BUCKETS as u32 + 1);
+        limiter.take(newcomer);
+        let buckets = limiter.buckets.lock().unwrap();
+        assert!(
+            !buckets.map.contains_key(&first),
+            "the oldest bucket stayed"
+        );
+        assert!(buckets.map.contains_key(&newcomer));
+        assert_eq!(buckets.map.len(), MAX_BUCKETS);
     }
 
     #[tokio::test]
