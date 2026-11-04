@@ -97,10 +97,22 @@ impl ModelSpec {
     /// Whether `voice` names this model, by id or by the bare voice name.
     ///
     /// The config may say `en_US-joe-medium`, which is the file stem, or
-    /// `piper-en_US-joe-medium`, which is the catalog id. Both mean this model.
+    /// `piper-en_US-joe-medium`, which is the catalog id. Both mean this model, and
+    /// nothing else does: the catalog holds one voice per language and quality, so a
+    /// suffix match lets `medium` name whichever medium voice sorts first.
     #[must_use]
     pub fn is_voice(&self, voice: &str) -> bool {
-        self.kind == Kind::Tts && (self.id == voice || self.id.ends_with(voice))
+        if self.kind != Kind::Tts || voice.is_empty() {
+            return false;
+        }
+        self.id == voice || self.bare_id() == Some(voice)
+    }
+
+    /// The id without its engine prefix, which is the voice's file stem.
+    fn bare_id(&self) -> Option<&str> {
+        self.id
+            .strip_prefix(self.engine.as_str())
+            .and_then(|rest| rest.strip_prefix('-'))
     }
 }
 
@@ -408,6 +420,31 @@ mod tests {
         assert!(by_id.is_some());
         assert_eq!(by_id.map(|m| &m.id), by_name.map(|m| &m.id));
         assert!(manifest.find_voice("no-such-voice").is_none());
+    }
+
+    #[test]
+    fn a_voice_name_is_matched_whole_not_by_suffix() {
+        // Every language ships a medium and a low voice, so a suffix match made "medium"
+        // name the first one in catalog order, in a language the config never asked for.
+        let manifest = Manifest::parse(include_bytes!("../../../models/manifest.json")).unwrap();
+        for partial in ["medium", "low", "", "joe"] {
+            assert!(
+                manifest.find_voice(partial).is_none(),
+                "{partial:?} named a voice"
+            );
+        }
+        assert_eq!(
+            manifest
+                .find_voice("en_US-joe-medium")
+                .map(|m| m.id.as_str()),
+            Some("piper-en_US-joe-medium")
+        );
+        assert_eq!(
+            manifest
+                .find_voice("piper-en_US-joe-medium")
+                .map(|m| m.id.as_str()),
+            Some("piper-en_US-joe-medium")
+        );
     }
 
     #[test]
