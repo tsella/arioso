@@ -3,7 +3,11 @@
 //! The writer emits mono 16-bit PCM. The reader accepts 16-bit PCM and 32-bit float,
 //! mono or stereo, because those are what a recording or another tool hands over.
 
+use std::io::Write;
 use std::path::Path;
+
+/// Bytes in a mono 16-bit PCM WAV header.
+const HEADER_LEN: usize = 44;
 
 /// Write `samples` (nominally -1.0 to 1.0) as a mono 16-bit PCM WAV file.
 ///
@@ -17,8 +21,8 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
 /// The same audio as an in-memory WAV, for HTTP responses.
 #[must_use]
 pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(44 + samples.len() * 2);
-    header(sample_rate, samples.len() * 2, &mut out);
+    let mut out = Vec::with_capacity(HEADER_LEN + samples.len() * 2);
+    out.extend_from_slice(&header(sample_rate, samples.len() * 2));
     write_pcm_s16le(samples, &mut out);
     out
 }
@@ -29,37 +33,50 @@ pub fn to_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 /// bytes per sample instead of six.
 #[must_use]
 pub fn to_bytes_from_pcm(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(44 + pcm.len());
-    header(sample_rate, pcm.len(), &mut out);
+    let mut out = Vec::with_capacity(HEADER_LEN + pcm.len());
+    out.extend_from_slice(&header(sample_rate, pcm.len()));
     out.extend_from_slice(pcm);
     out
 }
 
 /// The same, written to a file.
 ///
+/// The header goes to the handle and then the payload does. Building the file in memory
+/// first held a second copy of the audio for as long as the write took, which for a
+/// minutes-long document is the largest buffer the process owns.
+///
 /// # Errors
 ///
 /// Returns the underlying I/O error.
 pub fn write_wav_pcm(path: &Path, pcm: &[u8], sample_rate: u32) -> std::io::Result<()> {
-    std::fs::write(path, to_bytes_from_pcm(pcm, sample_rate))
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(&header(sample_rate, pcm.len()))?;
+    file.write_all(pcm)
 }
 
 /// The 44 byte header for `data_len` bytes of mono 16-bit PCM.
-fn header(sample_rate: u32, data_len: usize, out: &mut Vec<u8>) {
+fn header(sample_rate: u32, data_len: usize) -> [u8; HEADER_LEN] {
     let data_len = data_len as u32;
+    let mut out = [0u8; HEADER_LEN];
+    let mut at = 0;
+    let mut put = |bytes: &[u8]| {
+        out[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+    };
 
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
+    put(b"RIFF");
+    put(&(36 + data_len).to_le_bytes());
+    put(b"WAVEfmt ");
+    put(&16u32.to_le_bytes());
+    put(&1u16.to_le_bytes()); // PCM
+    put(&1u16.to_le_bytes()); // mono
+    put(&sample_rate.to_le_bytes());
+    put(&(sample_rate * 2).to_le_bytes()); // byte rate
+    put(&2u16.to_le_bytes()); // block align
+    put(&16u16.to_le_bytes()); // bits per sample
+    put(b"data");
+    put(&data_len.to_le_bytes());
+    out
 }
 
 /// Samples as little-endian 16-bit PCM, without a container.
