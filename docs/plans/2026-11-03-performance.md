@@ -93,3 +93,16 @@ A round trip through one recognizer would be the way to check it, and it has not
 - The `preroll` drain is a `copy_within` now rather than a ring buffer. The window is
   bounded by `preroll_ms`, and the buffer is handed over wholesale when an utterance
   starts, which a ring buffer would make more expensive than the copy it saves.
+
+## A third pass: the phonemizer
+
+The bounds added with the counting allocator named two costs in `arioso-g2p` that nobody
+had measured: a two-word sentence and a spelled-out word. Both sit in the path every
+synthesis request walks, once per word. The counts below are from
+`cargo test -p arioso-g2p --test allocations -- --test-threads=1`, which is the only way to
+run them: the lock in `alloc_count` keeps two measurements apart, not the rest of the
+process (see `docs/lessons.md`).
+
+| Finding | Change | Before | After |
+| --- | --- | --- | --- |
+| PERF-H1 | `arpabet` uppercases a token into a four-byte stack buffer and reads a `&'static [&'static str]` from the table; `extend_ipa` appends into the caller's vector | `phonemes_for_text("hello world")` 28 allocations, 1,492 bytes; `lts::pronounce("zorbansky")` 49, 1,678 | 12, 1,093; 31, 1,231 |

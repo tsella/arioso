@@ -416,3 +416,12 @@ answer before the fix. Check both directions of a rule before committing it: the
 motivated the change, and the input that was already right. The exception kept here is
 deliberate — an adverb ending in `ly` keeps its ordinal — and it is written in the commit
 message so the next reader knows it is a decision.
+
+## A counting allocator counts the tests beside it
+
+`alloc_count::measure` holds a lock, so two measurements never overlap. It does not stop a
+third test from allocating outside its own measurement while another one runs: building a
+126,052-entry dictionary string costs 126,000 allocations, and with the default thread count
+they landed inside the measurement of a one-word call, which reported 145 allocations
+instead of 7. Rule: run the allocation tests with `--test-threads=1`. The lock serialises
+measurements; it cannot serialise the process.

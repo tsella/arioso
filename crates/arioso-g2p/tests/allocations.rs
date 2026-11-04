@@ -47,7 +47,7 @@ fn a_two_word_sentence_is_phonemized_in_a_bounded_number_of_allocations() {
     eprintln!("two words: {stats:?} symbols={}", phonemes.symbols.len());
     assert!(!phonemes.symbols.is_empty());
     assert!(
-        stats.allocations <= 28,
+        stats.allocations <= 12,
         "two words cost {} allocations: {stats:?}",
         stats.allocations
     );
@@ -59,7 +59,7 @@ fn a_spelled_out_word_costs_a_bounded_number_of_allocations() {
     eprintln!("lts one word: {stats:?} symbols={}", symbols.len());
     assert!(!symbols.is_empty());
     assert!(
-        stats.allocations <= 49,
+        stats.allocations <= 31,
         "one spelled word costs {} allocations: {stats:?}",
         stats.allocations
     );
