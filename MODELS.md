@@ -71,7 +71,9 @@ every number.
 ## Text to speech
 
 The catalog holds all 178 Piper voices, across 53 languages, with their hashes, sizes, sample
-rates, speaker counts and the licence each card states. This table carries only the voices that
+rates, speaker counts and the licence each card states, and one Kokoro entry: `kokoro-82m` is
+one model holding 54 voice styles, so its `tts.voice` names a style inside the archive rather
+than a catalog id. This table carries only the voices that
 were measured here. A voice in the catalog and not in this table is untested, not endorsed: the
 catalog says what a voice is, this file says what it scored.
 
@@ -79,6 +81,7 @@ catalog says what a voice is, this file says what it scored.
 | --- | --- | --- | --- | --- | --- | --- |
 | `piper-en_US-joe-medium`, the shipped default | en-US | CC0-1.0 voice, GPL-3.0 engine | 60 MiB | 5.88% | **0.089** | 290 MiB |
 | `piper-en_US-lessac-medium` | en-US | Blizzard-2013 voice, research only | 60 MiB | not scored | 0.109 | 368 MB |
+| `kokoro-82m`, voice `af_heart` | en-US, en-GB, es, fr, hi, it, ja, pt, zh | Apache-2.0 | 338 MiB | not scored | 1.76 | not measured |
 | BlueTTS 2.5, voice `adam` | he, en, es, it, de | MIT engine, LibriTTS voice | 269 MiB | **4.88%** | 0.600 | 1.5 GiB |
 
 The piper row is the project default and was measured through this repository's own server.
@@ -90,6 +93,15 @@ that scored 36 percent before it was fixed, is in
 BlueTTS is the more intelligible voice by about a point and costs 6.7 times the synthesis
 time and five times the memory. The vendor calls it the fastest open source TTS; on four CPU
 cores it is the slower of the two.
+
+The Kokoro row is not comparable with the other two yet. Its RTF is the marginal cost of a
+6.8 second sentence measured by running one and then four of it through `arioso say
+--engine kokoro`, so the 325 MB graph load is subtracted; the machine was shared, at load
+average 14 on four cores, and the same pair of runs ranged from 1.76 to 3.07 across three
+attempts. Treat 1.76 as the best observed rather than a settled figure, and the missing
+round-trip score as unmeasured rather than good. The catalog entry pins the three files the
+engine needs — the graph, the voice archive and the model's symbol table — by the hashes of
+the bytes this repository actually downloaded.
 
 ## Speed, with process start included
 
