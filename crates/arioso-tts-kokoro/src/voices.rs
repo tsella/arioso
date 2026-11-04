@@ -286,10 +286,28 @@ fn parse_npy(bytes: &[u8]) -> Result<Style, KokoroError> {
             )));
         }
     };
+    // A table with no rows is a table with no style. `Style::row` would index it and
+    // slice past the end, so the shape is refused where it is read rather than where it
+    // is used.
+    if rows == 0 {
+        return Err(KokoroError::Voices(
+            "style array has no rows, so it holds no style to speak with".into(),
+        ));
+    }
     let start = prefix + header_len;
-    let expected = rows * width * 4;
+    let expected = rows
+        .checked_mul(width)
+        .and_then(|cells| cells.checked_mul(4))
+        .ok_or_else(|| {
+            KokoroError::Voices(format!(
+                "style array shape ({rows}, 1, {width}) is larger than this loader can address"
+            ))
+        })?;
+    let end = start.checked_add(expected).ok_or_else(|| {
+        KokoroError::Voices("style array starts past the end of the entry".to_string())
+    })?;
     let data = bytes
-        .get(start..start + expected)
+        .get(start..end)
         .ok_or_else(|| KokoroError::Voices("style array is shorter than its shape".into()))?;
     let data = data
         .chunks_exact(4)
@@ -408,6 +426,14 @@ mod tests {
         let error = voices.style("xx_nobody").unwrap_err().to_string();
         assert!(error.contains("af_heart"), "{error}");
         assert!(error.contains("am_michael"), "{error}");
+    }
+
+    #[test]
+    fn a_style_array_with_no_rows_is_refused() {
+        let (_dir, path) = written(&archive(&[("af_heart", &[], 0, 2)]));
+        let voices = VoiceFile::open(&path).unwrap();
+        let error = voices.style("af_heart").unwrap_err().to_string();
+        assert!(error.contains("no rows"), "{error}");
     }
 
     #[test]
