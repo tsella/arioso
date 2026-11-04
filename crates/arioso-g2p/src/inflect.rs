@@ -47,6 +47,9 @@ const SUFFIXES: [(&str, Kind); 10] = [
     ("s", Kind::Plural),
 ];
 
+/// Most stems one suffix can be tried against.
+const MAX_BASES: usize = 5;
+
 /// The pronunciation of `word` built from a dictionary entry plus a regular suffix.
 ///
 /// Returns `None` when the word has no suffix, when the stem is not in the dictionary, or
@@ -54,76 +57,113 @@ const SUFFIXES: [(&str, Kind); 10] = [
 /// the letter-to-sound rules.
 #[must_use]
 pub fn derive(word: &str, dictionary: &CmuDict) -> Option<String> {
+    // The candidate stems are written into this one buffer and tried as slices. They used
+    // to be a `Vec<String>` of `format!` results, allocated for every suffix attempt of
+    // every word the dictionary does not hold.
+    let mut scratch = String::new();
     for (suffix, kind) in SUFFIXES {
         if word.len() <= suffix.len() || !word.ends_with(suffix) {
             continue;
         }
-        for base in bases(word, suffix) {
-            let Some(pronunciations) = dictionary.lookup(&base) else {
+        let stem = &word[..word.len() - suffix.len()];
+        let (ranges, count) = bases(stem, suffix, &mut scratch);
+        for range in &ranges[..count] {
+            let Some(pronunciations) = dictionary.lookup(&scratch[range.clone()]) else {
                 continue;
             };
             let Some(first) = pronunciations.first() else {
                 continue;
             };
+            let mut out = String::with_capacity(first.len() + 8);
             // `knives` is not `knife` plus a sound: the `f` turns into a `v`, and the
             // plural is then the voiced one. English spells that with `ves`.
-            let base = if suffix == "ves" {
-                voiced_f(first)
+            if suffix == "ves" {
+                push_voiced_f(first, &mut out);
             } else {
-                first.to_string()
-            };
-            let added = added_sound(kind, &base);
+                out.push_str(first);
+            }
+            let added = added_sound(kind, &out);
             if added.is_empty() {
                 continue;
             }
-            return Some(format!("{base} {added}"));
+            out.push(' ');
+            out.push_str(added);
+            return Some(out);
         }
     }
     None
 }
 
-/// Stems to try for one suffix, in the order most likely to be the word's base.
-fn bases(word: &str, suffix: &str) -> Vec<String> {
-    let stem = &word[..word.len() - suffix.len()];
-    let mut candidates = Vec::with_capacity(4);
+/// Stems to try for one suffix, as byte ranges into `scratch`, most likely first.
+///
+/// Returns the ranges and how many of them are used. The morphology is the same as it was
+/// written one `format!` per candidate; only the storage changed.
+fn bases(
+    stem: &str,
+    suffix: &str,
+    scratch: &mut String,
+) -> ([std::ops::Range<usize>; MAX_BASES], usize) {
+    scratch.clear();
+    let mut ranges: [std::ops::Range<usize>; MAX_BASES] = std::array::from_fn(|_| 0..0);
+    let mut count = 0;
     match suffix {
         // `cities` is `city`, `tried` is `try`.
-        "ies" | "ied" => candidates.push(format!("{stem}y")),
+        "ies" | "ied" => push_candidate(scratch, &mut ranges, &mut count, &[stem, "y"]),
         // `knives` is `knife`, `wolves` is `wolf`.
         "ves" => {
-            candidates.push(format!("{stem}fe"));
-            candidates.push(format!("{stem}f"));
+            push_candidate(scratch, &mut ranges, &mut count, &[stem, "fe"]);
+            push_candidate(scratch, &mut ranges, &mut count, &[stem, "f"]);
         }
         // `boxes` is `box`, `houses` is `house`.
         "es" => {
-            candidates.push(stem.to_owned());
-            candidates.push(format!("{stem}e"));
+            push_candidate(scratch, &mut ranges, &mut count, &[stem]);
+            push_candidate(scratch, &mut ranges, &mut count, &[stem, "e"]);
         }
-        "s" => candidates.push(stem.to_owned()),
+        "s" => push_candidate(scratch, &mut ranges, &mut count, &[stem]),
         // A dropped `e` (`making` is `make`), a doubled consonant (`running` is `run`), and
         // a `y` written as `i` (`happily` is `happy`).
         _ => {
-            candidates.push(format!("{stem}e"));
-            candidates.push(stem.to_owned());
+            push_candidate(scratch, &mut ranges, &mut count, &[stem, "e"]);
+            push_candidate(scratch, &mut ranges, &mut count, &[stem]);
             if let Some(single) = undoubled(stem) {
-                candidates.push(single);
+                push_candidate(scratch, &mut ranges, &mut count, &[single]);
             }
         }
     }
     if stem.len() > 1 && stem.ends_with('i') {
-        candidates.push(format!("{}y", &stem[..stem.len() - 1]));
+        push_candidate(
+            scratch,
+            &mut ranges,
+            &mut count,
+            &[&stem[..stem.len() - 1], "y"],
+        );
     }
-    candidates
+    (ranges, count)
+}
+
+/// Record one candidate stem, made of `parts` joined, as a range into `scratch`.
+fn push_candidate(
+    scratch: &mut String,
+    ranges: &mut [std::ops::Range<usize>; MAX_BASES],
+    count: &mut usize,
+    parts: &[&str],
+) {
+    let start = scratch.len();
+    for part in parts {
+        scratch.push_str(part);
+    }
+    ranges[*count] = start..scratch.len();
+    *count += 1;
 }
 
 /// `stopp` is `stop`; anything else is unchanged.
-fn undoubled(stem: &str) -> Option<String> {
+fn undoubled(stem: &str) -> Option<&str> {
     let mut characters = stem.chars().rev();
     let last = characters.next()?;
     if characters.next()? != last || !last.is_ascii_alphabetic() {
         return None;
     }
-    Some(stem[..stem.len() - 1].to_owned())
+    Some(&stem[..stem.len() - 1])
 }
 
 /// The phonemes the suffix adds, chosen by the last phoneme of the base.
@@ -160,15 +200,18 @@ fn added_sound(kind: Kind, base: &str) -> &'static str {
 }
 
 /// `N AY1 F` becomes `N AY1 V`: the `f` of `knife` is voiced in `knives`.
-fn voiced_f(pronunciation: &str) -> String {
-    let mut tokens: Vec<String> = pronunciation.split(' ').map(str::to_owned).collect();
-    if let Some(last) = tokens.last_mut() {
-        let digits: String = last.chars().filter(char::is_ascii_digit).collect();
-        if last.trim_end_matches(|c: char| c.is_ascii_digit()) == "F" {
-            *last = format!("V{digits}");
-        }
+fn push_voiced_f(pronunciation: &str, out: &mut String) {
+    let (head, last) = match pronunciation.rfind(' ') {
+        Some(space) => (&pronunciation[..=space], &pronunciation[space + 1..]),
+        None => ("", pronunciation),
+    };
+    out.push_str(head);
+    if last.trim_end_matches(|c: char| c.is_ascii_digit()) == "F" {
+        out.push('V');
+        out.push_str(&last[1..]);
+    } else {
+        out.push_str(last);
     }
-    tokens.join(" ")
 }
 
 /// The last phoneme of a pronunciation, without its stress digit.

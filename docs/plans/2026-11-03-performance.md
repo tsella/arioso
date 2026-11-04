@@ -106,3 +106,4 @@ allocations for a call that costs 7 (see `docs/lessons.md`).
 | Finding | Change | Before | After |
 | --- | --- | --- | --- |
 | PERF-H1 | `arpabet` uppercases a token into a four-byte stack buffer and reads a `&'static [&'static str]` from the table; `extend_ipa` appends into the caller's vector | `phonemes_for_text("hello world")` 28 allocations, 1,492 bytes; `lts::pronounce("zorbansky")` 49, 1,678 | 12, 1,093; 31, 1,231 |
+| PERF-H3 | `lts` folds a word into one `String` and holds each token as a base plus a stress digit, so nothing is joined and re-parsed; `phonemes_for_text` keeps one word buffer and one symbol buffer for the sentence and copies a word only when it is reported; `inflect::derive` writes its candidate stems into one buffer | `phonemes_for_text("hello world")` 12, 1,093; `lts::pronounce("zorbansky")` 31, 1,231; `phonemes_for_text("avengers")` 12, 791 | 7, 883; 7, 1,129; 8, 642 |

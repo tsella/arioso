@@ -51,39 +51,58 @@ pub fn phonemes_for_text(
 ) -> Phonemes {
     let expanded = normalize_with(text, options);
     let mut phonemes = Phonemes::default();
+    // One buffer for the word being looked up, and one for its symbols, both reused for
+    // every word in the sentence: this used to build two strings per word before it knew
+    // whether the word was even in the dictionary.
+    let mut cleaned = String::new();
+    let mut spoken: Vec<&'static str> = Vec::new();
     for word in
         expanded.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
     {
-        let cleaned: String = word
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '\'')
-            .collect::<String>()
-            .to_lowercase();
+        cleaned.clear();
+        let mut lower_needed = false;
+        for ch in word.chars() {
+            if !(ch.is_alphanumeric() || ch == '\'') {
+                continue;
+            }
+            lower_needed |= !is_lowercase_as_is(ch);
+            cleaned.push(ch);
+        }
+        if lower_needed {
+            // `str::to_lowercase` maps a capital sigma at the end of a word to the final
+            // form, which a character-by-character pass cannot see. A word already in
+            // lower case, which is nearly all of them, pays nothing.
+            cleaned = cleaned.to_lowercase();
+        }
         if cleaned.is_empty() {
             continue;
         }
-        let spoken: Vec<&'static str> = if let Some(pronunciations) = dictionary.lookup(&cleaned) {
-            arpabet::to_ipa(&pronunciations[0])
+        spoken.clear();
+        let mut from_rules = false;
+        if let Some(pronunciations) = dictionary.lookup(&cleaned) {
+            arpabet::extend_ipa(&pronunciations[0], &mut spoken);
         } else if let Some(derived) = crate::inflect::derive(&cleaned, dictionary) {
             // A regular suffix on an entry: the dictionary holds `avenger` and not
             // `avengers`, `walk` and not `walked`. This is not a guess, so it is not
             // reported as one.
-            arpabet::to_ipa(&derived)
+            arpabet::extend_ipa(&derived, &mut spoken);
         } else {
             // Not in the dictionary and not a regular form, so spell it out. A guessed
             // word is heard and named; a skipped one leaves a hole.
-            let guessed = if allow_rules {
-                crate::lts::pronounce(&cleaned)
-            } else {
-                Vec::new()
-            };
-            if guessed.is_empty() {
-                phonemes.missing.push(cleaned);
-            } else {
-                phonemes.guessed.push(cleaned);
+            from_rules = true;
+            if allow_rules {
+                crate::lts::extend_ipa(&cleaned, &mut spoken);
             }
-            guessed
-        };
+        }
+        if from_rules {
+            // The word is only copied once it is known to be reported, which is the rare
+            // case; the lookup itself reads the buffer.
+            if spoken.is_empty() {
+                phonemes.missing.push(cleaned.clone());
+            } else {
+                phonemes.guessed.push(cleaned.clone());
+            }
+        }
         if spoken.is_empty() {
             continue;
         }
@@ -92,9 +111,15 @@ pub fn phonemes_for_text(
             // word boundaries, and without them the sequence reads as one long word.
             phonemes.symbols.push(" ");
         }
-        phonemes.symbols.extend(spoken);
+        phonemes.symbols.extend_from_slice(&spoken);
     }
     phonemes
+}
+
+/// Whether `ch` lowercases to itself, without building the lowercase form.
+fn is_lowercase_as_is(ch: char) -> bool {
+    let mut lower = ch.to_lowercase();
+    lower.next() == Some(ch) && lower.next().is_none()
 }
 
 /// Symbols for one dictionary form, without the reports.

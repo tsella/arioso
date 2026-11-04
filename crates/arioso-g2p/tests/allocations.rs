@@ -47,7 +47,7 @@ fn a_two_word_sentence_is_phonemized_in_a_bounded_number_of_allocations() {
     eprintln!("two words: {stats:?} symbols={}", phonemes.symbols.len());
     assert!(!phonemes.symbols.is_empty());
     assert!(
-        stats.allocations <= 12,
+        stats.allocations <= 7,
         "two words cost {} allocations: {stats:?}",
         stats.allocations
     );
@@ -59,8 +59,24 @@ fn a_spelled_out_word_costs_a_bounded_number_of_allocations() {
     eprintln!("lts one word: {stats:?} symbols={}", symbols.len());
     assert!(!symbols.is_empty());
     assert!(
-        stats.allocations <= 31,
+        stats.allocations <= 7,
         "one spelled word costs {} allocations: {stats:?}",
+        stats.allocations
+    );
+}
+
+#[test]
+fn a_derived_inflection_costs_a_bounded_number_of_allocations() {
+    // `avengers` is not in this dictionary; `avenger` is, so the word is derived rather
+    // than guessed. The suffix machinery runs for every word the dictionary does not hold.
+    let parsed = CmuDict::parse("avenger AH0 V EH1 N JH ER0\n");
+    let options = NormalizeOptions::default();
+    let (phonemes, stats) = measure_warm(|| phonemes_for_text("avengers", &parsed, options, true));
+    eprintln!("derived word: {stats:?} symbols={}", phonemes.symbols.len());
+    assert!(phonemes.guessed.is_empty(), "{phonemes:?}");
+    assert!(
+        stats.allocations <= 8,
+        "a derived word costs {} allocations: {stats:?}",
         stats.allocations
     );
 }
