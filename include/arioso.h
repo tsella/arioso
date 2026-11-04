@@ -217,6 +217,14 @@ typedef int32_t (*AriosoAudioCallback)(const int16_t *pcm,
                                        uint32_t sample_rate,
                                        void *user);
 
+// Called with download progress.
+//
+// `received` and `total` are bytes, and `total` is the size of the whole model rather than
+// of the file being fetched. Return `0` to keep going, or any nonzero value to stop: the
+// fetch is dropped at its next step, the partial files stay on disk, and a later call
+// resumes them. The callback runs on the thread that called `arioso_model_download`.
+typedef int32_t (*AriosoProgressCallback)(uint64_t received, uint64_t total, void *user);
+
 // How to transcribe.
 //
 // `struct_size` follows the same rule as `AriosoTtsOptions`.
@@ -344,6 +352,83 @@ int32_t arioso_tts_stream(struct AriosoEngine *engine,
                           const struct AriosoTtsOptions *options,
                           AriosoAudioCallback on_audio,
                           void *user);
+
+// The catalog as one JSON document.
+//
+// An array of objects: `id`, `kind`, `engine`, `license`, `commercial_use`, `installed`,
+// `state`, `bytes`, `speakers`, `languages`. `bytes` is the whole model, and `state` is
+// `installed`, `downloading`, or `not_installed`.
+//
+// `*out` receives the bytes, owned by the library until `arioso_free(buffer.data)`, and the
+// document is not NUL-terminated: `len` is its length. On any failure `*out` is `{ NULL, 0 }`.
+//
+// # Safety
+//
+// `engine` must be a live handle from `arioso_engine_new` and `out` writable for one
+// `AriosoBuffer`.
+int32_t arioso_models_json(struct AriosoEngine *engine, struct AriosoBuffer *out);
+
+// Fetch one model and wait for it, reporting progress to `on_progress`.
+//
+// A model already on disk answers `ARIOSO_OK` without touching the network. `on_progress`
+// may be null, which reports nothing.
+//
+// Blocks for the whole download, which is minutes on a slow link. A callback that returns
+// nonzero stops the fetch and this answers `ARIOSO_CANCELLED` with no error sentence.
+//
+// # Safety
+//
+// `engine` must be a live handle, `id` a NUL-terminated string valid for the call, and
+// `user` handed back to the callback untouched, so it must stay valid for the call.
+int32_t arioso_model_download(struct AriosoEngine *engine,
+                              const char *id,
+                              AriosoProgressCallback on_progress,
+                              void *user);
+
+// The phonemes a text will be spoken as, as the loaded voice builds them.
+//
+// The answer is IPA in UTF-8 and is not NUL-terminated: `len` is its length. It is what the
+// same text would be synthesized from, so a caller can show it and then edit it.
+//
+// The first call loads the voice and blocks for it.
+//
+// # Safety
+//
+// `engine` must be a live handle, `text` a NUL-terminated string valid for the call, and
+// `out` writable for one `AriosoBuffer`.
+int32_t arioso_phonemes(struct AriosoEngine *engine,
+                        const char *text,
+                        struct AriosoBuffer *out);
+
+// Synthesize phonemes a caller supplied into a WAV file in memory.
+//
+// The phonemes are spoken as written. A character that is not a phoneme, or a symbol this
+// voice has no id for, is refused with the symbol named: a caller that asked for a sound and
+// heard a different word has no way to notice.
+//
+// # Safety
+//
+// `engine` must be a live handle, `phonemes` a NUL-terminated string valid for the call,
+// `options` null or a valid `AriosoTtsOptions`, and `out` writable for one `AriosoBuffer`.
+int32_t arioso_tts_phonemes(struct AriosoEngine *engine,
+                            const char *phonemes,
+                            const struct AriosoTtsOptions *options,
+                            struct AriosoBuffer *out);
+
+// Synthesize phonemes, handing each chunk of audio to `on_audio` as it is produced.
+//
+// The same contract as [`arioso_tts_stream`], from phonemes instead of text.
+//
+// # Safety
+//
+// `engine` must be a live handle, `phonemes` a NUL-terminated string valid for the call,
+// `options` null or valid, and `on_audio` non-null. `user` is handed back to the callback
+// untouched and must stay valid for the call.
+int32_t arioso_tts_phonemes_stream(struct AriosoEngine *engine,
+                                   const char *phonemes,
+                                   const struct AriosoTtsOptions *options,
+                                   AriosoAudioCallback on_audio,
+                                   void *user);
 
 // Open a streaming transcription session.
 //

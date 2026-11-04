@@ -22,8 +22,9 @@ use arioso::{
     ARIOSO_ERR_INVALID_ARGUMENT, ARIOSO_ERR_NULL_ARGUMENT, ARIOSO_ERR_PANIC,
     ARIOSO_ERR_STRUCT_SIZE, ARIOSO_OK, AriosoBuffer, AriosoEngine, AriosoSttEvent,
     AriosoSttOptions, AriosoSttSession, AriosoTtsOptions, arioso_abi_version, arioso_engine_free,
-    arioso_engine_new, arioso_free, arioso_last_error, arioso_stt_close, arioso_stt_finish,
-    arioso_stt_open, arioso_stt_push, arioso_tts_stream, arioso_tts_synthesize,
+    arioso_engine_new, arioso_free, arioso_last_error, arioso_model_download, arioso_models_json,
+    arioso_phonemes, arioso_stt_close, arioso_stt_finish, arioso_stt_open, arioso_stt_push,
+    arioso_tts_phonemes, arioso_tts_stream, arioso_tts_synthesize,
 };
 
 /// The sentence the last call left on this thread.
@@ -232,6 +233,82 @@ fn a_struct_size_larger_than_the_library_knows_is_refused() {
     };
     assert_eq!(code, ARIOSO_ERR_STRUCT_SIZE);
 
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn the_catalog_comes_back_as_json() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // Safety: `engine` is live and `buffer` is writable for one buffer.
+    let code = unsafe { arioso_models_json(engine, &raw mut buffer) };
+    assert_eq!(code, ARIOSO_OK, "{}", last_error());
+    assert!(!buffer.data.is_null());
+    // Safety: the library wrote `len` bytes at `data`, and it is not NUL-terminated.
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.data.cast::<u8>(), buffer.len) };
+    let parsed: serde_json::Value = serde_json::from_slice(bytes).expect("a JSON document");
+    // The test catalog is empty, so the shape is an empty array rather than an object.
+    assert!(parsed.is_array(), "{parsed}");
+    // Safety: the pointer came from this library and is released once.
+    unsafe { arioso_free(buffer.data.cast()) };
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn phonemes_for_empty_text_are_refused() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let text = CString::new("   ").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // Safety: `engine` is live, `text` outlives the call, `buffer` is writable.
+    let code = unsafe { arioso_phonemes(engine, text.as_ptr(), &raw mut buffer) };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT, "{}", last_error());
+    assert!(
+        buffer.data.is_null(),
+        "a refusal hands back nothing to free"
+    );
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn a_character_that_is_not_a_phoneme_is_named() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    // `x` is a letter, not one of the symbols this engine's table emits.
+    let phonemes = CString::new("hɛlx").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // Safety: `engine` is live, the text outlives the call, `buffer` is writable.
+    let code =
+        unsafe { arioso_tts_phonemes(engine, phonemes.as_ptr(), ptr::null(), &raw mut buffer) };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT, "{}", last_error());
+    assert!(last_error().contains('x'), "{}", last_error());
+    assert!(buffer.data.is_null());
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn downloading_an_id_the_catalog_lacks_is_refused() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let id = CString::new("no-such-model").unwrap();
+    // Safety: `engine` is live, `id` outlives the call, and no callback is passed.
+    let code = unsafe { arioso_model_download(engine, id.as_ptr(), None, ptr::null_mut()) };
+    assert_eq!(code, ARIOSO_ERR_ENGINE, "{}", last_error());
+    assert!(last_error().contains("no-such-model"), "{}", last_error());
     // Safety: the handle came from `arioso_engine_new` and is freed once.
     unsafe { arioso_engine_free(engine) };
 }

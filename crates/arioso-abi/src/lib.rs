@@ -211,6 +211,15 @@ pub struct AriosoSttOptions {
     pub sample_rate: u32,
 }
 
+/// Called with download progress.
+///
+/// `received` and `total` are bytes, and `total` is the size of the whole model rather than
+/// of the file being fetched. Return `0` to keep going, or any nonzero value to stop: the
+/// fetch is dropped at its next step, the partial files stay on disk, and a later call
+/// resumes them. The callback runs on the thread that called `arioso_model_download`.
+pub type AriosoProgressCallback =
+    Option<unsafe extern "C-unwind" fn(received: u64, total: u64, user: *mut c_void) -> i32>;
+
 /// One thing the recognizer has to say.
 ///
 /// Filled by the library for the duration of the callback: `text` points into memory the
@@ -529,6 +538,289 @@ pub unsafe extern "C" fn arioso_tts_stream(
             return Err(code);
         }
         rendered.map_err(|detail| fail(ARIOSO_ERR_ENGINE, detail))
+    })
+}
+
+// ---------------------------------------------------------------------------------------
+// Catalog and phonemes
+// ---------------------------------------------------------------------------------------
+
+/// The catalog as one JSON document.
+///
+/// An array of objects: `id`, `kind`, `engine`, `license`, `commercial_use`, `installed`,
+/// `state`, `bytes`, `speakers`, `languages`. `bytes` is the whole model, and `state` is
+/// `installed`, `downloading`, or `not_installed`.
+///
+/// `*out` receives the bytes, owned by the library until `arioso_free(buffer.data)`, and the
+/// document is not NUL-terminated: `len` is its length. On any failure `*out` is `{ NULL, 0 }`.
+///
+/// # Safety
+///
+/// `engine` must be a live handle from `arioso_engine_new` and `out` writable for one
+/// `AriosoBuffer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_models_json(
+    engine: *mut AriosoEngine,
+    out: *mut AriosoBuffer,
+) -> i32 {
+    guard(|| {
+        if out.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_models_json: out is null",
+            ));
+        }
+        // Safety: `out` is writable by the caller's contract; an empty buffer first means a
+        // refusal hands back nothing to free.
+        unsafe {
+            out.write(AriosoBuffer {
+                data: std::ptr::null_mut(),
+                len: 0,
+            });
+        }
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_models_json") }?;
+        let document = state.models_json();
+        // Safety: the bytes are released by `arioso_free` and by nothing else.
+        let (data, len) = unsafe { memory::copy_out(document.as_bytes()) };
+        if data.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_ENGINE,
+                "the catalog could not be allocated",
+            ));
+        }
+        // Safety: `out` is writable for one buffer, as checked above.
+        unsafe {
+            out.write(AriosoBuffer { data, len });
+        }
+        Ok(())
+    })
+}
+
+/// Fetch one model and wait for it, reporting progress to `on_progress`.
+///
+/// A model already on disk answers `ARIOSO_OK` without touching the network. `on_progress`
+/// may be null, which reports nothing.
+///
+/// Blocks for the whole download, which is minutes on a slow link. A callback that returns
+/// nonzero stops the fetch and this answers `ARIOSO_CANCELLED` with no error sentence.
+///
+/// # Safety
+///
+/// `engine` must be a live handle, `id` a NUL-terminated string valid for the call, and
+/// `user` handed back to the callback untouched, so it must stay valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_model_download(
+    engine: *mut AriosoEngine,
+    id: *const c_char,
+    on_progress: AriosoProgressCallback,
+    user: *mut c_void,
+) -> i32 {
+    guard(|| {
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_model_download") }?;
+        // Safety: the caller guarantees a NUL-terminated string valid for the call.
+        let id = unsafe { c_str(id, "arioso_model_download: id") }?;
+        let mut cancelled = false;
+        let result = state.download_blocking(id, |received, total| {
+            let Some(callback) = on_progress else {
+                return true;
+            };
+            // Safety: the callback is the caller's, and `user` is theirs to keep valid.
+            let answer = unsafe { callback(received, total, user) };
+            cancelled = answer != 0;
+            !cancelled
+        });
+        if cancelled {
+            return Err(ARIOSO_CANCELLED);
+        }
+        result
+            .map(|_| ())
+            .map_err(|detail| fail(ARIOSO_ERR_ENGINE, detail))
+    })
+}
+
+/// The phonemes a text will be spoken as, as the loaded voice builds them.
+///
+/// The answer is IPA in UTF-8 and is not NUL-terminated: `len` is its length. It is what the
+/// same text would be synthesized from, so a caller can show it and then edit it.
+///
+/// The first call loads the voice and blocks for it.
+///
+/// # Safety
+///
+/// `engine` must be a live handle, `text` a NUL-terminated string valid for the call, and
+/// `out` writable for one `AriosoBuffer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_phonemes(
+    engine: *mut AriosoEngine,
+    text: *const c_char,
+    out: *mut AriosoBuffer,
+) -> i32 {
+    guard(|| {
+        if out.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_phonemes: out is null",
+            ));
+        }
+        // Safety: `out` is writable by the caller's contract.
+        unsafe {
+            out.write(AriosoBuffer {
+                data: std::ptr::null_mut(),
+                len: 0,
+            });
+        }
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_phonemes") }?;
+        // Safety: the caller guarantees a NUL-terminated string valid for the call.
+        let text = unsafe { c_str(text, "arioso_phonemes: text") }?;
+        let line = state
+            .phonemes_for(text)
+            .map_err(|detail| fail(ARIOSO_ERR_INVALID_ARGUMENT, detail))?;
+        // Safety: the bytes are released by `arioso_free` and by nothing else.
+        let (data, len) = unsafe { memory::copy_out(line.as_bytes()) };
+        if data.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_ENGINE,
+                "the phonemes could not be allocated",
+            ));
+        }
+        // Safety: `out` is writable for one buffer, as checked above.
+        unsafe {
+            out.write(AriosoBuffer { data, len });
+        }
+        Ok(())
+    })
+}
+
+/// Synthesize phonemes a caller supplied into a WAV file in memory.
+///
+/// The phonemes are spoken as written. A character that is not a phoneme, or a symbol this
+/// voice has no id for, is refused with the symbol named: a caller that asked for a sound and
+/// heard a different word has no way to notice.
+///
+/// # Safety
+///
+/// `engine` must be a live handle, `phonemes` a NUL-terminated string valid for the call,
+/// `options` null or a valid `AriosoTtsOptions`, and `out` writable for one `AriosoBuffer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_tts_phonemes(
+    engine: *mut AriosoEngine,
+    phonemes: *const c_char,
+    options: *const AriosoTtsOptions,
+    out: *mut AriosoBuffer,
+) -> i32 {
+    guard(|| {
+        if out.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_tts_phonemes: out is null",
+            ));
+        }
+        // Safety: `out` is writable by the caller's contract.
+        unsafe {
+            out.write(AriosoBuffer {
+                data: std::ptr::null_mut(),
+                len: 0,
+            });
+        }
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_tts_phonemes") }?;
+        // Safety: the caller guarantees a NUL-terminated string valid for the call.
+        let phonemes = unsafe { c_str(phonemes, "arioso_tts_phonemes: phonemes") }?;
+        // The characters are checked before the voice is touched: a caller who mistyped a
+        // phoneme should not be told about a voice they never asked about.
+        arioso_server::parse_phonemes(phonemes)
+            .map_err(|detail| fail(ARIOSO_ERR_INVALID_ARGUMENT, detail))?;
+        // Safety: null means the defaults; otherwise `struct_size` readable bytes.
+        let options = unsafe {
+            read_options(
+                options,
+                AriosoTtsOptions::default(),
+                "arioso_tts_phonemes: options",
+            )
+        }?;
+        let speed = speed_of(state, options.speed)?;
+        let sid = tts_sid(state, options.speaker)?;
+        let wav = state
+            .synthesize_phonemes_wav(phonemes, speed, sid)
+            .map_err(|detail| fail(ARIOSO_ERR_INVALID_ARGUMENT, detail))?;
+        // Safety: the bytes are released by `arioso_free` and by nothing else.
+        let (data, len) = unsafe { memory::copy_out(&wav) };
+        if data.is_null() {
+            return Err(fail(ARIOSO_ERR_ENGINE, "the audio could not be allocated"));
+        }
+        // Safety: `out` is writable for one buffer, as checked above.
+        unsafe {
+            out.write(AriosoBuffer { data, len });
+        }
+        Ok(())
+    })
+}
+
+/// Synthesize phonemes, handing each chunk of audio to `on_audio` as it is produced.
+///
+/// The same contract as [`arioso_tts_stream`], from phonemes instead of text.
+///
+/// # Safety
+///
+/// `engine` must be a live handle, `phonemes` a NUL-terminated string valid for the call,
+/// `options` null or valid, and `on_audio` non-null. `user` is handed back to the callback
+/// untouched and must stay valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_tts_phonemes_stream(
+    engine: *mut AriosoEngine,
+    phonemes: *const c_char,
+    options: *const AriosoTtsOptions,
+    on_audio: AriosoAudioCallback,
+    user: *mut c_void,
+) -> i32 {
+    guard(|| {
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_tts_phonemes_stream") }?;
+        // Safety: the caller guarantees a NUL-terminated string valid for the call.
+        let phonemes = unsafe { c_str(phonemes, "arioso_tts_phonemes_stream: phonemes") }?;
+        arioso_server::parse_phonemes(phonemes)
+            .map_err(|detail| fail(ARIOSO_ERR_INVALID_ARGUMENT, detail))?;
+        let Some(callback) = on_audio else {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_tts_phonemes_stream: on_audio is null",
+            ));
+        };
+        // Safety: null means the defaults; otherwise `struct_size` readable bytes.
+        let options = unsafe {
+            read_options(
+                options,
+                AriosoTtsOptions::default(),
+                "arioso_tts_phonemes_stream: options",
+            )
+        }?;
+        let speed = speed_of(state, options.speed)?;
+        let sid = tts_sid(state, options.speaker)?;
+
+        let mut stopped: Option<i32> = None;
+        let mut samples: Vec<i16> = Vec::new();
+        let rendered = state.render_phonemes_stream(phonemes, speed, sid, |chunk, rate| {
+            samples.clear();
+            samples.extend(
+                chunk
+                    .iter()
+                    .map(|&sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
+            );
+            match invoke_audio(callback, &samples, rate, user) {
+                Ok(()) => Ok(()),
+                Err(code) => {
+                    stopped = Some(code);
+                    Err(code.to_string())
+                }
+            }
+        });
+        if let Some(code) = stopped {
+            return Err(code);
+        }
+        rendered.map_err(|detail| fail(ARIOSO_ERR_INVALID_ARGUMENT, detail))
     })
 }
 
