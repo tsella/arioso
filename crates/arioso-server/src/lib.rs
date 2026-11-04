@@ -2188,10 +2188,7 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             "server.first_message_timeout_ms must be at least 100".to_string(),
         ));
     }
-    let voice_known = state.manifest.models.iter().any(|model| {
-        model.kind == arioso_models::Kind::Tts
-            && (model.id == config.tts.voice || model.id.ends_with(&config.tts.voice))
-    });
+    let voice_known = state.manifest.find_voice(&config.tts.voice).is_some();
     if !voice_known {
         return Err(unprocessable(format!(
             "tts.voice {} is not in the catalog; GET /v1/voices lists what is",
