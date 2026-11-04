@@ -123,7 +123,12 @@ older config still loads, add a validation rule with a message that names the JS
 extend `config.json.example`, and add a test for the default and for a bad value.
 
 **Add a model.** Add an entry to the manifest with id, engine, kind, language, files and
-sizes. The catalog and the downloader read the manifest; nothing else lists files.
+sizes. The catalog and the downloader read the manifest; nothing else lists files. A speech
+model also carries `meta.model_type`, which decides the graph: `whisper`, a transducer such as
+`nemo_transducer` or `zipformer`, or `zipformer_streaming` for an export built for online
+decoding. A streaming entry is loaded once and decoded as audio arrives, and `stt.stream_model`
+names it; leave that empty and the socket stays on `stt.batch_model`. Hash the files you
+actually downloaded, not the sizes in the model card.
 
 **Change how text is spoken.** Normalization lives in `arioso-core`, phonemes in
 `arioso-g2p`. Dictionary entries win over rules. One written form may map to several
