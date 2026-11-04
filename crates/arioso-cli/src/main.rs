@@ -1209,8 +1209,10 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
 /// Load the speech to text model the config names.
 ///
 /// The manifest names the three files, so a models directory holding more than one
-/// model still loads the right one. Without a manifest entry the loader falls back to
-/// searching, which refuses a directory holding files from two models.
+/// model still loads the right one. Without a manifest the loader falls back to
+/// searching, which refuses a directory holding files from two models. A manifest that is
+/// there but will not load is an error: it is the file that says which files belong to the
+/// model and that they are the ones signed for.
 fn load_engine(
     dir: &Path,
     model: &str,
@@ -1219,19 +1221,27 @@ fn load_engine(
 ) -> Result<arioso_stt_sherpa::Engine> {
     let manifest_path = dir.join("manifest.json");
     if manifest_path.exists() {
-        if let Ok(manifest) = Manifest::load(&manifest_path) {
-            if let Some(spec) = manifest.models.iter().find(|spec| spec.id == model) {
-                let paths: Vec<std::path::PathBuf> =
-                    spec.files.iter().map(|f| dir.join(&f.name)).collect();
-                let model_type = spec
-                    .meta
-                    .get("model_type")
-                    .and_then(serde_json::Value::as_str);
-                return Ok(arioso_stt_sherpa::Engine::from_manifest_files(
-                    dir, &paths, model_type, language, threads,
-                )?);
-            }
-        }
+        let manifest = Manifest::load(&manifest_path).with_context(|| {
+            format!("reading the model manifest at {}", manifest_path.display())
+        })?;
+        let spec = manifest
+            .models
+            .iter()
+            .find(|spec| spec.id == model)
+            .with_context(|| {
+                format!(
+                    "{model} is not named in the model manifest at {}",
+                    manifest_path.display()
+                )
+            })?;
+        let paths: Vec<std::path::PathBuf> = spec.files.iter().map(|f| dir.join(&f.name)).collect();
+        let model_type = spec
+            .meta
+            .get("model_type")
+            .and_then(serde_json::Value::as_str);
+        return Ok(arioso_stt_sherpa::Engine::from_manifest_files(
+            dir, &paths, model_type, language, threads,
+        )?);
     }
     Ok(arioso_stt_sherpa::Engine::load(dir, language, threads)?)
 }
@@ -1687,6 +1697,34 @@ mod tests {
         config.tts.voice = "no-such-voice".to_owned();
         std::fs::write(dir.path().join("en_US-lessac-medium.onnx.json"), "{}").unwrap();
         assert_eq!(voice_config_path(&config, dir.path()), None);
+    }
+
+    #[test]
+    fn a_corrupt_manifest_is_reported_rather_than_scanned_past() {
+        // The load was `if let Ok(manifest)`, so a manifest that would not parse was
+        // dropped on the floor and the loader went looking for whatever files were in the
+        // directory: an unverified model, loaded without a word about the manifest.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), "{\"schema_version\":").unwrap();
+        std::fs::write(dir.path().join("model.onnx"), "not a model").unwrap();
+
+        let error = load_engine(dir.path(), "sherpa-parakeet-tdt-0.6b-v2-en", None, 1)
+            .expect_err("a broken manifest is an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("manifest"), "{message}");
+    }
+
+    #[test]
+    fn a_model_the_manifest_does_not_name_is_reported() {
+        // The manifest is present and readable, so the files in the directory are not a
+        // fallback: the catalog is the list of what may be loaded.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), MANIFEST).unwrap();
+
+        let error = load_engine(dir.path(), "no-such-model", None, 1)
+            .expect_err("a model the manifest does not name is an error");
+        let message = format!("{error:#}");
+        assert!(message.contains("no-such-model"), "{message}");
     }
 
     /// The instant the certificate tests judge from: 2027-01-15 08:00 UTC.
