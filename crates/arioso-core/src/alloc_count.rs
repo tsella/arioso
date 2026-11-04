@@ -86,7 +86,9 @@ impl Stats {
 ///
 /// The value is returned so a test can keep asserting on the output while measuring it.
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Stats) {
-    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = Stats::now();
     let value = f();
     let after = Stats::now();
