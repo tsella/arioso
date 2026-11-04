@@ -345,12 +345,7 @@ impl KokoroVoice {
                             true,
                         );
                         collect(&phonemes, report);
-                        groups.push(arioso_g2p::phonemes_for_form(
-                            &entry.term,
-                            dictionary,
-                            options.normalize,
-                            true,
-                        ));
+                        groups.push(phonemes.symbols);
                     }
                 }
                 Piece::Text(segment) => {
@@ -378,21 +373,42 @@ impl KokoroVoice {
     }
 
     /// Symbols for a dictionary entry, trying its forms in order.
+    ///
+    /// A form is used only when the model can say every character of it. Taking the first
+    /// form that phonemizes to anything would choose a respelling this table cannot say
+    /// and then have its unknown characters dropped, which is a different word from the
+    /// one the next form would have given. `arioso doctor` asks the same question of the
+    /// same forms, and the two answers have to agree.
     fn entry_symbols(
         &self,
         entry: &Entry,
         dictionary: &CmuDict,
         options: RenderOptions,
     ) -> Option<Vec<&'static str>> {
-        entry.forms().into_iter().find_map(|form| {
-            let symbols = arioso_g2p::phonemes_for_form(form, dictionary, options.normalize, true);
-            if symbols.is_empty() {
-                None
-            } else {
-                Some(symbols)
-            }
-        })
+        first_sayable(&entry.forms(), dictionary, options.normalize, &self.vocab)
     }
+}
+
+/// The first form the table can say in full, in the order the entry lists them.
+fn first_sayable(
+    forms: &[&str],
+    dictionary: &CmuDict,
+    normalize: arioso_core::NormalizeOptions,
+    vocab: &Vocab,
+) -> Option<Vec<&'static str>> {
+    forms.iter().find_map(|form| {
+        let symbols = arioso_g2p::phonemes_for_form(form, dictionary, normalize, true);
+        sayable(&symbols, vocab).then_some(symbols)
+    })
+}
+
+/// Whether every character of a run of symbols is in the model's table.
+fn sayable(symbols: &[&str], vocab: &Vocab) -> bool {
+    !symbols.is_empty()
+        && symbols
+            .iter()
+            .flat_map(|symbol| symbol.chars())
+            .all(|character| vocab.id(character).is_some())
 }
 
 fn collect(phonemes: &arioso_g2p::Phonemes, report: &mut RenderReport) {
@@ -480,6 +496,39 @@ mod tests {
     fn a_run_is_padded_at_both_ends() {
         assert_eq!(padded(&[4, 5, 6]), vec![0, 4, 5, 6, 0]);
         assert_eq!(padded(&[]), vec![0, 0], "an empty run is still two frames");
+    }
+
+    #[test]
+    fn a_form_the_table_cannot_say_falls_through_to_the_next() {
+        let dictionary = CmuDict::parse("hello HH AH0 L OW1\nworld W ER1 L D\n");
+        let options = arioso_core::NormalizeOptions::default();
+        // A table holding exactly the characters `world` needs, so the first form is
+        // refused for a character it cannot say rather than for an empty result.
+        let wanted = arioso_g2p::phonemes_for_form("W ER1 L D", &dictionary, options, true);
+        let characters: Vec<char> = wanted
+            .iter()
+            .flat_map(|symbol| symbol.chars())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let table = characters
+            .iter()
+            .enumerate()
+            .map(|(index, character)| format!("\"{character}\":{}", index + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let vocab = Vocab::from_config(&format!("{{\"vocab\":{{{table}}}}}")).unwrap();
+
+        let forms = ["HH AH0 L OW1", "W ER1 L D"];
+        assert!(!sayable(
+            &arioso_g2p::phonemes_for_form(forms[0], &dictionary, options, true),
+            &vocab
+        ));
+        assert_eq!(
+            first_sayable(&forms, &dictionary, options, &vocab),
+            Some(wanted),
+            "the first form the table can say is the one used"
+        );
     }
 
     #[test]
