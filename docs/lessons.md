@@ -446,3 +446,15 @@ cost a megabyte. Parsing the header first and decoding as the payload arrives is
 allocation instead of three and half the memory; the refusals stayed the same because the
 checks moved before the read rather than into it — a shape that needs more bytes than the
 entry holds is refused by comparing the two, not by a short read failing.
+
+## A shortcut keyed on the shape of a line is a claim about the file
+
+The dictionary parse took a fast path for an alternate line: `AARON(2)` names a word the map
+already holds, so the rewrite looked the key up with `get_mut` instead of allocating one, and
+left every other line to insert. That matches the shipped file, where a word appears once
+with indexed alternates, and it was wrong for the same word written twice with no index —
+the second line replaced the first pronunciation instead of appending, which is what the
+parser had always done. Every unit test stayed green because none of them writes a word
+twice; the dump of every lookup on a generated corpus, compared against the old tree, found
+it on its duplicate line. A rule inferred from how the data happens to be shaped is not the
+format's rule, and the test that pins it has to be written for the rule.

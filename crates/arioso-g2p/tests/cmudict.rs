@@ -56,3 +56,15 @@ fn empty_input_is_an_empty_dict() {
     assert!(dict.is_empty());
     assert_eq!(dict.len(), 0);
 }
+
+#[test]
+fn a_word_written_twice_without_an_index_keeps_both() {
+    // Not how the shipped file is written, but a line is a pronunciation and not a
+    // replacement: the second `DUP` must append, not overwrite the first.
+    let dict = CmuDict::parse("DUP  D AH1 P\nDUP  D UW1 P\n");
+    assert_eq!(dict.len(), 1);
+    let all = dict.lookup("dup").expect("known word");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].as_ref(), "D AH1 P");
+    assert_eq!(all[1].as_ref(), "D UW1 P");
+}

@@ -6,10 +6,56 @@
 
 use std::collections::HashMap;
 
+/// The pronunciations of one word.
+///
+/// 93% of the shipped dictionary's words have exactly one, and a `Vec` costs a second
+/// heap block for the pointer, capacity and length even when it holds one element. The
+/// single case is stored inline instead; a word grows a boxed slice only when a later
+/// line gives it a second form.
+#[derive(Debug, Clone)]
+enum Pronunciations {
+    /// The only pronunciation of this word.
+    One(Box<str>),
+    /// Every pronunciation of this word, in file order.
+    Many(Box<[Box<str>]>),
+}
+
+impl Pronunciations {
+    /// The pronunciations as a slice, for the caller that only reads them.
+    fn as_slice(&self) -> &[Box<str>] {
+        match self {
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Many(many) => many,
+        }
+    }
+
+    /// Append a pronunciation that came later in the file.
+    ///
+    /// A word with two forms is rare and a word with more than four is not in the file,
+    /// so rebuilding the slice costs a handful of allocations across the whole parse.
+    /// Nothing here grows speculatively, which is why no `shrink_to_fit` pass follows.
+    fn push(&mut self, pronunciation: Box<str>) {
+        match self {
+            Self::One(first) => {
+                // `take` leaves an empty string behind, which allocates nothing; it only
+                // holds the slot while the first pronunciation moves into the slice.
+                let first = std::mem::take(first);
+                *self = Self::Many(vec![first, pronunciation].into_boxed_slice());
+            }
+            Self::Many(all) => {
+                let mut grown = Vec::with_capacity(all.len() + 1);
+                grown.extend_from_slice(all);
+                grown.push(pronunciation);
+                *all = grown.into_boxed_slice();
+            }
+        }
+    }
+}
+
 /// Pronunciations keyed by lowercase word.
 #[derive(Debug, Clone, Default)]
 pub struct CmuDict {
-    entries: HashMap<String, Vec<Box<str>>>,
+    entries: HashMap<Box<str>, Pronunciations>,
     skipped: usize,
 }
 
@@ -19,8 +65,10 @@ impl CmuDict {
     pub fn parse(text: &str) -> Self {
         // The shipped file holds 126,052 words. Sizing the map once avoids the eighteen
         // rehashes a growing map pays for on its way to 262,144 buckets.
-        let mut entries: HashMap<String, Vec<Box<str>>> = HashMap::with_capacity(130_000);
+        let mut entries: HashMap<Box<str>, Pronunciations> = HashMap::with_capacity(130_000);
         let mut skipped = 0usize;
+        // One buffer for every key, so lowercasing a line costs no allocation at all.
+        let mut lower = String::new();
 
         for line in text.lines() {
             let line = line.trim();
@@ -44,17 +92,29 @@ impl CmuDict {
                 skipped += 1;
                 continue;
             }
-            entries
-                .entry(base.to_lowercase())
-                .or_default()
-                .push(Box::from(rest));
-        }
 
-        // Almost every word has one pronunciation, and a `Vec` grows to four slots on the
-        // first push. Shrinking costs one reallocation per word here and saves three
-        // pointers per word for the life of the process.
-        for pronunciations in entries.values_mut() {
-            pronunciations.shrink_to_fit();
+            lower.clear();
+            if base.is_ascii() {
+                lower.push_str(base);
+                lower.make_ascii_lowercase();
+            } else {
+                // A non-ASCII letter can lowercase to more than one character (`İ`), which
+                // no in-place pass can do. No word in the shipped file takes this path.
+                lower.push_str(&base.to_lowercase());
+            }
+
+            // The map is looked up before it is grown. An alternate line (`AARON(2)`) names
+            // a word that is already there, and building a second key equal to the first
+            // only to drop it was most of what the parse used to cost.
+            match entries.get_mut(lower.as_str()) {
+                Some(existing) => existing.push(Box::from(rest)),
+                None => {
+                    entries.insert(
+                        Box::from(lower.as_str()),
+                        Pronunciations::One(Box::from(rest)),
+                    );
+                }
+            }
         }
 
         Self { entries, skipped }
@@ -68,9 +128,12 @@ impl CmuDict {
     #[must_use]
     pub fn lookup(&self, word: &str) -> Option<&[Box<str>]> {
         if word.chars().any(char::is_uppercase) {
-            return self.entries.get(&word.to_lowercase()).map(Vec::as_slice);
+            return self
+                .entries
+                .get(word.to_lowercase().as_str())
+                .map(Pronunciations::as_slice);
         }
-        self.entries.get(word).map(Vec::as_slice)
+        self.entries.get(word).map(Pronunciations::as_slice)
     }
 
     /// Number of distinct words.

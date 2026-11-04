@@ -55,7 +55,7 @@ routes differ by the size of the response, 2 bytes against 1,243 and 1,453.
 
 | path | measure | cost |
 | --- | --- | --- |
-| `CmuDict::parse`, 126,052 words | one parse | 86.8 ms, 36.5 MB peak |
+| `CmuDict::parse`, 126,052 words | one parse | 20.5 ms, 22.5 MB peak |
 | `CmuDict::lookup` | 11 words | 0.43 µs |
 | `wav::to_bytes` | 60 s at 22050 Hz | 4.42 ms |
 | `wav::read_bytes` | 10 min stereo at 48 kHz | 178 ms, 227 MB peak |
@@ -66,7 +66,13 @@ routes differ by the size of the response, 2 bytes against 1,243 and 1,453.
 | `PhonemeMap::to_ids_i64` | one chunk of 11 phonemes | 0.25 µs |
 
 The two memory figures are the ones worth knowing before sizing a machine: a ten minute
-stereo file costs 227 MB to read, and the dictionary costs 36.5 MB to hold.
+stereo file costs 227 MB to read, and the dictionary costs 22.5 MB to hold.
+
+The dictionary row is a re-measurement. Its 86.8 ms and 36.5 MB came from the harness of the
+earlier performance pass; the parse now stores a one-form word's pronunciation inline, and
+the row was measured again on this tree with the loop harness and the separate-process RSS
+method below. The two readings are not a before/after pair — that pair, with both sides
+measured by one harness, is in `docs/plans/2026-11-03-performance.md`.
 
 The two `normalize` rows are from the build before the text-path pass; that pass removes the
 lowercase copy of every sentence and the temporary `String` per number, and changes what
