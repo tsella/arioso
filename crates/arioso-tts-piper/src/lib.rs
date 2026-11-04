@@ -148,6 +148,10 @@ pub struct PiperVoice {
     /// Whether the graph takes a speaker id. A multi-speaker voice without it produces
     /// the same voice for every number, so the two facts are kept apart.
     has_sid: bool,
+    /// The speaker [`TtsEngine::render`] uses. The trait has no speaker parameter,
+    /// because a voice style is the whole of Kokoro's choice; a caller that wants
+    /// another speaker on this voice sets it here.
+    speaker: i64,
 }
 
 impl std::fmt::Debug for PiperVoice {
@@ -231,6 +235,7 @@ impl PiperVoice {
             length_scale,
             num_speakers,
             has_sid,
+            speaker: 0,
         })
     }
 
@@ -392,10 +397,25 @@ impl PiperVoice {
     /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
     pub fn synthesize(&mut self, symbols: &[&str], sid: i64) -> Result<Vec<f32>, PiperError> {
         let input = self.map.to_ids_i64(symbols);
+        self.synthesize_ids(&input, sid)
+    }
+
+    /// Synthesize a run of phoneme ids, the form the graph takes.
+    ///
+    /// [`TtsEngine::render`] lands here; [`PiperVoice::synthesize`] converts symbols and
+    /// then calls it, so there is one place that builds the feeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
+    pub fn synthesize_ids(&mut self, input: &[i64], sid: i64) -> Result<Vec<f32>, PiperError> {
         let length = input.len() as i64;
 
         let mut feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
-            ("input", Tensor::from_array(([1i64, length], input))?.into()),
+            (
+                "input",
+                Tensor::from_array(([1i64, length], input.to_vec()))?.into(),
+            ),
             (
                 "input_lengths",
                 Tensor::from_array(([1i64], vec![length]))?.into(),
@@ -414,6 +434,35 @@ impl PiperVoice {
         let output = outputs.get("output").ok_or(PiperError::NoOutput)?;
         let (_shape, samples) = output.try_extract_tensor::<f32>()?;
         Ok(samples.to_vec())
+    }
+
+    /// Choose the speaker [`TtsEngine::render`] will use.
+    ///
+    /// Not validated here: [`PiperVoice::check_speaker`] is the check, and the trait path
+    /// is for callers that already hold a voice they chose.
+    pub fn set_speaker(&mut self, sid: i64) {
+        self.speaker = sid;
+    }
+}
+
+impl arioso_core::TtsEngine for PiperVoice {
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate()
+    }
+
+    /// Render a run of phoneme ids at `speed`, using the speaker last set.
+    ///
+    /// The error is flattened to a string because the trait is shared and Piper's
+    /// variants mean nothing to another engine.
+    fn render(
+        &mut self,
+        symbols: &[i64],
+        speed: f32,
+    ) -> Result<Vec<f32>, arioso_core::EngineError> {
+        self.set_speed(speed);
+        let sid = self.speaker;
+        self.synthesize_ids(symbols, sid)
+            .map_err(|error| arioso_core::EngineError::Backend(error.to_string()))
     }
 }
 
