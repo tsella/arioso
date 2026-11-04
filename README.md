@@ -148,17 +148,20 @@ Mint a key once, on the machine that holds the release, and keep the private hal
 
 ```console
 $ arioso models keygen --out release.key
-9f2c…64 lowercase hex characters…e1
+<64 lowercase hex characters>
 $ arioso models sign models/manifest.json --key release.key
 wrote models/manifest.json.sig
-public key 9f2c…e1
+public key <the same 64 characters>
 ```
 
-`keygen` writes 32 raw bytes with mode `0600` on unix, refuses to overwrite a file that
-already exists, and prints nothing else on stdout, so the public key is the whole of it.
-On Windows there is no file mode to set: the key inherits the access control list of the
-directory it is written into, so choose a directory only your account can read. The refusal
-to overwrite holds on both.
+The shape is the contract: `keygen` writes 65 bytes to stdout, the public key and a newline,
+and nothing else, so `PUB=$(arioso models keygen --out k)` is the whole of it. Where the
+private key went is reported on stderr.
+
+`keygen` writes 32 raw bytes with mode `0600` on unix and refuses to overwrite a file that
+already exists. On Windows there is no file mode to set: the key inherits the access control
+list of the directory it is written into, so choose a directory only your account can read.
+The refusal to overwrite holds on both.
 
 `sign` reads the bytes exactly as they sit on disk, with no re-serialization, and writes
 `<manifest>.sig` as lowercase hex. Paste the printed public key into `RELEASE_PUBKEY_HEX`

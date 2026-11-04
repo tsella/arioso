@@ -42,7 +42,8 @@ signed, so the compiled key is empty, so nothing is ever verified.
   missing `.sig` is refused when a key is compiled in, and reported as `Unsigned` when none
   is. (`365a574`)
 - [x] Documentation: how to mint a key, where the private half lives, and what rotation costs.
-  (`d940f3a` in `README.md`, `aa38e70` in `docs/security.md`)
+  (`d940f3a` in `README.md`, with the output shape corrected in the commit after it;
+  `aa38e70` in `docs/security.md`)
 - [ ] The signing step in `AGENTS.md`'s "Add a model" recipe. The edit was written and refused
   by the tool policy that protects agent-instruction files, so it is still owed; the recipe
   text lives in `README.md` under "Signing the manifest" until it can be applied.
