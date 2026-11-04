@@ -107,11 +107,14 @@ pub fn voices(models: &[ModelView], engine: &str) -> Vec<Voice> {
         // hear" rather than "which files did I download". A Piper multi-speaker voice is one
         // voice with speakers, and stays one row with a speaker control.
         if model.engine == "kokoro" && model.speakers.len() > 1 {
-            for (index, style) in model.speakers.iter().enumerate() {
+            for style in &model.speakers {
                 rows.push(Voice {
                     id: style.clone(),
                     model: model.id.clone(),
-                    sid: index as i64,
+                    // A Kokoro style is one speaker. The style is chosen by name, so the
+                    // speaker index is zero: the list once carried the style's position here,
+                    // and the engine answered, correctly, that speaker 25 does not exist.
+                    sid: 0,
                     engine: model.engine.clone(),
                     bytes: model.bytes,
                     license: model.license.clone(),
@@ -260,7 +263,8 @@ mod tests {
         assert_eq!(rows[1].id, "af_bella");
         // Both rows point at the one file, and the style is the index into it.
         assert_eq!(rows[1].model, "kokoro-82m");
-        assert_eq!(rows[1].sid, 1);
+        // The style is the voice, and every Kokoro style has one speaker.
+        assert_eq!(rows[1].sid, 0);
         assert_eq!(rows[0].sid, 0);
         assert!(rows[0].speakers.is_empty(), "the rows are the list");
     }
