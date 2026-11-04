@@ -47,7 +47,9 @@ Working today:
 - `arioso doctor`, which says what is wrong before a request fails
 - The crates that need no prebuilt native library compile for `aarch64-apple-ios` and
   `aarch64-linux-android` in CI
-- 288 tests
+- A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
+  and a build of every fuzz target on each pull request
+- 311 tests
 
 Not built yet:
 
