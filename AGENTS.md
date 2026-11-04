@@ -41,6 +41,7 @@ the same. Without it, `arioso-tts-piper` fails to link.
 | `arioso-core` | text normalization, sentence splitting, one written form to several spoken forms |
 | `arioso-g2p` | grapheme to phoneme: the dictionary, then the letter-to-sound rules |
 | `arioso-tts-piper` | the Piper engine, synthesis, WAV output |
+| `arioso-tts-kokoro` | the Kokoro engine: one graph, a style archive of 54 voices |
 | `arioso-stt-sherpa` | the sherpa-onnx engine, transcription |
 | `arioso-vad` | voice activity detection for streaming |
 | `arioso-server` | the HTTP and WebSocket routes, auth, TLS, limits |

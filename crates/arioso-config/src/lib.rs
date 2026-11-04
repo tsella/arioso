@@ -21,8 +21,10 @@ pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
 /// Speech engines this binary can load.
 ///
-/// One engine per process: `tts.engine` chooses it at load, and a change takes a
-/// restart. The list is here so the refusal names both, not so a config can use both.
+/// One engine per process: `tts.engine` chooses it, and only one is loaded at a time.
+/// A patch to the running server drops the loaded voice and loads the other engine on the
+/// next request; editing the config file needs a restart. The list is here so the refusal
+/// names both, not so a config can use both.
 pub const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
 
 /// Everything arioso reads at startup.

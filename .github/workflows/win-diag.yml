@@ -1,0 +1,68 @@
+name: win-diag
+
+# One question, asked once: which onnxruntime.dll does the speech library load on Windows,
+# and what does it expect? A recorded defect says the two disagree about the C API version
+# and the mismatch aborts the process inside C++, which no test can catch.
+#
+# This runs by hand only. It is a measurement, not a gate.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dlls:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.22.0
+          archive="onnxruntime-win-x64-$version"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.zip"
+          mkdir -p vendor
+          curl -sSL -o "$RUNNER_TEMP/$archive.zip" "$url"
+          unzip -q "$RUNNER_TEMP/$archive.zip" -d vendor
+          mv "vendor/$archive" vendor/onnxruntime
+      - name: build the speech crate and its tests
+        run: cargo test -p arioso-stt-sherpa --no-run
+      - name: what is on the machine
+        shell: pwsh
+        run: |
+          Write-Host "== onnxruntime.dll anywhere under the checkout =="
+          Get-ChildItem -Path . -Recurse -Filter onnxruntime.dll -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              "{0,-90} {1}" -f $_.FullName, $_.VersionInfo.FileVersion
+            }
+          Write-Host "== the system copy, if any =="
+          $system = "$env:SystemRoot\System32\onnxruntime.dll"
+          if (Test-Path $system) {
+            "{0,-90} {1}" -f $system, (Get-Item $system).VersionInfo.FileVersion
+          } else {
+            "no $system"
+          }
+          Write-Host "== PATH entries that mention onnx =="
+          $env:PATH -split ';' | Where-Object { $_ -match 'onnx' } | ForEach-Object { $_ }
+      - name: what the speech library asks for
+        shell: pwsh
+        run: |
+          Write-Host "== the libraries sherpa extracted =="
+          Get-ChildItem -Path target -Recurse -Include *.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'sherpa' } |
+            ForEach-Object { "{0,-90} {1}" -f $_.FullName, $_.Length }
+          Write-Host "== import names found in those libraries =="
+          python - <<'PY'
+          import pathlib
+          for path in pathlib.Path("target").rglob("*.dll"):
+              if "sherpa" not in str(path).lower():
+                  continue
+              data = path.read_bytes()
+              names = [n for n in (b"onnxruntime.dll", b"onnxruntime_providers_shared.dll") if n in data]
+              print(f"{path}: {[n.decode() for n in names]}")
+          PY
+      - name: run the one test that opens a graph
+        continue-on-error: true
+        run: cargo test -p arioso-stt-sherpa --lib -- --nocapture --test-threads=1

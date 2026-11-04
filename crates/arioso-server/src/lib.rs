@@ -2025,7 +2025,7 @@ pub struct ConfigPatch {
 pub struct TtsPatch {
     /// Whether the speech routes are served.
     pub enabled: Option<bool>,
-    /// Engine id. Only `piper` is built into this binary.
+    /// Engine id: `piper` or `kokoro`, both built into this binary.
     pub engine: Option<String>,
     /// Voice id, or the bare voice name.
     pub voice: Option<String>,
