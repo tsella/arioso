@@ -7,10 +7,18 @@ use arioso_server::ModelView;
 pub const ENGINES: [&str; 2] = ["kokoro", "piper"];
 
 /// One voice, as a row in the list.
+///
+/// A Kokoro model is one file holding fifty-four styles, and the styles are what a person
+/// chooses between. So a row is a style, and `model` is the file it comes from: the id a
+/// download is asked for by is the model, never the style.
 #[derive(Debug, Clone)]
 pub struct Voice {
-    /// Catalog id, which is also what a download is asked for by.
+    /// What this row is called: a Piper catalog id, or a Kokoro style name.
     pub id: String,
+    /// The catalog id the files belong to.
+    pub model: String,
+    /// Which style of that model, for an engine whose styles are numbered. Zero otherwise.
+    pub sid: i64,
     /// Engine that speaks it.
     pub engine: String,
     /// Whole model on disk, in bytes.
@@ -90,11 +98,37 @@ impl Voice {
 /// The voices of one engine, in the order the catalog lists them.
 #[must_use]
 pub fn voices(models: &[ModelView], engine: &str) -> Vec<Voice> {
-    models
+    let mut rows = Vec::new();
+    for model in models
         .iter()
         .filter(|model| model.kind == "tts" && model.engine == engine)
-        .map(|model| Voice {
+    {
+        // A Kokoro style is a voice: one row each, so the list answers "which voices can I
+        // hear" rather than "which files did I download". A Piper multi-speaker voice is one
+        // voice with speakers, and stays one row with a speaker control.
+        if model.engine == "kokoro" && model.speakers.len() > 1 {
+            for (index, style) in model.speakers.iter().enumerate() {
+                rows.push(Voice {
+                    id: style.clone(),
+                    model: model.id.clone(),
+                    sid: index as i64,
+                    engine: model.engine.clone(),
+                    bytes: model.bytes,
+                    license: model.license.clone(),
+                    commercial: model.commercial_use,
+                    // One row per style already: a speaker list on the row would repeat the
+                    // list the rows are.
+                    speakers: Vec::new(),
+                    languages: model.languages.clone(),
+                    installed: model.installed,
+                });
+            }
+            continue;
+        }
+        rows.push(Voice {
             id: model.id.clone(),
+            model: model.id.clone(),
+            sid: 0,
             engine: model.engine.clone(),
             bytes: model.bytes,
             license: model.license.clone(),
@@ -102,8 +136,9 @@ pub fn voices(models: &[ModelView], engine: &str) -> Vec<Voice> {
             speakers: model.speakers.clone(),
             languages: model.languages.clone(),
             installed: model.installed,
-        })
-        .collect()
+        });
+    }
+    rows
 }
 
 /// The positions in `voices` whose id or language contains `filter`, case insensitively.
@@ -159,6 +194,8 @@ mod tests {
     fn voice(id: &str, license: &str, commercial: bool) -> Voice {
         Voice {
             id: id.to_owned(),
+            model: id.to_owned(),
+            sid: 0,
             engine: "piper".to_owned(),
             bytes: 1024 * 1024,
             license: license.to_owned(),
@@ -202,9 +239,38 @@ mod tests {
     }
 
     #[test]
+    fn a_kokoro_model_becomes_one_row_per_style() {
+        // The file is one; the voices are fifty-four. A list that shows the file leaves a
+        // person with nothing to choose and one name to get wrong.
+        let model = ModelView {
+            id: "kokoro-82m".to_owned(),
+            kind: "tts".to_owned(),
+            engine: "kokoro".to_owned(),
+            license: "Apache-2.0".to_owned(),
+            installed: true,
+            state: "installed".to_owned(),
+            downloaded: None,
+            bytes: 337,
+            commercial_use: true,
+            speakers: vec!["af_heart".to_owned(), "af_bella".to_owned()],
+            languages: vec!["en-US".to_owned()],
+        };
+        let rows = voices(&[model], "kokoro");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].id, "af_bella");
+        // Both rows point at the one file, and the style is the index into it.
+        assert_eq!(rows[1].model, "kokoro-82m");
+        assert_eq!(rows[1].sid, 1);
+        assert_eq!(rows[0].sid, 0);
+        assert!(rows[0].speakers.is_empty(), "the rows are the list");
+    }
+
+    #[test]
     fn a_chip_is_short_and_keeps_the_warning() {
         let mut voice = Voice {
             id: "piper-x".to_owned(),
+            model: "piper-x".to_owned(),
+            sid: 0,
             engine: "piper".to_owned(),
             bytes: 1,
             license: "CC-BY-4.0".to_owned(),

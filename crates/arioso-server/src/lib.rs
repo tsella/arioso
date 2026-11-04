@@ -1567,7 +1567,16 @@ impl AppState {
                     downloaded: progress.map(|(downloaded, _)| downloaded),
                     bytes: m.total_size(),
                     commercial_use: m.commercial_use,
-                    speakers: speaker_names(&m.meta),
+                    // A Kokoro model's styles are voices in its archive, not speakers in the
+                    // manifest: `num_speakers` says one, and the fifty-four styles are only
+                    // readable once the archive is on disk. A caller that shows a voice list
+                    // needs them, and a caller that passes the model id as a style is told
+                    // the archive has no such voice.
+                    speakers: if m.engine == "kokoro" && installed {
+                        archive_names(&self.models_dir, m).unwrap_or_else(|| speaker_names(&m.meta))
+                    } else {
+                        speaker_names(&m.meta)
+                    },
                     languages: meta_strings(&m.meta, "languages"),
                 }
             })
@@ -4834,6 +4843,22 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(state.config().tts.engine, "kokoro");
         assert_eq!(state.config().voice_name(), "af_heart");
+    }
+
+    #[test]
+    fn a_kokoro_models_styles_are_read_from_its_archive() {
+        // The manifest says one speaker; the archive holds the styles. A caller that lists
+        // voices needs the archive's answer, and without it the only name on offer is the
+        // model's, which no style answers to.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = test_archive(&[("af_heart", 2, 2), ("af_bella", 2, 2)]);
+        std::fs::write(dir.path().join("voices-v1.0.bin"), archive).unwrap();
+        let manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
+        let spec = manifest.find("kokoro-82m").expect("the catalog holds it");
+        let names = archive_names(dir.path(), spec).expect("the archive is there");
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.iter().any(|name| name == "af_heart"), "{names:?}");
+        assert!(names.iter().any(|name| name == "af_bella"), "{names:?}");
     }
 
     #[tokio::test]

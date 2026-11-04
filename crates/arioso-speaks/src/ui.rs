@@ -33,14 +33,14 @@ const FAINT: Color = Color::Indexed(238);
 /// The highlighted line.
 const CREAM: Color = Color::Indexed(223);
 
-/// How wide the block wordmark is, including the two columns of margin before it.
-const MARK_WIDTH: u16 = 25;
+/// How wide the wordmark is, including the two columns of margin before it.
+const MARK_WIDTH: u16 = 30;
 
 /// Draw one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let rows = Layout::vertical([
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Min(6),
         Constraint::Length(3),
         Constraint::Length(1),
@@ -60,13 +60,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// The wordmark, the waveform, and the line under them.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(area);
 
-    // The mark on the left and the live signal on the right, sharing the three rows.
+    // The mark on the left and the live signal on the right, sharing the rows.
     let columns =
         Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
     draw_wordmark(frame, columns[0]);
@@ -132,15 +132,21 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The mark, in block glyphs.
+/// The mark.
 ///
-/// Three rows is the most a header can take before it is the whole window. The bottom row is
-/// drawn in a lighter shade, so the mark reads as lit from above rather than as a rectangle.
+/// Letters made of block glyphs read as a fence at this size: an `a` and an `o` are both a
+/// rectangle with a hole, and at three rows there is no room for the shapes that tell them
+/// apart. The drawn form below keeps the strokes of the letters, so the word is read rather
+/// than guessed at, and it is still ASCII, so it survives any terminal font.
+///
+/// The rows fade downwards, cream to petrol to a darker shade, so the mark looks lit from
+/// above instead of stamped.
 fn draw_wordmark(frame: &mut Frame, area: Rect) {
-    const MARK: [&str; 3] = [
-        "█▀█ █▀▄ █   █▀█ █▀▀ █▀█",
-        "█▀█ █▀▄ █   █ █ ▀▀█ █ █",
-        "▀▀▀ ▀▀  ▀   ▀▀▀ ▀▀▀ ▀▀▀",
+    const MARK: [&str; 4] = [
+        "  __ _ _ __(_)___  ___  ___",
+        " / _` | '__| / __|/ _ \\/ __|",
+        "| (_| | |  | \\__ \\ (_) \\__ \\",
+        " \\__,_|_|  |_|___/\\___/|___/",
     ];
     let lines: Vec<Line> = MARK
         .iter()
@@ -149,7 +155,8 @@ fn draw_wordmark(frame: &mut Frame, area: Rect) {
             let ink = match row {
                 0 => CREAM,
                 1 => PETROL,
-                _ => Color::Indexed(24),
+                2 => Color::Indexed(24),
+                _ => Color::Indexed(23),
             };
             Line::from(vec![
                 Span::styled("  ", Style::default()),

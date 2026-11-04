@@ -254,7 +254,12 @@ impl App {
         // would speak with if the keyboard were never touched.
         let selected = voices
             .iter()
-            .position(|voice| catalog::is_named(&voice.id, config.voice_name()))
+            .position(|voice| {
+                // A style row answers to its style, and to the model it belongs to, so a
+                // config naming the model still lands on the voice it means.
+                catalog::is_named(&voice.id, config.voice_name())
+                    || catalog::is_named(&voice.model, config.voice_name())
+            })
             .and_then(|index| visible.iter().position(|row| *row == index))
             .unwrap_or(0);
         let (jobs, job_rx) = channel();
@@ -361,11 +366,15 @@ impl App {
             return;
         };
         if !voice.installed {
-            self.start_download(&voice.id);
+            // The download is the model, never the style: a Kokoro style has no files of its
+            // own, and asking for one by name is the error that says the archive has no such
+            // voice.
+            self.start_download(&voice.model);
             return;
         }
         self.config.tts.engine = voice.engine.clone();
-        self.config.tts.voice = Some(voice.id.clone());
+        self.config.tts.voice = Some(voice.model.clone());
+        self.sid = voice.sid;
         self.rebuild();
         self.status = format!("{} selected · {}", voice.id, voice.licence_label());
         self.error = None;
@@ -439,7 +448,7 @@ impl App {
         if let Some(voice) = self.current_voice()
             && !voice.installed
         {
-            let id = voice.id.clone();
+            let id = voice.model.clone();
             self.start_download(&id);
             return;
         }
