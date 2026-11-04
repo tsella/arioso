@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use arioso_config::Config;
 use arioso_g2p::CmuDict;
 use arioso_models::{
-    Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX, SignatureState,
-    models_dir, signature_path,
+    CheckedManifest, Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX,
+    SignatureState, models_dir, signature_path,
 };
 use arioso_tts_kokoro::KokoroVoice;
 use arioso_tts_piper::{PiperVoice, form_symbols};
@@ -195,8 +195,17 @@ fn manifest_path(config: &Config) -> PathBuf {
 }
 
 fn load_manifest(config: &Config) -> Result<Manifest> {
+    load_manifest_checked(config).map(|checked| checked.manifest)
+}
+
+/// Load the manifest and the signature state that loading it established.
+///
+/// [`load_manifest`] throws the state away, which is right for a command whose answer does
+/// not depend on it. `serve` keeps it, because an unsigned manifest is a fact the operator
+/// has to hear at startup rather than find later in `doctor`.
+fn load_manifest_checked(config: &Config) -> Result<CheckedManifest> {
     let path = manifest_path(config);
-    Manifest::load(&path).with_context(|| {
+    Manifest::load_checked(&path, &signature_path(&path), RELEASE_PUBKEY_HEX).with_context(|| {
         format!(
             "loading the model manifest at {} (place a manifest.json there)",
             path.display()
@@ -340,7 +349,18 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
 
 /// Serve in this process, reporting the port before serving it.
 fn serve_here(config: Config, config_path: &Path) -> Result<()> {
-    let manifest = load_manifest(&config)?;
+    let checked = load_manifest_checked(&config)?;
+    // Said here, at startup, because `doctor` is a command an operator runs on purpose and
+    // a release that ships without one is exactly the accident this line exists to stop.
+    if checked.signature == SignatureState::Unsigned {
+        tracing::warn!(
+            target: SIGNING_LOG_TARGET,
+            manifest = %manifest_path(&config).display(),
+            "the model manifest is unsigned: no release key is compiled into this build, \
+             so a swapped manifest would be accepted"
+        );
+    }
+    let manifest = checked.manifest;
     let sidecar = config.server.sidecar;
     let state = Arc::new(arioso_server::AppState::new(
         config.clone(),
@@ -1745,9 +1765,22 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
+/// Log target of the manifest-signature warning, and the directive that keeps it visible.
+///
+/// The default `log.level` is `error`, so a plain `warn` would be filtered out on exactly
+/// the installs that never changed it. A target directive is more specific than the global
+/// level and therefore wins, which makes this one line survive any level the operator chose.
+const SIGNING_LOG_TARGET: &str = "arioso::signing";
+const SIGNING_WARN_DIRECTIVE: &str = "arioso::signing=warn";
+
 fn init_tracing(config: &Config) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()));
+        .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()))
+        .add_directive(
+            SIGNING_WARN_DIRECTIVE
+                .parse()
+                .expect("a static filter directive"),
+        );
     // stderr unless the config names a file. stdout belongs to the caller: in sidecar mode
     // it carries the port line and nothing else, and a log line on that pipe would be read
     // as the port.

@@ -98,6 +98,16 @@ absolute path, or a name with a separator in it is refused at parse time, so a c
 manifest cannot become an arbitrary file write. The manifest ships with the binary, so this
 needed local access to exploit; the check costs nothing and removes the class.
 
+**A swapped manifest is refused by signature, not by trust in the mirror.** The detached
+signature covers the manifest's bytes exactly as they sit on disk, checked with Ed25519
+`verify_strict` before the document is parsed. A build with a release key compiled in
+refuses a manifest whose `.sig` is absent or does not verify, naming the file; it does not
+fall back to the per-file hashes, because those hashes are in the document the signature
+protects. This build compiles in no key, so it loads the manifest as `Unsigned`, says so in
+`arioso doctor`, and warns at startup rather than at a level a default config hides. The
+private half is never in the tree, and the tests mint a throwaway keypair in a temporary
+directory for the length of one test.
+
 ## Fuzzing
 
 Four targets, built with `cargo-fuzz` on nightly, seeded with a real document each:
