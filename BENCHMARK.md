@@ -95,6 +95,15 @@ that is the 522 KB table being read from disk the first time. The first load on 
 build cost 2.45 s against 0.80 s for the four after it, which is the 325 MB graph being read
 from disk with nothing in the page cache. Neither is a steady-state figure.
 
+Reading one style table on this machine, median of 21 reads, three runs: 7.3 ms, 10.1 ms and
+12.6 ms for the 522,368-byte entry. That read used to hold two copies of the table it
+decoded — the entry's bytes and then the floats — 1,044,608 bytes for a 522,240 byte table;
+it now decodes as the bytes arrive, one allocation and one table. Indexing the archive by
+walking its 54 local headers, the same method: 0.23 to 0.29 ms. That walk is paid once per
+`GET /v1/voices` and once per readiness check, which is why it is kept: reading the central
+directory instead would save 0.3 ms and drop the per-entry header check that refuses an entry
+whose size disagrees with the file.
+
 ## What this pass changed, and what it bought
 
 Each row is one change, measured on both builds with the same harness. The right hand

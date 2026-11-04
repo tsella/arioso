@@ -426,3 +426,13 @@ paid it on the next request, where it looked like slow synthesis rather than a c
 A field that names a choice says nothing about what the choice costs; the invalidation rule
 belongs to the engine, and a second engine is when the first one's assumption starts costing
 time.
+
+## Decode where the bytes arrive
+
+A reader that fills a byte buffer and then parses it holds the input and the output at once,
+which is the whole cost when the output is the table the input describes. `VoiceFile::style`
+read a 522 KB entry into a `Vec<u8>` and decoded that into a `Vec<f32>`, so loading one style
+cost a megabyte. Parsing the header first and decoding as the payload arrives is one
+allocation instead of three and half the memory; the refusals stayed the same because the
+checks moved before the read rather than into it — a shape that needs more bytes than the
+entry holds is refused by comparing the two, not by a short read failing.
