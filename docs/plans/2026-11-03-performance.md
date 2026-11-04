@@ -103,8 +103,13 @@ synthesis request walks, once per word. The counts below are from
 process-wide counter this started with absorbed the other tests' setup and reported 145
 allocations for a call that costs 7 (see `docs/lessons.md`).
 
-| Finding | Change | Before | After |
+| Finding | Change | Before the pass | After |
 | --- | --- | --- | --- |
-| PERF-H1 | `arpabet` uppercases a token into a four-byte stack buffer and reads a `&'static [&'static str]` from the table; `extend_ipa` appends into the caller's vector | `phonemes_for_text("hello world")` 28 allocations, 1,492 bytes; `lts::pronounce("zorbansky")` 49, 1,678 | 12, 1,093; 31, 1,231 |
-| PERF-H3 | `lts` folds a word into one `String` and holds each token as a base plus a stress digit, so nothing is joined and re-parsed; `phonemes_for_text` keeps one word buffer and one symbol buffer for the sentence and copies a word only when it is reported; `inflect::derive` writes its candidate stems into one buffer | `phonemes_for_text("hello world")` 12, 1,093; `lts::pronounce("zorbansky")` 31, 1,231; `phonemes_for_text("avengers")` 12, 791 | 7, 883; 7, 1,129; 8, 642 |
-| PERF-H4 | `reverse` compiles the user dictionary once into a `ReverseIndex` — every form pronounced and the list ordered at build — and appends the transcript's phonemes into one flat buffer; the server holds the index beside the dictionary and rebuilds it only when the file changes | `correct` on a five-word transcript against two entries: 75 allocations, 4,548 bytes | `ReverseIndex::apply` on the same transcript: 15, 1,623 |
+| PERF-H1 | `arpabet` uppercases a token into a four-byte stack buffer and reads a `&'static [&'static str]` from the table; `extend_ipa` appends into the caller's vector | `phonemes_for_text("hello world")` 28 allocations, 1,492 bytes; `lts::pronounce("zorbansky")` 49, 1,678 | 7, 883; 7, 1,129 |
+| PERF-H3 | `lts` folds a word into one `String` and holds each token as a base plus a stress digit, so nothing is joined and re-parsed; `phonemes_for_text` keeps one word buffer and one symbol buffer for the sentence and copies a word only when it is reported; `inflect::derive` writes its candidate stems into one buffer | `phonemes_for_text("avengers")` 26, 1,141 | 8, 642 |
+| PERF-H4 | `reverse` compiles the user dictionary once into a `ReverseIndex` — every form pronounced and the list ordered at build — and appends the transcript's phonemes into one flat buffer; the server holds the index beside the dictionary and rebuilds it only when the file changes | `correct` on a five-word transcript against two entries: 146, 6,076 | `ReverseIndex::apply` on the same transcript: 15, 1,623 |
+
+Every figure is measured, not estimated, and every bound in `crates/arioso-g2p/tests/allocations.rs`
+was checked against the tree before its commit: the new bound fails there. The two-word and
+one-word rows fall across the first two commits, 28 -> 12 -> 7 and 49 -> 31 -> 7; the
+derived-word and reverse rows are measured against the commit this pass started from.
