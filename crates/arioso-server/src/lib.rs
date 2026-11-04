@@ -104,6 +104,13 @@ pub struct AppState {
     /// Caps how many models are fetched at once. A catalog entry is hundreds of megabytes,
     /// and an unbounded fan-out saturates the link and the disk for everything else.
     download_slots: Arc<tokio::sync::Semaphore>,
+    /// Model state changes, fanned out to every `GET /v1/models/events` subscriber.
+    ///
+    /// A broadcast rather than a queue per subscriber: a download happens once and any
+    /// number of clients may be watching it. Capacity 256 is a few seconds of progress on
+    /// a fast link, and a subscriber that falls further behind is told it lagged instead of
+    /// being handed a silently incomplete sequence.
+    events: tokio::sync::broadcast::Sender<ModelEvent>,
 }
 
 /// The user dictionary on disk, and what it last looked like.
@@ -140,6 +147,9 @@ impl AppState {
             config.server.limits.requests_per_second,
             config.server.limits.burst,
         );
+        // Nobody has to be listening: `send` to a channel with no receivers is an error
+        // that is ignored, because a download nobody is watching is the ordinary case.
+        let (events, _) = tokio::sync::broadcast::channel(256);
         // The token lives in the environment, never in the document. Asking for a bearer
         // token and finding none is a startup failure: a server that thinks it is
         // protected and is not is worse than one that refuses to start.
@@ -192,6 +202,7 @@ impl AppState {
             handle: std::sync::OnceLock::new(),
             downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             download_slots,
+            events,
             manifest,
             models_dir,
         })
@@ -234,6 +245,15 @@ impl AppState {
         if let Some(running) = self.try_start_download(&id, total) {
             return Some(running);
         }
+        // Announced before the task is spawned: a subscriber that connects while the
+        // download waits for a slot still learns it is running.
+        self.publish(ModelEvent {
+            id: id.clone(),
+            state: "downloading".to_owned(),
+            downloaded: Some(0),
+            total,
+            error: None,
+        });
         let state = Arc::clone(self);
         let dir = self.models_dir.clone();
         let spec = spec.clone();
@@ -254,6 +274,9 @@ impl AppState {
                 }
                 Err(error) => Err(error),
             };
+            // Taken before the match moves the result: the stream reports how the download
+            // ended, and "it failed" without the reason is not an answer.
+            let failure = result.as_ref().err().map(ToString::to_string);
             match result {
                 Ok(paths) => tracing::info!(
                     model = %id,
@@ -266,7 +289,7 @@ impl AppState {
                 Err(error) => tracing::error!(model = %id, %error, "model download failed"),
             }
             drop(slot);
-            state.finish_download(&id);
+            state.finish_download(&id, failure.as_deref());
         });
         None
     }
@@ -295,13 +318,76 @@ impl AppState {
         if let Ok(mut map) = self.downloads.lock() {
             map.insert(id.to_owned(), (downloaded, total));
         }
+        self.publish(ModelEvent {
+            id: id.to_owned(),
+            state: "downloading".to_owned(),
+            downloaded: Some(downloaded),
+            total,
+            error: None,
+        });
     }
 
-    /// Forget a download that ended, whether it worked or not.
-    fn finish_download(&self, id: &str) {
+    /// Forget a download that ended, whether it worked or not, and say how it ended.
+    ///
+    /// The last word on a download is whether its files are now on disk, not whether the
+    /// task returned `Ok`: a fetch that failed after writing every file is installed.
+    fn finish_download(&self, id: &str, error: Option<&str>) {
         if let Ok(mut map) = self.downloads.lock() {
             map.remove(id);
         }
+        let Some(spec) = self.manifest.find(id) else {
+            return;
+        };
+        let installed = self.is_installed(spec);
+        self.publish(ModelEvent {
+            id: id.to_owned(),
+            state: if installed {
+                "installed"
+            } else {
+                "not_installed"
+            }
+            .to_owned(),
+            downloaded: installed.then(|| spec.total_size()),
+            total: spec.total_size(),
+            error: error.map(str::to_owned),
+        });
+    }
+
+    /// Hand one event to every subscriber, if there are any.
+    ///
+    /// No receiver is not a failure: it is the ordinary case of a download nobody watches.
+    fn publish(&self, event: ModelEvent) {
+        let _ = self.events.send(event);
+    }
+
+    /// What `GET /v1/models` and `GET /v1/models/events` both say about one model.
+    ///
+    /// One function for both, so the polled view and the streamed one cannot disagree
+    /// about what a model's state is called.
+    fn model_event(&self, spec: &ModelSpec) -> ModelEvent {
+        let installed = self.is_installed(spec);
+        let progress = self.download_progress(&spec.id);
+        let state = model_state(installed, progress.is_some());
+        ModelEvent {
+            id: spec.id.clone(),
+            state: state.to_owned(),
+            downloaded: match (installed, progress) {
+                (true, _) => Some(spec.total_size()),
+                (false, Some((downloaded, _))) => Some(downloaded),
+                (false, None) => None,
+            },
+            total: progress.map_or_else(|| spec.total_size(), |(_, total)| total),
+            error: None,
+        }
+    }
+
+    /// Every model's current state, as the first event of a stream.
+    fn model_snapshot(&self) -> Vec<ModelEvent> {
+        self.manifest
+            .models
+            .iter()
+            .map(|spec| self.model_event(spec))
+            .collect()
     }
 
     /// What a download has reported so far, if one is running.
@@ -837,12 +923,14 @@ impl ApiError {
         stop_server,
         abort_server,
         list_models,
+        model_events,
         synthesize,
         transcribe_audio
     ),
     components(schemas(
         TtsRequest,
         ModelView,
+        ModelEvent,
         ModelListView,
         SttResponse,
         ReadyView,
@@ -927,6 +1015,34 @@ pub struct ModelView {
     pub bytes: u64,
     /// Whether the model's license allows commercial use.
     pub commercial_use: bool,
+}
+
+/// One model's state, as the catalog reports it and the event stream carries it.
+///
+/// The same state a [`ModelView`] carries, without the catalog description: a client that
+/// has read `GET /v1/models` once parses one shape for the polled answer and the streamed
+/// one. `total` is what `ModelView` calls `bytes`.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ModelEvent {
+    /// Model id.
+    pub id: String,
+    /// `installed`, `downloading`, or `not_installed`.
+    pub state: String,
+    /// Bytes fetched so far. Absent when no download has reported anything.
+    pub downloaded: Option<u64>,
+    /// Total size in bytes.
+    pub total: u64,
+    /// Why a download failed, when one did.
+    pub error: Option<String>,
+}
+
+/// The label for a model's state, from what the disk and the download map say.
+fn model_state(installed: bool, downloading: bool) -> &'static str {
+    match (installed, downloading) {
+        (true, _) => "installed",
+        (false, true) => "downloading",
+        (false, false) => "not_installed",
+    }
 }
 
 /// Read a certificate and key, ready to serve TLS.
@@ -1254,6 +1370,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/events", get(model_events))
         .route("/v1/models/{id}/download", post(start_download))
         .route("/v1/models/{id}", axum::routing::delete(delete_model))
         .route("/v1/models/{id}/warm", post(warm_model))
@@ -2206,7 +2323,7 @@ struct DeleteReservation {
 
 impl Drop for DeleteReservation {
     fn drop(&mut self) {
-        self.state.finish_download(&self.id);
+        self.state.finish_download(&self.id, None);
     }
 }
 
@@ -2360,11 +2477,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelListView> 
             // A caller that started a download polls this route. Reporting only `installed`
             // made it re-POST to find out whether anything was happening.
             let progress = state.download_progress(&m.id);
-            let label = match (installed, progress) {
-                (true, _) => "installed",
-                (false, Some(_)) => "downloading",
-                (false, None) => "not_installed",
-            };
+            let label = model_state(installed, progress.is_some());
             ModelView {
                 id: m.id.clone(),
                 kind: format!("{:?}", m.kind).to_lowercase(),
@@ -2379,6 +2492,134 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelListView> 
         })
         .collect();
     Json(ModelListView { models })
+}
+
+/// How long an idle stream waits before sending a comment line.
+///
+/// A proxy or load balancer closes a connection that has been silent for a while. A
+/// comment is not an event, so a client that only reads `event:`/`data:` ignores it.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// One `event:`/`data:` frame, in the shape the browser `EventSource` expects.
+fn event_frame(name: &str, data: &str) -> String {
+    format!("event: {name}\ndata: {data}\n\n")
+}
+
+/// Every model's current state, as the first frame of a stream.
+fn snapshot_frame(state: &AppState) -> String {
+    // A `ModelEvent` is plain data, so this cannot fail; an empty array would still be a
+    // well-formed frame if it somehow did.
+    let data = serde_json::to_string(&state.model_snapshot()).unwrap_or_else(|_| "[]".to_owned());
+    event_frame("snapshot", &data)
+}
+
+/// State carried between the frames of one stream.
+struct EventCursor {
+    state: Arc<AppState>,
+    receiver: tokio::sync::broadcast::Receiver<ModelEvent>,
+    /// The state each model was last reported in. A repeat is progress; a change is a
+    /// state event, so a client can act on transitions without diffing byte counts.
+    last: std::collections::BTreeMap<String, String>,
+    ticker: tokio::time::Interval,
+    /// Whether the opening snapshot is still owed.
+    snapshot_pending: bool,
+}
+
+/// The stream behind `GET /v1/models/events`.
+///
+/// One frame at a time, and each frame is produced only when there is something to say:
+/// the task sleeps in `select!` rather than polling, so an idle stream costs nothing.
+fn model_event_stream(
+    state: Arc<AppState>,
+    receiver: tokio::sync::broadcast::Receiver<ModelEvent>,
+    ticker: tokio::time::Interval,
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::convert::Infallible>> {
+    let cursor = EventCursor {
+        state,
+        receiver,
+        last: std::collections::BTreeMap::new(),
+        ticker,
+        snapshot_pending: true,
+    };
+    futures_util::stream::unfold(cursor, |mut cursor| async move {
+        if cursor.snapshot_pending {
+            cursor.snapshot_pending = false;
+            let frame = snapshot_frame(&cursor.state);
+            return Some((Ok(axum::body::Bytes::from(frame)), cursor));
+        }
+        let EventCursor {
+            state,
+            receiver,
+            last,
+            ticker,
+            ..
+        } = &mut cursor;
+        let frame = tokio::select! {
+            received = receiver.recv() => match received {
+                Ok(event) => {
+                    let name = match last.insert(event.id.clone(), event.state.clone()) {
+                        Some(previous) if previous == event.state => "progress",
+                        _ => "state",
+                    };
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    event_frame(name, &data)
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    // The events it missed are gone, so its view of every model is
+                    // suspect, not just the ones that changed. Say so, then restate the
+                    // whole catalog: silence here would be a client that is wrong and
+                    // does not know it.
+                    last.clear();
+                    format!(
+                        "event: lagged\ndata: {{\"missed\":{missed}}}\n\n{}",
+                        snapshot_frame(state)
+                    )
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            },
+            _ = ticker.tick() => ": keep-alive\n\n".to_owned(),
+        };
+        Some((Ok(axum::body::Bytes::from(frame)), cursor))
+    })
+}
+
+/// Watch every model's state without polling the catalog.
+///
+/// The stream opens with a `snapshot` of the whole catalog, then carries `state` events
+/// when a model changes and `progress` events while a download runs. It is one request
+/// against the rate limiter however long it stays open, and it holds no streaming session:
+/// the bytes it carries are a few dozen per event, not audio.
+#[utoipa::path(
+    get,
+    path = "/v1/models/events",
+    tag = "models",
+    summary = "Model state and download progress as server-sent events",
+    responses((
+        status = 200,
+        description = "One `snapshot` event, then `progress` and `state` events, with a comment line when idle",
+        content_type = "text/event-stream",
+        body = String
+    ))
+)]
+async fn model_events(State(state): State<Arc<AppState>>) -> Response {
+    // Subscribed before the snapshot is taken: an event published in between is then
+    // delivered rather than lost, which at worst repeats what the snapshot already said.
+    let receiver = state.events.subscribe();
+    let mut ticker = tokio::time::interval(KEEPALIVE);
+    // Delay, not burst: a stream that was quiet for a minute should not answer with four
+    // comment lines at once.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // An interval's first tick is immediate, and nothing has been idle yet.
+    ticker.tick().await;
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        axum::body::Body::from_stream(model_event_stream(Arc::clone(&state), receiver, ticker)),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -2652,6 +2893,265 @@ mod tests {
         (status, body, headers)
     }
 
+    /// Bytes of the toy model the stream tests download.
+    const TOY_BYTES: &[u8] = b"arioso toy model, small enough to fetch in a test";
+
+    /// A catalog with one model small enough to fetch inside a test.
+    ///
+    /// The URL names a host that does not resolve: the tests point the config at a loopback
+    /// mirror, so a test that reached the origin would fail loudly instead of passing on
+    /// whatever network happened to be available.
+    fn toy_manifest() -> Manifest {
+        use sha2::Digest as _;
+        let digest: String = sha2::Sha256::digest(TOY_BYTES)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "models": [{
+                "id": "toy",
+                "kind": "tts",
+                "engine": "piper",
+                "version": "2026.11",
+                "license": "MIT",
+                "commercial_use": true,
+                "files": [{
+                    "name": "toy.onnx",
+                    "url": "https://example.invalid/toy.onnx",
+                    "sha256": digest,
+                    "size": TOY_BYTES.len(),
+                }],
+            }],
+        });
+        Manifest::parse(document.to_string().as_bytes()).unwrap()
+    }
+
+    fn toy_state(mirror: &str) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.models.mirror = Some(mirror.to_owned());
+        config.models.max_concurrent_downloads = 1;
+        (
+            Arc::new(AppState::new(config, toy_manifest(), None).unwrap()),
+            dir,
+        )
+    }
+
+    /// A loopback HTTP server that serves [`TOY_BYTES`] at every path, and its base URL.
+    ///
+    /// A mirror is the supported way to fetch through something other than the origin, so
+    /// the download under test is the real one, through the real downloader.
+    async fn toy_mirror() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route("/{*path}", get(|| async { TOY_BYTES }));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
+
+    /// The next frame of a stream, waiting at most ten seconds for one.
+    async fn next_frame(body: &mut axum::body::Body) -> String {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
+            .await
+            .expect("a frame within ten seconds")
+            .expect("the stream stays open")
+            .expect("a data frame");
+        String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+    }
+
+    /// The JSON of an `event:`/`data:` frame.
+    fn frame_data(frame: &str) -> serde_json::Value {
+        let data = frame
+            .trim()
+            .split("data: ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no data line in {frame:?}"));
+        serde_json::from_str(data).unwrap()
+    }
+
+    /// Open the event stream through the router, as a client would.
+    async fn open_events(state: &Arc<AppState>) -> axum::body::Body {
+        let response = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream",
+            "the route must answer as an event stream"
+        );
+        response.into_body()
+    }
+
+    #[tokio::test]
+    async fn the_event_stream_opens_with_a_snapshot_then_follows_a_download() {
+        let mirror = toy_mirror().await;
+        let (state, _dir) = toy_state(&mirror);
+        let spec = state.manifest.find("toy").cloned().expect("the toy model");
+
+        let mut body = open_events(&state).await;
+        let snapshot = next_frame(&mut body).await;
+        assert!(snapshot.starts_with("event: snapshot\n"), "{snapshot}");
+        let models = frame_data(&snapshot);
+        let toy = models
+            .as_array()
+            .expect("the snapshot is a list")
+            .iter()
+            .find(|model| model["id"] == "toy")
+            .expect("the toy model is in the snapshot");
+        assert_eq!(toy["state"], "not_installed", "{snapshot}");
+
+        state.begin_download(&spec);
+
+        let mut frames = Vec::new();
+        let last = loop {
+            let frame = next_frame(&mut body).await;
+            if frame.starts_with(": ") {
+                // A keep-alive comment, not an event.
+                continue;
+            }
+            frames.push(frame.clone());
+            if frame.contains("\"state\":\"installed\"") {
+                break frame;
+            }
+        };
+        assert!(
+            last.starts_with("event: state\n"),
+            "the end of a download is a state event: {last}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.starts_with("event: state\n")
+                    && frame.contains("\"downloading\"")),
+            "a state event reports the download starting: {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.starts_with("event: progress\n")),
+            "bytes are reported as progress events: {frames:?}"
+        );
+        let installed = frame_data(&last);
+        assert_eq!(installed["downloaded"], TOY_BYTES.len() as u64);
+        assert!(installed["error"].is_null(), "{installed}");
+    }
+
+    #[tokio::test]
+    async fn two_subscribers_both_see_the_same_download() {
+        let mirror = toy_mirror().await;
+        let (state, _dir) = toy_state(&mirror);
+        let spec = state.manifest.find("toy").cloned().expect("the toy model");
+
+        let mut first = open_events(&state).await;
+        let mut second = open_events(&state).await;
+        assert!(
+            next_frame(&mut first)
+                .await
+                .starts_with("event: snapshot\n")
+        );
+        assert!(
+            next_frame(&mut second)
+                .await
+                .starts_with("event: snapshot\n")
+        );
+
+        state.begin_download(&spec);
+
+        for (name, body) in [("first", &mut first), ("second", &mut second)] {
+            let mut started = false;
+            let mut finished = false;
+            while !finished {
+                let frame = next_frame(body).await;
+                started |= frame.contains("\"downloading\"");
+                finished = frame.contains("\"state\":\"installed\"");
+            }
+            assert!(started, "{name} missed the download starting");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_leaves_does_not_stop_the_download() {
+        let mirror = toy_mirror().await;
+        let (state, _dir) = toy_state(&mirror);
+        let spec = state.manifest.find("toy").cloned().expect("the toy model");
+
+        // A client that connects and goes away before anything happens.
+        let abandoned = open_events(&state).await;
+        drop(abandoned);
+
+        state.begin_download(&spec);
+
+        // The download runs to completion with nobody listening.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !state.is_installed(&spec) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the download did not finish with no subscriber"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // The next subscriber is told where things stand, without waiting for a change.
+        let mut body = open_events(&state).await;
+        let snapshot = next_frame(&mut body).await;
+        assert!(snapshot.starts_with("event: snapshot\n"), "{snapshot}");
+        assert!(snapshot.contains("\"state\":\"installed\""), "{snapshot}");
+    }
+
+    #[tokio::test]
+    async fn an_idle_stream_sends_a_comment_so_a_proxy_keeps_it_open() {
+        // Time is paused: the comment arrives on a fifteen second timer, and a test that
+        // waited for it in real time would be a test nobody runs.
+        let (state, _dir) = state();
+        let mut body = open_events(&state).await;
+        assert!(next_frame(&mut body).await.starts_with("event: snapshot\n"));
+
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(15)).await;
+        let idle = next_frame(&mut body).await;
+        assert_eq!(
+            idle, ": keep-alive\n\n",
+            "an idle stream comments, not events"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_falls_behind_is_told_and_gets_a_new_snapshot() {
+        let (state, _dir) = state();
+        let id = state.manifest.models.first().unwrap().id.clone();
+        let mut body = open_events(&state).await;
+        assert!(next_frame(&mut body).await.starts_with("event: snapshot\n"));
+
+        // More events than the channel holds, with nobody reading them: the subscriber has
+        // fallen behind by construction.
+        for step in 0..300 {
+            state.note_download(&id, step, 1000);
+        }
+
+        let frame = next_frame(&mut body).await;
+        assert!(frame.contains("event: lagged\n"), "{frame}");
+        assert!(
+            frame.contains("\"missed\":"),
+            "the client is told how far behind it fell: {frame}"
+        );
+        assert!(
+            frame.contains("event: snapshot\n"),
+            "and handed a fresh snapshot rather than a gap: {frame}"
+        );
+    }
+
     #[tokio::test]
     async fn the_document_names_every_route() {
         let (state, _dir) = state();
@@ -2676,6 +3176,7 @@ mod tests {
             "/v1/voices",
             "/v1/config",
             "/v1/models",
+            "/v1/models/events",
             "/v1/tts",
             "/v1/stt",
         ] {
@@ -3809,7 +4310,7 @@ mod tests {
             Some((40, 100)),
             "a third caller sees the progress, not a fresh start"
         );
-        state.finish_download(&id);
+        state.finish_download(&id, None);
         assert_eq!(
             state.try_start_download(&id, 100),
             None,

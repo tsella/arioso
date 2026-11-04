@@ -41,7 +41,7 @@ tempfile = "3"
 thiserror = "2"
 utoipa = { version = "6", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 wiremock = "0.6"

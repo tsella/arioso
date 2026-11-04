@@ -103,6 +103,31 @@ Treat the error codes as configuration advice, not as failures to retry:
 - `409 download_in_progress`: wait, or read the catalog for progress.
 - `503 too_many_sessions`: the streaming cap is reached. Raise `server.limits.max_connections`.
 
+### Watch a download without polling
+
+`GET /v1/models/events` is a server-sent event stream of the same state the catalog
+reports. The first frame is a `snapshot` of every model; after it, `state` events mark
+transitions and `progress` events carry byte counts.
+
+```text
+curl -N http://127.0.0.1:10101/v1/models/events
+
+event: snapshot
+data: [{"id":"piper-en_US-lessac-medium","state":"not_installed","downloaded":null,"total":63201294,"error":null}]
+
+event: state
+data: {"id":"piper-en_US-lessac-medium","state":"downloading","downloaded":0,"total":63201294,"error":null}
+
+event: progress
+data: {"id":"piper-en_US-lessac-medium","state":"downloading","downloaded":4194304,"total":63201294,"error":null}
+```
+
+`-N` turns off curl's buffering; without it the frames arrive in blocks. An idle stream
+sends a comment line every fifteen seconds, so a proxy does not close it. A client that
+falls more than 256 events behind is sent `event: lagged` with the count it missed,
+followed by a fresh `snapshot`: read the snapshot again rather than assuming the gap was
+empty.
+
 ## Embed it in a desktop app
 
 Set `server.sidecar` in the config the app ships, then:
