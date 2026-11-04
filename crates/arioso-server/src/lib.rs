@@ -857,6 +857,18 @@ impl AppState {
         Some((spec.id.clone(), self.is_installed(spec)))
     }
 
+    /// The style a requested voice means, when it names the model instead of a style.
+    ///
+    /// A catalog lists files, and a front end that echoes a row back sends the id it was
+    /// given. For an engine whose voices live inside one file, that id is not a voice: it is
+    /// the file. The engine's own default style is what such a caller meant.
+    fn style_for(requested: &str, model_id: &str, engine: &str) -> Option<&'static str> {
+        if requested != model_id {
+            return None;
+        }
+        arioso_config::default_voice(engine)
+    }
+
     /// Load the configured engine into the one voice slot.
     ///
     /// One engine per process: the slot holds whichever `tts.engine` names, and a
@@ -872,7 +884,19 @@ impl AppState {
             let symbols = self
                 .file_of(spec, "config.json")
                 .map_err(TtsFailure::Engine)?;
-            let voice = config.voice_name().to_string();
+            let mut voice = config.voice_name().to_string();
+            // A front end that lists the catalog and sends back what it found sends the model
+            // id: `kokoro-82m` names a file, and no style in the archive answers to it. The
+            // model's own default style is what that caller meant, and the log says so rather
+            // than making the substitution in silence.
+            if let Some(style) = Self::style_for(&voice, &spec.id, &config.tts.engine) {
+                tracing::warn!(
+                    requested = %voice,
+                    using = style,
+                    "a model id is not a style; using the engine default"
+                );
+                voice = style.to_owned();
+            }
             let loaded =
                 KokoroVoice::load(&model, &voices, &symbols, &voice).map_err(
                     |error| match error {
@@ -4843,6 +4867,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(state.config().tts.engine, "kokoro");
         assert_eq!(state.config().voice_name(), "af_heart");
+    }
+
+    #[test]
+    fn a_model_id_is_read_as_the_engines_default_style() {
+        // A catalog lists files. A front end that sends a row back sends the id it was given,
+        // and for Kokoro that id is the file, not a voice.
+        assert_eq!(
+            AppState::style_for("kokoro-82m", "kokoro-82m", "kokoro"),
+            Some("af_heart")
+        );
+        // A name that is neither the model nor a style is still nobody's business but the
+        // archive's: it must reach the engine and be refused by name.
+        assert_eq!(
+            AppState::style_for("xx_nobody", "kokoro-82m", "kokoro"),
+            None
+        );
+        // And a real style is left alone.
+        assert_eq!(
+            AppState::style_for("af_bella", "kokoro-82m", "kokoro"),
+            None
+        );
     }
 
     #[test]

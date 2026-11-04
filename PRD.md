@@ -1122,7 +1122,8 @@ and keep the audio, without a server, a socket, or a browser.
   filtered by typing. A Kokoro model is one file holding fifty-four styles, and the styles
   are what a person chooses between, so each style is a row: the row carries the style name
   and the download carries the model id. A row that offered the model id as a voice would be
-  answered, correctly, that the archive holds no such voice. Each row shows the voice's name, its size on disk, and its licence as
+  answered, correctly, that the archive holds no such voice, so a request that names the
+  loaded model is read as that model's default style and the substitution is logged. Each row shows the voice's name, its size on disk, and its licence as
   the manifest states it. A licence of `unknown`, or a model whose `commercial_use` is
   false, carries a marker; the app never infers a licence from a name.
 - F22.3 A model that is not on disk offers a download instead of speech, and the offer
