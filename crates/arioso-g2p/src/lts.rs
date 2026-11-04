@@ -190,7 +190,14 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         if let Some(long) = long {
             if !is_vowel(char::from(consonant)) {
                 out.push(long);
-                out.extend_from_slice(single(consonant));
+                // The consonant is followed by that final `e`, which is a front vowel, so a
+                // `c` or `g` here is soft: face, ice, page, huge. `single` has no context
+                // and would say the hard form.
+                out.extend_from_slice(match consonant {
+                    b'c' => &["S"],
+                    b'g' => &["JH"],
+                    other => single(other),
+                });
                 return 3;
             }
         }
@@ -340,6 +347,27 @@ mod tests {
         assert_eq!(say("time"), "T AY1 M");
         assert_eq!(say("hope"), "HH OW1 P");
         assert_eq!(say("cube"), "K UW1 B");
+    }
+
+    #[test]
+    fn a_final_silent_e_keeps_a_soft_c_and_g() {
+        // These words are not in a dictionary, so they are spoken by the rules. The silent
+        // e lengthened the vowel and then the consonant was read with no context, which
+        // said a hard `K` or `G`: `face` came out as `F EY1 K`.
+        assert_eq!(say("face"), "F EY1 S");
+        assert_eq!(say("ice"), "AY1 S");
+        assert_eq!(say("age"), "EY1 JH");
+        assert_eq!(say("huge"), "HH UW1 JH");
+
+        // The hard form is gone, not merely present alongside a soft one.
+        for word in ["face", "ice", "age", "huge"] {
+            let spoken = to_arpabet(word);
+            assert!(
+                !spoken.iter().any(|token| token == "K" || token == "G"),
+                "{word} was spoken as {}",
+                spoken.join(" ")
+            );
+        }
     }
 
     #[test]
