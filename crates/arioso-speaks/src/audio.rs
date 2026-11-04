@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player as Sink, buffer::SamplesBuffer};
 
+use crate::resample;
+
 /// How much audio one envelope bucket covers.
 const BUCKET: f32 = 0.01;
 
@@ -15,6 +17,10 @@ const BUCKET: f32 = 0.01;
 pub struct Player {
     device: Option<MixerDeviceSink>,
     sink: Option<Sink>,
+    /// The rate the device runs at, which the mixer would otherwise reach by interpolation.
+    device_rate: u32,
+    /// The channels the device runs at.
+    channels: u16,
     /// Peak per [`BUCKET`] of the last thing played.
     envelope: Vec<f32>,
     /// Seconds of audio the envelope covers.
@@ -32,9 +38,15 @@ impl Player {
         let sink = device
             .as_ref()
             .map(|device| Sink::connect_new(device.mixer()));
+        let (device_rate, channels) = device.as_ref().map_or((0, 1), |device| {
+            let config = device.config();
+            (config.sample_rate().get(), config.channel_count().get())
+        });
         Self {
             device,
             sink,
+            device_rate,
+            channels: channels.max(1),
             envelope: Vec::new(),
             duration: 0.0,
         }
@@ -59,18 +71,34 @@ impl Player {
         if rate == 0 || samples.is_empty() {
             return Err("there is nothing to play".to_owned());
         }
+        // The envelope is measured on the engine's own samples, so the waveform is in the
+        // time of the utterance rather than the time of the device.
         self.envelope = envelope(samples, rate);
         self.duration = samples.len() as f32 / rate as f32;
-        sink.stop();
-        // One channel, and the rate the engine produced: the buffer is fed raw, so nothing
-        // here resamples or decodes.
-        let Some(channels) = std::num::NonZero::new(1u16) else {
-            return Err("a channel count of zero is not playable".to_owned());
+        // Clear rather than stop: stopping tears the output stream down, and starting it
+        // again is a click at the head of every utterance.
+        sink.clear();
+        let device_rate = if self.device_rate == 0 {
+            rate
+        } else {
+            self.device_rate
         };
-        let Some(sample_rate) = std::num::NonZero::new(rate) else {
+        // Converted here, so the mixer's linear interpolation has nothing left to do. This
+        // is the difference between the engine's audio and the same audio through the app.
+        let resampled = resample::resample(samples, rate, device_rate);
+        let Some(sample_rate) = std::num::NonZero::new(device_rate) else {
             return Err("a sample rate of zero is not playable".to_owned());
         };
-        sink.append(SamplesBuffer::new(channels, sample_rate, samples.to_vec()));
+        let Some(channels) = std::num::NonZero::new(self.channels) else {
+            return Err("a channel count of zero is not playable".to_owned());
+        };
+        // A mono utterance goes to every channel: the engine speaks one voice, and the
+        // device wants a frame per channel.
+        let mut frames = Vec::with_capacity(resampled.len() * usize::from(self.channels));
+        for sample in resampled {
+            frames.extend(std::iter::repeat_n(sample, usize::from(self.channels)));
+        }
+        sink.append(SamplesBuffer::new(channels, sample_rate, frames));
         sink.play();
         Ok(())
     }
@@ -183,6 +211,8 @@ mod tests {
         let player = Player {
             device: None,
             sink: None,
+            device_rate: 0,
+            channels: 1,
             envelope: vec![0.5, 1.0],
             duration: 0.02,
         };
