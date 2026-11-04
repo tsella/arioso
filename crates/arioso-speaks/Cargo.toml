@@ -27,3 +27,5 @@ crossterm = "0.29"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 # Pure Rust, so the MIT licence of this workspace stays true of the binary.
 flacenc = "0.5"
+tracing.workspace = true
+tracing-subscriber.workspace = true

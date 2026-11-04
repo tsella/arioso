@@ -7,6 +7,8 @@ mod app;
 mod audio;
 mod catalog;
 mod dither;
+mod log;
+mod resample;
 mod save;
 mod ui;
 
@@ -31,9 +33,16 @@ const TICK: Duration = Duration::from_millis(60);
 
 fn main() -> Result<()> {
     let config_path = config_path();
+    // The config is read twice: once to learn which environment it asks for, and once with
+    // those variables in place. Both reads are cheap, and the second one sees the file's own
+    // settings where nothing was exported.
+    let first = load_config(&config_path)?;
+    let log_file = log::init(&first.log.level);
+    apply_env(&first.env);
     let config = load_config(&config_path)?;
     let manifest = load_manifest(&config)?;
     let mut app = App::new(config, config_path, manifest).map_err(anyhow::Error::msg)?;
+    app.log_file = log_file;
 
     enable_raw_mode().context("putting the terminal into raw mode")?;
     let mut out = stdout();
@@ -67,6 +76,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
         if app.quit {
             return Ok(());
         }
+    }
+}
+
+/// Set the variables the configuration names, without touching one already exported.
+///
+/// The person at the keyboard wins: a config file is a default, and a variable exported in
+/// front of the program has to mean what it says.
+fn apply_env(env: &std::collections::BTreeMap<String, String>) {
+    for (key, value) in env {
+        if std::env::var_os(key).is_some() {
+            continue;
+        }
+        // Safety: this runs before any thread is started, which is the condition the
+        // function's own documentation asks for.
+        unsafe { std::env::set_var(key, value) };
     }
 }
 

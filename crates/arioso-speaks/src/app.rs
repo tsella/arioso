@@ -226,6 +226,10 @@ pub struct App {
     pub audio: Option<Rendered>,
     /// Set when the app should close.
     pub quit: bool,
+    /// Frames drawn so far, which is what an idle animation moves on.
+    pub frame: u64,
+    /// Where the log is, when one could be opened.
+    pub log_file: Option<PathBuf>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
     phonemes_due: Option<Instant>,
@@ -282,6 +286,8 @@ impl App {
             save_prompt: false,
             audio: None,
             quit: false,
+            frame: 0,
+            log_file: None,
             jobs,
             done,
             phonemes_due: Some(Instant::now()),
@@ -498,6 +504,7 @@ impl App {
 
     /// Fetch a voice that is not on disk.
     pub fn start_download(&mut self, id: &str) {
+        tracing::info!(model = %id, "download started");
         if self.download.is_some() {
             self.error = Some("a download is already running".to_owned());
             return;
@@ -524,6 +531,7 @@ impl App {
 
     /// Do the work that is due: drain the worker, and ask for phonemes when typing stops.
     pub fn tick(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
         while let Ok(done) = self.done.try_recv() {
             match done {
                 Done::Phonemes { text, line } => {
@@ -556,12 +564,18 @@ impl App {
                     if self.player.available() {
                         match self.player.play(&rendered.samples, rendered.rate) {
                             Ok(()) => {}
-                            Err(error) => self.error = Some(error),
+                            Err(error) => {
+                                tracing::warn!(%error, "playback failed");
+                                self.error = Some(error);
+                            }
                         }
                     }
                     self.audio = Some(rendered);
                 }
                 Done::Rendered(Err(error)) => {
+                    // The status row is one line and it goes at the next key. The file keeps
+                    // the reason, which is the whole point of writing one.
+                    tracing::error!(%error, "render failed");
                     self.error = Some(error);
                     self.status.clear();
                 }
@@ -579,7 +593,10 @@ impl App {
                             self.rebuild();
                             self.select_voice();
                         }
-                        Err(error) => self.error = Some(error),
+                        Err(error) => {
+                            tracing::error!(model = %id, %error, "download failed");
+                            self.error = Some(error);
+                        }
                     }
                 }
             }
@@ -663,10 +680,10 @@ fn worker(jobs: Receiver<Job>, done: Sender<Done>) {
                 let reporting = id.clone();
                 let mut progress = |received: u64, total: u64| {
                     let _ = done.send(Done::Progress { received, total });
-                    // A download in a terminal app is not cancelled from the keyboard: the
-                    // action row is showing the bar, and the escape key is the quit key.
                     let _ = &reporting;
-                    true
+                    // Continue. The callback's answer is "stop", so a true here ended every
+                    // download at its first chunk and left a `.part` file behind.
+                    false
                 };
                 let result = state
                     .download_blocking(&id, &mut progress)

@@ -277,6 +277,8 @@ dependencies = [
  "flacenc",
  "ratatui",
  "rodio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
