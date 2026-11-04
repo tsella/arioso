@@ -82,6 +82,13 @@ pub struct AppState {
     dictionary: CmuDict,
     user: Mutex<UserState>,
     voice: Mutex<Option<Voice>>,
+    /// How many times the loaded voice has been dropped, and how many times a patch tried
+    /// to swap the style in place. Test-only: the fact is invisible without a 325 MB graph
+    /// in the test binary, and nothing in production reads a counter.
+    #[cfg(test)]
+    voice_drops: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    style_swaps: std::sync::atomic::AtomicUsize,
     /// Whisper, loaded on first use. One model, so one slot.
     stt: Mutex<Option<arioso_stt_sherpa::Engine>>,
     /// The streaming model the socket uses, when one is configured. A separate slot from
@@ -258,6 +265,10 @@ impl AppState {
                 error,
             }),
             voice: Mutex::new(None),
+            #[cfg(test)]
+            voice_drops: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            style_swaps: std::sync::atomic::AtomicUsize::new(0),
             stt: Mutex::new(None),
             stt_stream: Mutex::new(None),
             config: std::sync::RwLock::new(Arc::new(config)),
@@ -521,8 +532,66 @@ impl AppState {
 
     /// Drop the loaded voice, so the next request loads the one the config now names.
     fn drop_voice(&self) {
+        #[cfg(test)]
+        self.voice_drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut guard) = self.voice.lock() {
             *guard = None;
+        }
+    }
+
+    /// Apply a patch's change to the loaded engine.
+    ///
+    /// One Kokoro graph serves every voice in the archive: the 325 MB model, the symbol
+    /// table and the session are identical for all 54, and only the 522 KB style table
+    /// differs. Dropping the slot for a voice change therefore re-reads and re-compiles
+    /// the whole graph to arrive at a different row of a table already in memory, so a
+    /// Kokoro style is swapped where it is. A Piper voice *is* a model, so a new name
+    /// there is a new graph and the slot is dropped as before.
+    ///
+    /// Nothing here decides whether the name is speakable: `validate` has already refused
+    /// one the archive does not hold, before any of the patch was applied.
+    fn retarget_voice(&self, change: VoiceChange) {
+        match change {
+            VoiceChange::None => {}
+            VoiceChange::Reload => self.drop_voice(),
+            VoiceChange::Style(name) => match self.swap_style(&name) {
+                // The engine in the slot took the new style, or the slot was empty and
+                // the next request loads what the config names.
+                Swapped::InPlace | Swapped::Empty => {}
+                // A Piper voice is one model per voice, so a new name is a new graph; and
+                // an archive that no longer holds the name must not be spoken under it.
+                Swapped::OtherEngine | Swapped::Refused => self.drop_voice(),
+            },
+        }
+    }
+
+    /// Swap the style table on the loaded Kokoro voice.
+    ///
+    /// The lock is released before the caller acts on the answer.
+    fn swap_style(&self, name: &str) -> Swapped {
+        #[cfg(test)]
+        self.style_swaps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut guard = match self.voice.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match guard.as_mut() {
+            Some(Voice::Kokoro(voice)) => match voice.select_voice(name) {
+                Ok(()) => Swapped::InPlace,
+                Err(error) => {
+                    // The archive is the authority on which styles exist and the patch was
+                    // checked against it, so this is the archive changing under a loaded
+                    // engine. Speaking the old style under the new name is the one outcome
+                    // not allowed: the caller drops the slot, and the next request refuses
+                    // by naming what the archive holds.
+                    tracing::warn!(%error, "the loaded voice could not be switched");
+                    Swapped::Refused
+                }
+            },
+            Some(Voice::Piper(_)) => Swapped::OtherEngine,
+            None => Swapped::Empty,
         }
     }
 
@@ -2165,10 +2234,41 @@ pub struct ServerPatch {
     pub first_message_timeout_ms: Option<u64>,
 }
 
+/// What a patch did to the loaded speech engine.
+///
+/// The distinction is what makes a voice change cheap or expensive: a Piper voice is a
+/// model, so a new name is a new graph; a Kokoro voice is a row in an archive the loaded
+/// graph already holds, so a new name is a table swap.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum VoiceChange {
+    /// The engine, its files and its voice are as they were.
+    #[default]
+    None,
+    /// The name changed but not the engine. Whether the engine can take it in place is
+    /// the engine's answer, decided where the loaded voice is known.
+    Style(String),
+    /// A different engine, so a different graph has to be loaded.
+    Reload,
+}
+
+/// What a loaded engine did with a style change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swapped {
+    /// The loaded Kokoro engine swapped its style table; nothing was reloaded.
+    InPlace,
+    /// The slot held nothing, so there is nothing to drop and nothing to reload early.
+    Empty,
+    /// The slot holds a Piper voice, which is one model per voice.
+    OtherEngine,
+    /// The archive does not hold the name, so the loaded style is no longer the one asked
+    /// for and must not keep answering.
+    Refused,
+}
+
 /// What a patch touched, so the engines it invalidated can be dropped.
 #[derive(Debug, Default)]
 struct Touched {
-    voice: bool,
+    voice: VoiceChange,
     stt: bool,
     /// The voice a patch of the engine had to change, as (was, is). Reported in the
     /// response, because the caller asked for one change and got two.
@@ -2193,15 +2293,16 @@ impl ConfigPatch {
                 .filter(|engine| **engine != config.tts.engine)
                 .cloned();
             let named_voice = tts.voice.is_some();
+            // The name in force before the patch, so a change is measured against what
+            // was actually being spoken rather than against the stored field.
+            let was_voice = config.voice_name().to_string();
             if let Some(engine) = tts.engine {
                 config.tts.engine = engine;
-                touched.voice = true;
             }
             if let Some(voice) = tts.voice {
                 // An empty string is how a caller clears a named voice and hands the
                 // choice back to the engine.
                 config.tts.voice = (!voice.is_empty()).then_some(voice);
-                touched.voice = true;
             }
             // A new engine cannot say the old engine's voice, and the caller did not name
             // one, so the field is cleared rather than filled: the engine's own default
@@ -2210,9 +2311,22 @@ impl ConfigPatch {
                 let was = config.tts.voice.take();
                 if let Some(was) = was {
                     touched.voice_defaulted = Some((was, config.voice_name().to_string()));
-                    touched.voice = true;
                 }
             }
+            // What the slot has to do about it. A patch that names the engine and voice it
+            // already has is not a change at all, and dropping the loaded graph for it
+            // would cost a reload for nothing. A new engine is always a new graph; within
+            // one engine, only Kokoro can keep the graph, because its voices are rows in
+            // one archive rather than a model each.
+            touched.voice = if changed_engine.is_some() {
+                VoiceChange::Reload
+            } else if config.voice_name() == was_voice {
+                VoiceChange::None
+            } else if config.tts.engine == "kokoro" {
+                VoiceChange::Style(config.voice_name().to_string())
+            } else {
+                VoiceChange::Reload
+            };
             if let Some(speed) = tts.speed {
                 config.tts.speed = speed;
             }
@@ -2404,7 +2518,8 @@ async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
         so a typo does not look like a successful change. Validation runs before anything \
         is applied, so a refused patch changes nothing. A patch that changes `tts.engine` \
         without naming a voice gets that engine's default voice, and the response carries \
-        a `notes` array saying which.",
+        a `notes` array saying which. A Kokoro voice change swaps the style on the loaded \
+        graph rather than reloading it: one graph serves all 54 voices.",
     request_body = ConfigPatch,
     responses(
         (status = 200, body = serde_json::Value),
@@ -2454,9 +2569,7 @@ async fn patch_config(
         }
     }
     state.set_config(next);
-    if touched.voice {
-        state.drop_voice();
-    }
+    state.retarget_voice(touched.voice);
     if touched.stt {
         state.drop_stt();
     }
@@ -4053,6 +4166,120 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(state.config().voice_name(), "af_heart");
         assert!(body["notes"].is_null(), "{body}");
+    }
+
+    /// A Kokoro server over the test catalog, with an archive holding two styles.
+    ///
+    /// The slot is empty: a test binary has no 325 MB graph to load, so what these tests
+    /// observe is which path a patch chose — the in-place swap or the drop. The loaded
+    /// case is [`a_voice_only_patch_keeps_the_real_graph_loaded`], which needs the files.
+    fn kokoro_voice_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let mut config = Config::default();
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = Some("af_heart".to_owned());
+        let (state, dir) = state_with(config);
+        std::fs::write(
+            dir.path().join("voices-v1.0.bin"),
+            test_archive(&[("af_heart", 2, 2), ("af_bella", 2, 2)]),
+        )
+        .unwrap();
+        (state, dir)
+    }
+
+    /// Style swaps attempted, and engines dropped, by the patches so far.
+    fn swaps_and_drops(state: &AppState) -> (usize, usize) {
+        (
+            state.style_swaps.load(std::sync::atomic::Ordering::Relaxed),
+            state.voice_drops.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_voice_only_patch_swaps_the_style_instead_of_dropping_the_engine() {
+        // Every Kokoro voice is the same graph and the same vocabulary: only the style
+        // table differs. Dropping the slot for a different style re-reads and re-compiles
+        // 325 MB to arrive at a different row of a table already in memory.
+        let (state, _dir) = kokoro_voice_state();
+        let (status, body) = patch(state.clone(), r#"{"tts":{"voice":"af_bella"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().voice_name(), "af_bella");
+        assert_eq!(
+            swaps_and_drops(&state),
+            (1, 0),
+            "the patch must swap the style and keep the graph"
+        );
+        // The caller asked for a voice and got it; nothing was replaced behind its back.
+        assert!(body["notes"].is_null(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_names_the_same_voice_keeps_the_engine() {
+        let (state, _dir) = kokoro_voice_state();
+        let (status, body) = patch(state.clone(), r#"{"tts":{"voice":"af_heart"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            swaps_and_drops(&state),
+            (0, 0),
+            "a patch that changes nothing must not cost a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_engine_still_drops_the_loaded_engine() {
+        // One slot, one engine: a patch that changes the engine must not leave the old
+        // graph answering for the new one.
+        let (state, _dir) = state();
+        let (status, body) = patch(state.clone(), r#"{"tts":{"engine":"kokoro"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            swaps_and_drops(&state),
+            (0, 1),
+            "a different engine is a different graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_piper_voice_change_drops_the_loaded_voice() {
+        // A Piper voice is a model, not a row in a table: a new name is a new graph.
+        let (state, _dir) = state();
+        let (status, body) =
+            patch(state.clone(), r#"{"tts":{"voice":"en_US-lessac-medium"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            swaps_and_drops(&state),
+            (0, 1),
+            "one model per voice means a reload"
+        );
+    }
+
+    /// The same patch against the real files: the graph is still in memory afterwards.
+    ///
+    /// Ignored by default, because the graph is 325 MB and the styles 28 MB. Run it with
+    /// `ARIOSO_TEST_MODELS_DIR=<dir> cargo test -p arioso-server -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs the real kokoro files in ARIOSO_TEST_MODELS_DIR"]
+    async fn a_voice_only_patch_keeps_the_real_graph_loaded() {
+        let dir = std::env::var_os("ARIOSO_TEST_MODELS_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("set ARIOSO_TEST_MODELS_DIR to the directory holding the Kokoro files");
+        let mut config = Config::default();
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = Some("af_heart".to_owned());
+        config.models.dir = Some(dir);
+        let manifest =
+            Manifest::parse(include_str!("../../../models/manifest.json").as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        state.warm_voice().expect("loading the model");
+
+        let (status, body) = patch(state.clone(), r#"{"tts":{"voice":"af_bella"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let guard = state.voice.lock().unwrap();
+        match guard.as_ref() {
+            // The same graph, a different row of the archive: the session was kept and the
+            // style swapped under it.
+            Some(Voice::Kokoro(voice)) => assert_eq!(voice.voice(), "af_bella"),
+            _ => panic!("a voice-only patch dropped the loaded graph"),
+        }
     }
 
     #[tokio::test]

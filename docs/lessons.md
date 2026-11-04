@@ -426,3 +426,23 @@ another test's window: a call that costs 7 allocations reported 145, and the sui
 failed depending on which test started first. The counters are per thread now, so a
 measurement counts the thread that asked for it. Rule: a bound that can absorb another
 test's work is not a bound.
+
+## A voice is not always a model
+
+`PATCH /v1/config` dropped the loaded engine whenever `tts.voice` changed. That is right for
+Piper, where each voice is its own graph, and wrong for Kokoro, where 54 voices are rows of
+one archive under one graph: the switch re-read and re-compiled 325 MB to read 522 KB, and
+paid it on the next request, where it looked like slow synthesis rather than a config change.
+A field that names a choice says nothing about what the choice costs; the invalidation rule
+belongs to the engine, and a second engine is when the first one's assumption starts costing
+time.
+
+## Decode where the bytes arrive
+
+A reader that fills a byte buffer and then parses it holds the input and the output at once,
+which is the whole cost when the output is the table the input describes. `VoiceFile::style`
+read a 522 KB entry into a `Vec<u8>` and decoded that into a `Vec<f32>`, so loading one style
+cost a megabyte. Parsing the header first and decoding as the payload arrives is one
+allocation instead of three and half the memory; the refusals stayed the same because the
+checks moved before the read rather than into it — a shape that needs more bytes than the
+entry holds is refused by comparing the two, not by a short read failing.

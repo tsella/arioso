@@ -5,6 +5,7 @@
 
 use arioso_core::NormalizeOptions;
 use arioso_core::UserDictionary;
+
 use arioso_core::alloc_count::{Counting, measure, measure_warm};
 use arioso_g2p::cmudict::CmuDict;
 use arioso_g2p::reverse::ReverseIndex;

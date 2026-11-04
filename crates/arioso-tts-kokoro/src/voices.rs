@@ -166,6 +166,9 @@ impl VoiceFile {
 
     /// Read one voice's style table.
     ///
+    /// The header is parsed first and the floats are decoded as they arrive, so the entry's
+    /// bytes are never held: one read costs one table rather than the table twice.
+    ///
     /// # Errors
     ///
     /// Returns [`KokoroError::UnknownVoice`] for a name the archive does not hold, and
@@ -178,6 +181,7 @@ impl VoiceFile {
                 name: name.to_string(),
                 available: self.names(),
             })?;
+        let size = usize::try_from(entry.size).unwrap_or(usize::MAX);
         let mut file = File::open(&self.path).map_err(|source| KokoroError::Io {
             path: self.path.clone(),
             source,
@@ -187,15 +191,121 @@ impl VoiceFile {
                 path: self.path.clone(),
                 source,
             })?;
-        let mut bytes = vec![0u8; usize::try_from(entry.size).unwrap_or(0)];
-        file.read_exact(&mut bytes)
-            .map_err(|source| KokoroError::Io {
-                path: self.path.clone(),
-                source,
+
+        // The preamble: six magic bytes, two version bytes, then the header's length.
+        if size < PREAMBLE {
+            return Err(KokoroError::Voices("entry is not a .npy array".into()));
+        }
+        let mut preamble = [0u8; 12];
+        read(&mut file, &mut preamble[..PREAMBLE], &self.path)?;
+        if preamble[..6] != NPY_MAGIC {
+            return Err(KokoroError::Voices("entry is not a .npy array".into()));
+        }
+        let (header_len, prefix) = match preamble[6] {
+            1 => (
+                usize::from(u16::from_le_bytes([preamble[8], preamble[9]])),
+                PREAMBLE,
+            ),
+            2 | 3 => {
+                if size < 12 {
+                    return Err(KokoroError::Voices(
+                        ".npy header runs past the entry".into(),
+                    ));
+                }
+                read(&mut file, &mut preamble[10..12], &self.path)?;
+                (
+                    usize::try_from(u32::from_le_bytes([
+                        preamble[8],
+                        preamble[9],
+                        preamble[10],
+                        preamble[11],
+                    ]))
+                    .unwrap_or(0),
+                    12,
+                )
+            }
+            other => {
+                return Err(KokoroError::Voices(format!(
+                    ".npy format version {other} is not supported"
+                )));
+            }
+        };
+        let start = prefix
+            .checked_add(header_len)
+            .filter(|start| *start <= size)
+            .ok_or_else(|| KokoroError::Voices(".npy header runs past the entry".into()))?;
+        // A numpy header is a short dict padded to 64 bytes, so it is read on the stack.
+        // A longer one is read from the heap rather than refused, because nothing in the
+        // format bounds its length.
+        let mut stack = [0u8; 1024];
+        let mut heap: Vec<u8> = Vec::new();
+        let header = if header_len <= stack.len() {
+            &mut stack[..header_len]
+        } else {
+            heap.resize(header_len, 0);
+            &mut heap[..]
+        };
+        read(&mut file, header, &self.path)?;
+        let (rows, width) = parse_header(header)?;
+        // A table with no rows is a table with no style: `Style::row` would index it and
+        // slice past the end, so the shape is refused where it is read rather than where
+        // it is used.
+        if rows == 0 {
+            return Err(KokoroError::Voices(
+                "style array has no rows, so it holds no style to speak with".into(),
+            ));
+        }
+
+        let expected = rows
+            .checked_mul(width)
+            .and_then(|cells| cells.checked_mul(4))
+            .ok_or_else(|| {
+                KokoroError::Voices(format!(
+                    "style array shape ({rows}, 1, {width}) is larger than this loader can address"
+                ))
             })?;
-        parse_npy(&bytes)
+        let end = start.checked_add(expected).ok_or_else(|| {
+            KokoroError::Voices("style array starts past the end of the entry".to_string())
+        })?;
+        // The entry's declared size is the header's claim, checked against the file when
+        // the archive was indexed. A shape that needs more than the entry holds is the
+        // array being shorter than its own header says.
+        if end > size {
+            return Err(KokoroError::Voices(
+                "style array is shorter than its shape".into(),
+            ));
+        }
+
+        let mut data = Vec::with_capacity(expected / 4);
+        let mut chunk = [0u8; 4096];
+        let mut left = expected;
+        while left > 0 {
+            let take = left.min(chunk.len());
+            read(&mut file, &mut chunk[..take], &self.path)?;
+            data.extend(
+                chunk[..take]
+                    .chunks_exact(4)
+                    .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]])),
+            );
+            left -= take;
+        }
+        Ok(Style { rows, width, data })
     }
 }
+
+/// Read exactly `into.len()` bytes, naming the file when the read falls short.
+fn read(file: &mut File, into: &mut [u8], path: &Path) -> Result<(), KokoroError> {
+    file.read_exact(into).map_err(|source| KokoroError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// The `.npy` magic number.
+const NPY_MAGIC: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
+
+/// Bytes before the header: the magic and two version bytes.
+const PREAMBLE: usize = 10;
 
 /// The two sizes, from the header or from a ZIP64 extra field when the header says
 /// "look further".
@@ -238,33 +348,9 @@ fn sizes(header: &[u8; 30], extra: &[u8]) -> (u64, u64) {
     (compressed, uncompressed)
 }
 
-/// Read the one `.npy` shape the archive holds: little-endian `f4`, C order, shape
-/// `(rows, 1, width)`.
-fn parse_npy(bytes: &[u8]) -> Result<Style, KokoroError> {
-    if bytes.len() < 10 || bytes[..6] != [0x93, b'N', b'U', b'M', b'P', b'Y'] {
-        return Err(KokoroError::Voices("entry is not a .npy array".into()));
-    }
-    let (header_len, prefix) = match bytes[6] {
-        1 => (
-            usize::from(u16::from_le_bytes([bytes[8], bytes[9]])),
-            10usize,
-        ),
-        2 | 3 => (
-            usize::try_from(u32::from_le_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11],
-            ]))
-            .unwrap_or(0),
-            12,
-        ),
-        other => {
-            return Err(KokoroError::Voices(format!(
-                ".npy format version {other} is not supported"
-            )));
-        }
-    };
-    let header = bytes
-        .get(prefix..prefix + header_len)
-        .ok_or_else(|| KokoroError::Voices(".npy header runs past the entry".into()))?;
+/// The rows and width from the one `.npy` header shape the archive holds: little-endian
+/// `f4`, C order, shape `(rows, 1, width)`.
+fn parse_header(header: &[u8]) -> Result<(usize, usize), KokoroError> {
     let header = String::from_utf8_lossy(header);
     if !header.contains("'<f4'") {
         return Err(KokoroError::Voices(format!(
@@ -279,58 +365,70 @@ fn parse_npy(bytes: &[u8]) -> Result<Style, KokoroError> {
     let shape = header
         .split("'shape':")
         .nth(1)
-        .and_then(|rest| rest.split(')').next())
-        .map(|rest| {
-            rest.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '(')
-                .trim_start_matches('(')
-                .split(',')
-                .filter_map(|part| part.trim().parse::<usize>().ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let (rows, width) = match shape.as_slice() {
-        [rows, 1, width] => (*rows, *width),
-        [rows, width] => (*rows, *width),
-        other => {
-            return Err(KokoroError::Voices(format!(
-                "style array has shape {other:?}; expected (rows, 1, width)"
-            )));
+        .and_then(|rest| rest.split(')').next());
+    // The dimensions, read in place: a table is read on every voice load, and a vector of
+    // three integers for a shape that is checked once is an allocation for nothing.
+    let mut dims = [0usize; 3];
+    let mut count = 0usize;
+    if let Some(text) = shape {
+        for part in text
+            .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '(')
+            .trim_start_matches('(')
+            .split(',')
+        {
+            if let Ok(value) = part.trim().parse::<usize>() {
+                if count < dims.len() {
+                    dims[count] = value;
+                }
+                count += 1;
+            }
         }
-    };
-    // A table with no rows is a table with no style. `Style::row` would index it and
-    // slice past the end, so the shape is refused where it is read rather than where it
-    // is used.
-    if rows == 0 {
-        return Err(KokoroError::Voices(
-            "style array has no rows, so it holds no style to speak with".into(),
-        ));
     }
-    let start = prefix + header_len;
-    let expected = rows
-        .checked_mul(width)
-        .and_then(|cells| cells.checked_mul(4))
-        .ok_or_else(|| {
-            KokoroError::Voices(format!(
-                "style array shape ({rows}, 1, {width}) is larger than this loader can address"
-            ))
-        })?;
-    let end = start.checked_add(expected).ok_or_else(|| {
-        KokoroError::Voices("style array starts past the end of the entry".to_string())
-    })?;
-    let data = bytes
-        .get(start..end)
-        .ok_or_else(|| KokoroError::Voices("style array is shorter than its shape".into()))?;
-    let data = data
-        .chunks_exact(4)
-        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-        .collect();
-    Ok(Style { rows, width, data })
+    match count {
+        // `(rows, 1, width)`, which is what `numpy.savez` writes for a style table.
+        3 if dims[1] == 1 => Ok((dims[0], dims[2])),
+        2 => Ok((dims[0], dims[1])),
+        _ => {
+            // Only the refusal builds the list, so the message names what was found.
+            let found = shape
+                .map(|text| {
+                    text.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '(')
+                        .trim_start_matches('(')
+                        .split(',')
+                        .filter_map(|part| part.trim().parse::<usize>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Err(KokoroError::Voices(format!(
+                "style array has shape {found:?}; expected (rows, 1, width)"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A stored zip holding one entry with exactly these bytes, valid zip or not.
+    fn archive_raw(name: &str, payload: &[u8]) -> Vec<u8> {
+        let file_name = format!("{name}.npy");
+        let mut out = Vec::new();
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(file_name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(file_name.as_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
 
     /// A stored zip holding one `.npy` array, the way `numpy.savez` writes it.
     fn archive(entries: &[(&str, &[f32], usize, usize)]) -> Vec<u8> {
@@ -445,6 +543,41 @@ mod tests {
         let voices = VoiceFile::open(&path).unwrap();
         let error = voices.style("af_heart").unwrap_err().to_string();
         assert!(error.contains("no rows"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_that_is_shorter_than_its_shape_is_refused() {
+        // The header says `(2, 1, 2)`, sixteen bytes of floats; the entry holds four.
+        let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (2, 1, 2), }";
+        let mut npy = vec![0x93, b'N', b'U', b'M', b'P', b'Y', 1, 0];
+        npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        npy.extend_from_slice(header.as_bytes());
+        npy.extend_from_slice(&[0u8; 4]);
+        let (_dir, path) = written(&archive_raw("af_heart", &npy));
+        let voices = VoiceFile::open(&path).unwrap();
+        let error = voices.style("af_heart").unwrap_err().to_string();
+        assert!(error.contains("shorter than its shape"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_npy_array_is_refused() {
+        let (_dir, path) = written(&archive_raw("af_heart", b"not an array"));
+        let voices = VoiceFile::open(&path).unwrap();
+        let error = voices.style("af_heart").unwrap_err().to_string();
+        assert!(error.contains("not a .npy array"), "{error}");
+    }
+
+    #[test]
+    fn a_style_array_that_is_not_f4_is_refused() {
+        let header = "{'descr': '<f8', 'fortran_order': False, 'shape': (1, 1, 2), }";
+        let mut npy = vec![0x93, b'N', b'U', b'M', b'P', b'Y', 1, 0];
+        npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        npy.extend_from_slice(header.as_bytes());
+        npy.extend_from_slice(&[0u8; 16]);
+        let (_dir, path) = written(&archive_raw("af_heart", &npy));
+        let voices = VoiceFile::open(&path).unwrap();
+        let error = voices.style("af_heart").unwrap_err().to_string();
+        assert!(error.contains("not little-endian f4"), "{error}");
     }
 
     #[test]
