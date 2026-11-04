@@ -76,10 +76,9 @@ A round trip through one recognizer would be the way to check it, and it has not
 - **P2.3, the per-word `String` in `text_symbols`.** A reusable buffer is a real saving per
   word, but the same loop now calls a `lookup` that no longer allocates, which was the
   larger of the two costs. Recorded rather than done.
-- **P2.1's `write_cardinal`.** The two fast paths are in; rewriting the cardinal writer to
-  push static words into a `&mut String` touches every number path in the normalizer for a
-  saving that only shows on text dense with numbers. The `Vec<char>` fast path already
-  removes the cost for text with no numbers at all.
+- **P2.1's `write_cardinal`** is no longer left undone: the text-path pass below does it.
+  The two fast paths were already in, and the rewrite of the cardinal writer now pushes
+  static words into a `&mut String` as well.
 - **P2.4, the rate limiter.** The plan's own fix is a pre-sized map; the lock is held for
   four arithmetic operations. Sharding it is a change to the shape of the limiter with no
   measured cost behind it.
@@ -93,3 +92,47 @@ A round trip through one recognizer would be the way to check it, and it has not
 - The `preroll` drain is a `copy_within` now rather than a ring buffer. The window is
   bounded by `preroll_ms`, and the buffer is handed over wholesale when an utterance
   starts, which a ring buffer would make more expensive than the copy it saves.
+
+## The text path, second pass
+
+A review of the normalizer and the chunker found three costs the first pass left behind.
+Each is one commit, and each carries its measurements in the message.
+
+| what | commit | change |
+|---|---|---|
+| abbreviations | `39d3267` | `expand_abbreviations` returns `Cow<'_, str>`, starts the output only at the first match, and compares written bytes with `eq_ignore_ascii_case` instead of lowercasing the sentence. The scan is gated on the token's first byte. |
+| numbers | `5e5527f` | the scanners compare character slices against the static tables; `write_cardinal`, `write_number`, `write_currency`, `write_clock` and `write_ordinal` push words into the caller's buffer. |
+| chunking | `48595c2` | `closes_sentence` compares the preceding word in place; `best_cut` counts at most `limit` characters instead of the whole remainder. |
+| the harness | `4668581` | the counting allocator keeps per-thread counters, so a bound no longer depends on `--test-threads`. |
+
+`arioso_core::alloc_count`, warm, allocations / bytes. Each bound is asserted in
+`crates/arioso-core/tests/allocations.rs`, and each was run against the commit before the
+change and failed there.
+
+| input | before | after |
+|---|---|---|
+| "The quick brown fox jumps over the lazy dog." | 2 / 88 | 1 / 44 |
+| "Dr. Smith arrived at 5 p.m." | 17 / 690 | 6 / 393 |
+| "There are 3,500 units at $4.99 each." | 38 / 1608 | 6 / 528 |
+| "The 21st box is 5kg." | 24 / 707 | 4 / 208 |
+| `cardinal(123_456_789)` | 28 / 1065 | 5 / 248 |
+| `sentences`, 200 sentences | 206 / 8725 | 7 / 8128 |
+| `chunk_text`, 200 sentences, limit 200 | 5 / 1984 | 5 / 1984 |
+
+The chunker's cost was never in allocations: it was the character count. `best_cut` counted
+every character left in the document on every call, so the work grew with the square of the
+input. The new unit test chunks 2000 sentences and asserts the characters read is at most
+four times the document; it reads 290,099 for 90,000 characters, and the old code reads
+22,734,620 and fails the same bound by a factor of 78.
+
+Release, median of 31 runs, three runs each, on the machine in `BENCHMARK.md`:
+
+| measure | before | after |
+|---|---|---|
+| `chunk_text`, 2000 sentences, limit 200 | 1,248.8 us | 325.4 us |
+| `chunk_text`, 1000 / 2000 / 4000 sentences | 507 / 1,760 / 6,473 us | 166 / 356 / 686 us |
+
+The old curve grows about 3.5 times per doubling of the input; the new one about twice.
+`normalize` on 200 plain sentences fell from 0.073 ms to 0.040 ms and on 200 sentences dense
+with numbers from 0.244 ms to 0.074 ms, measured with one harness on both trees (release,
+minimum of seven windows of twenty calls).
