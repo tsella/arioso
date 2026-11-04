@@ -188,20 +188,25 @@ impl Segmenter {
         let frame_len = frame.len();
 
         if !self.speaking {
-            self.remember(frame);
-            if speech {
-                self.speaking = true;
-                self.speech = std::mem::take(&mut self.preroll);
-                self.speech.extend_from_slice(frame);
-                self.started_at = self.consumed.saturating_sub(self.speech.len() as u64);
-                self.silence_frames = 0;
-                self.speech_frames = 1;
-                self.last_speech_len = self.speech.len();
-                events.push(Event::SpeechStart {
-                    at: self.started_at,
-                });
-            }
             self.consumed += frame_len as u64;
+            if !speech {
+                self.remember(frame);
+                return;
+            }
+            // The frame that starts the utterance is not preroll: it is the utterance's
+            // first frame, and remembering it here as well put a copy of it at the front of
+            // every utterance, so a model heard it twice. The count is added before the
+            // start is taken from it, because the utterance begins with this frame.
+            self.speaking = true;
+            self.speech = std::mem::take(&mut self.preroll);
+            self.speech.extend_from_slice(frame);
+            self.started_at = self.consumed.saturating_sub(self.speech.len() as u64);
+            self.silence_frames = 0;
+            self.speech_frames = 1;
+            self.last_speech_len = self.speech.len();
+            events.push(Event::SpeechStart {
+                at: self.started_at,
+            });
             return;
         }
 
@@ -439,6 +444,33 @@ mod tests {
             (900..=1200).contains(&ms),
             "cut near the limit, got {ms} ms"
         );
+    }
+
+    #[test]
+    fn the_frame_that_starts_an_utterance_is_not_preroll() {
+        // Remembering that frame as preroll and then appending it again put a copy of it at
+        // the front of every utterance, so a model heard one frame of it twice.
+        let mut segmenter = Segmenter::new(RATE, Config::default());
+        let audio = tone(100);
+        let events = segmenter.push(&audio);
+        let Some((buffer, start)) = segmenter.open() else {
+            panic!("speech must open an utterance: {events:?}");
+        };
+        assert_eq!(buffer.len(), audio.len());
+        assert_eq!(start, 0);
+
+        // Leading silence is preroll, and the utterance still begins with it, not with the
+        // frame before it.
+        let mut segmenter = Segmenter::new(RATE, Config::default());
+        let mut audio = silence(400);
+        audio.extend(tone(100));
+        segmenter.push(&audio);
+        let Some((buffer, start)) = segmenter.open() else {
+            panic!("speech must open an utterance");
+        };
+        // 200 ms of preroll and 100 ms of speech, with no frame counted twice.
+        assert_eq!(buffer.len(), RATE as usize * 300 / 1000);
+        assert_eq!(start, 200 * u64::from(RATE) / 1000);
     }
 
     #[test]
