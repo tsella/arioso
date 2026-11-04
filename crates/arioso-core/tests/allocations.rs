@@ -23,9 +23,14 @@ fn a_plain_sentence_is_normalized_without_a_copy_of_itself() {
     eprintln!("plain normalize: {stats:?}");
     assert!(text.contains("dog"));
     assert!(
-        stats.allocations <= 2,
+        stats.allocations <= 1,
         "a plain sentence costs {} allocations: {stats:?}",
         stats.allocations
+    );
+    assert!(
+        stats.bytes <= 44,
+        "a plain sentence requests {} bytes: {stats:?}",
+        stats.bytes
     );
 }
 
@@ -36,9 +41,14 @@ fn an_abbreviation_is_expanded() {
     eprintln!("abbreviated normalize: {stats:?}");
     assert!(text.to_lowercase().contains("doctor"), "{text}");
     assert!(
-        stats.allocations <= 17,
+        stats.allocations <= 16,
         "an abbreviated sentence costs {} allocations: {stats:?}",
         stats.allocations
+    );
+    assert!(
+        stats.bytes <= 663,
+        "an abbreviated sentence requests {} bytes: {stats:?}",
+        stats.bytes
     );
 }
 

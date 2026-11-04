@@ -3,6 +3,8 @@
 //! English only. Every other language returns its input unchanged until it has
 //! rules of its own.
 
+use std::borrow::Cow;
+
 const ONES: [&str; 20] = [
     "zero",
     "one",
@@ -354,7 +356,8 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
         .bytes()
         .any(|byte| byte.is_ascii_digit() || byte == b'$')
     {
-        return expanded;
+        // Nothing to expand: the borrowed case copies once here, and only once.
+        return expanded.into_owned();
     }
     let chars: Vec<char> = expanded.chars().collect();
     let mut out = String::with_capacity(expanded.len() * 2);
@@ -447,40 +450,34 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
 }
 
 /// Expand the abbreviations in [`ABBREVIATIONS`], keeping the source capital.
-fn expand_abbreviations(text: &str) -> String {
+///
+/// The result borrows the input when nothing matched. Almost every sentence reaches here
+/// with a full stop and no abbreviation, and copying it before looking was the cost.
+fn expand_abbreviations(text: &str) -> Cow<'_, str> {
     // Every abbreviation ends in a full stop, so text without one has nothing to expand.
-    // Lowercasing it first allocated a copy of every sentence that needed no work.
     if !text.contains('.') {
-        return text.to_owned();
+        return Cow::Borrowed(text);
     }
-    let lower = text.to_lowercase();
-    let mut out = String::with_capacity(text.len());
+    let mut out: Option<String> = None;
     let mut index = 0;
 
     while index < text.len() {
-        let rest = &lower[index..];
-        let found = ABBREVIATIONS
-            .iter()
-            .find(|(short, _)| rest.starts_with(short))
-            .filter(|_| {
-                // Only at a word start, so "address." does not match "dr.".
-                index == 0
-                    || !text[..index]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|previous| previous.is_alphanumeric())
+        if let Some((short, long)) = abbreviation_at(text, index) {
+            // The first match starts the copy: everything before it is unchanged.
+            let buffer = out.get_or_insert_with(|| {
+                let mut buffer = String::with_capacity(text.len());
+                buffer.push_str(&text[..index]);
+                buffer
             });
-
-        if let Some((short, long)) = found {
             let source = &text[index..index + short.len()];
             if source.chars().next().is_some_and(char::is_uppercase) {
                 let mut chars = long.chars();
                 if let Some(first) = chars.next() {
-                    out.extend(first.to_uppercase());
-                    out.push_str(chars.as_str());
+                    buffer.extend(first.to_uppercase());
+                    buffer.push_str(chars.as_str());
                 }
             } else {
-                out.push_str(long);
+                buffer.push_str(long);
             }
             index += short.len();
             continue;
@@ -490,11 +487,61 @@ fn expand_abbreviations(text: &str) -> String {
             .chars()
             .next()
             .expect("index is on a boundary");
-        out.push(ch);
+        if let Some(buffer) = out.as_mut() {
+            buffer.push(ch);
+        }
         index += ch.len_utf8();
     }
 
-    out
+    match out {
+        Some(buffer) => Cow::Owned(buffer),
+        None => Cow::Borrowed(text),
+    }
+}
+
+/// The abbreviation that starts at `index`, if one does.
+///
+/// The comparison is against the written bytes, ignoring ASCII case, so no lowercase copy
+/// of the sentence is made. The first byte rules out most positions before any slicing:
+/// every token in the table starts with one of the letters below.
+fn abbreviation_at(text: &str, index: usize) -> Option<(&'static str, &'static str)> {
+    let first = *text.as_bytes().get(index)?;
+    if !starts_abbreviation(first) {
+        return None;
+    }
+    // Only at a word start, so "address." does not match "dr.".
+    if index > 0
+        && text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphanumeric())
+    {
+        return None;
+    }
+    ABBREVIATIONS
+        .iter()
+        .copied()
+        .find(|(short, _)| written_starts_with(text.as_bytes(), index, short))
+}
+
+/// Whether a token in [`ABBREVIATIONS`] could start with this byte.
+///
+/// The test below it keeps this in step with the table.
+fn starts_abbreviation(byte: u8) -> bool {
+    matches!(
+        byte.to_ascii_lowercase(),
+        b'a' | b'd' | b'e' | b'i' | b'm' | b's' | b'v'
+    )
+}
+
+/// Whether `bytes[index..]` begins with the ASCII `token`, ignoring ASCII case.
+fn written_starts_with(bytes: &[u8], index: usize, token: &str) -> bool {
+    let token = token.as_bytes();
+    bytes.len() >= index + token.len()
+        && bytes[index..index + token.len()]
+            .iter()
+            .zip(token)
+            .all(|(got, want)| got.eq_ignore_ascii_case(want))
 }
 
 /// A number as written: the whole part, and the fraction digits if any.
@@ -1205,6 +1252,20 @@ mod tests {
     #[test]
     fn decimals() {
         assert_eq!(normalize("3.5"), "three point five");
+    }
+
+    #[test]
+    fn every_abbreviation_passes_the_first_byte_gate() {
+        // The gate is a `matches!` list rather than a scan of the table, so it has to be
+        // kept in step with it.
+        for (short, _) in ABBREVIATIONS {
+            let first = short.as_bytes()[0];
+            assert!(starts_abbreviation(first), "{short}");
+            assert!(
+                starts_abbreviation(first.to_ascii_uppercase()),
+                "{short} in capitals"
+            );
+        }
     }
 
     #[test]
