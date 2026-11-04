@@ -1074,18 +1074,22 @@ impl AppState {
     }
 
     /// Synthesize text, loading the voice on first use.
-    fn render(&self, text: &str, speed: f32, sid: i64) -> Result<(Vec<f32>, u32), String> {
+    ///
+    /// The document is collected as 16-bit PCM, converted chunk by chunk as it arrives.
+    /// Holding it as `f32` and converting at the end kept four bytes a sample alive for
+    /// the length of the render and then allocated the WAV beside it.
+    fn render(&self, text: &str, speed: f32, sid: i64) -> Result<(Vec<u8>, u32), String> {
         let mut rate = 0;
-        let mut samples = Vec::new();
+        let mut pcm: Vec<u8> = Vec::new();
         self.render_stream(text, speed, sid, |chunk, chunk_rate| {
             rate = chunk_rate;
-            samples.extend_from_slice(chunk);
+            wav::write_pcm_s16le(chunk, &mut pcm);
             Ok(())
         })?;
-        if samples.is_empty() {
+        if pcm.is_empty() {
             return Err("nothing to say: none of the words are in the dictionary".into());
         }
-        Ok((samples, rate))
+        Ok((pcm, rate))
     }
 
     /// Load the configured voice without rendering anything.
@@ -3357,7 +3361,7 @@ async fn synthesize(
     let text = text.to_owned();
     let worker = Arc::clone(&state);
     let rendered = tokio::task::spawn_blocking(move || worker.render(&text, speed, sid)).await;
-    let (samples, rate) = match rendered {
+    let (pcm, rate) = match rendered {
         Ok(Ok(pair)) => pair,
         Ok(Err(detail)) => {
             // The engine's own message can name a path or a file. It goes to the log, and
@@ -3383,15 +3387,11 @@ async fn synthesize(
     // caller needs the rate in the content type to make anything of them.
     if state.config().tts.format == "pcm" {
         let content_type = format!("audio/pcm;rate={rate}");
-        return Ok((
-            [(header::CONTENT_TYPE, content_type)],
-            wav::pcm_s16le(&samples),
-        )
-            .into_response());
+        return Ok(([(header::CONTENT_TYPE, content_type)], pcm).into_response());
     }
     Ok((
         [(header::CONTENT_TYPE, "audio/wav".to_owned())],
-        wav::to_bytes(&samples, rate),
+        wav::to_bytes_from_pcm(&pcm, rate),
     )
         .into_response())
 }
@@ -3506,6 +3506,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use arioso_core::alloc_count::measure;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -3533,6 +3534,59 @@ mod tests {
             Arc::new(AppState::new(config, manifest, None).unwrap()),
             dir,
         )
+    }
+
+    /// Five sentences, and long enough that the document has to grow to hold them.
+    const DOCUMENT: &str = "The quick brown fox jumps over the lazy dog. \
+                            Pack my box with five dozen liquor jugs. \
+                            How vexingly quick daft zebras jump. \
+                            Sphinx of black quartz, judge my vow. \
+                            The five boxing wizards jump quickly.";
+
+    #[test]
+    fn a_document_is_held_as_pcm_not_floats() {
+        // Needs a real voice, like `tests/ws_stream.rs`: the claim is about the buffer the
+        // real path builds, and the engine is what produces the chunks it is built from.
+        let Ok(dir) = std::env::var("ARIOSO_TEST_MODELS_DIR") else {
+            eprintln!("skipped: ARIOSO_TEST_MODELS_DIR is not set");
+            return;
+        };
+        let mut config = Config::default();
+        config.models.dir = Some(PathBuf::from(&dir));
+        config.tts.voice = Some("en_US-joe-medium".to_owned());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        // The first render loads the graph; the load is not what this measures.
+        let _ = state.render(DOCUMENT, 1.0, 0).expect("the voice speaks");
+
+        // The engine alone, with a sink that keeps nothing, so the difference below is the
+        // document and not the inference.
+        let (_, engine) = measure(|| {
+            state
+                .render_stream(DOCUMENT, 1.0, 0, |_, _| Ok(()))
+                .expect("the voice speaks")
+        });
+        let ((pcm, _rate), full) = measure(|| state.render(DOCUMENT, 1.0, 0).unwrap());
+        let samples = pcm.len() / 2;
+        assert!(
+            samples > 100_000,
+            "the text is too short to grow the document: {samples} samples"
+        );
+
+        // Measured at 7.7 bytes a sample; the f32 document this replaced measured 13.5,
+        // because the floats are twice the size and every doubling copies them again.
+        let collected = full.bytes.saturating_sub(engine.bytes);
+        assert!(
+            collected <= 9 * samples,
+            "collecting {samples} samples allocated {collected} bytes"
+        );
+        // What is held when the render returns: measured at 3.8 bytes a sample, which is
+        // the doubling of a two-byte document. The float document alone held 7.2.
+        assert!(
+            pcm.capacity() <= 5 * samples,
+            "the document holds {} bytes for {samples} samples",
+            pcm.capacity()
+        );
     }
 
     async fn call(app: Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
