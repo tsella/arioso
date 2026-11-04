@@ -1,6 +1,6 @@
 //! HTTP surface for arioso.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arioso_config::{AUDIO_FORMATS, Config};
@@ -583,6 +583,31 @@ impl AppState {
             self.manifest.find_voice(voice)
         };
         found.ok_or_else(|| ServerError::NoVoice(voice.clone()))
+    }
+
+    /// The voice readiness reports, and whether it can be spoken.
+    ///
+    /// A Piper voice is a catalog id, so presence is its files on disk. A Kokoro voice is
+    /// a style inside the archive, so presence is the archive indexing that name: the
+    /// model can be installed and the configured style absent, and a server in that state
+    /// cannot speak. The name reported is the one that was checked.
+    fn ready_voice(&self) -> Option<(String, bool)> {
+        let config = self.config();
+        if !config.tts.enabled {
+            return None;
+        }
+        let Ok(spec) = self.voice_spec() else {
+            // A voice the catalog does not hold is not installed, and naming it is what
+            // tells the caller which value to change.
+            return Some((config.tts.voice.clone(), false));
+        };
+        if config.tts.engine == "kokoro" {
+            let present = self.is_installed(spec)
+                && archive_names(&self.models_dir, spec)
+                    .is_some_and(|names| names.contains(&config.tts.voice));
+            return Some((config.tts.voice.clone(), present));
+        }
+        Some((spec.id.clone(), self.is_installed(spec)))
     }
 
     /// Load the configured engine into the one voice slot.
@@ -1767,9 +1792,11 @@ pub struct ReadyView {
     pub status: String,
     /// The user dictionary.
     pub dictionary: DictionaryView,
-    /// Voice the server will load, when text to speech is enabled.
+    /// Voice the server will load, when text to speech is enabled. For Kokoro this is
+    /// the style name, which is the value that was checked against the archive.
     pub voice: Option<String>,
-    /// Whether that voice is on disk.
+    /// Whether that voice can be spoken: its model is on disk, and for Kokoro the
+    /// archive holds the style.
     pub voice_installed: bool,
     /// Whether it is loaded right now.
     pub voice_loaded: bool,
@@ -1873,12 +1900,28 @@ pub struct ModelListView {
     pub models: Vec<ModelView>,
 }
 
+/// The voice names a Kokoro model's archive holds, when the archive is on disk.
+///
+/// The catalog entry holds every style, so a style is present only if the archive indexes
+/// it. Absent means the archive is not there to ask, which is a model that is not
+/// installed rather than a voice that is missing.
+fn archive_names(models_dir: &Path, spec: &ModelSpec) -> Option<Vec<String>> {
+    spec.files
+        .iter()
+        .find(|file| file.name.ends_with(".bin"))
+        .map(|file| models_dir.join(&file.name))
+        .filter(|path| path.is_file())
+        .and_then(|path| KokoroVoice::voice_names(&path).ok())
+}
+
 #[utoipa::path(
     get,
     path = "/readyz",
     tag = "system",
     summary = "Readiness",
-    description = "Ready means every enabled engine has its model installed, not that some model is. A missing model is 503.",
+    description = "Ready means every enabled engine can serve, not that some model is. A \
+        missing model is 503, and so is a configured voice the engine cannot speak: for \
+        Kokoro the named style has to be in the archive.",
     responses(
         (status = 200, body = ReadyView),
         (status = 503, description = "An enabled engine's model is not installed", body = ReadyView)
@@ -1892,18 +1935,14 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
         .iter()
         .filter(|model| state.is_installed(model))
         .count();
-    // Readiness is about the models this server will actually load, and only about the
+    // Readiness is about the voice this server will actually load, and only about the
     // engines that are on. A server with speech to text off is not unready because no
     // speech model is installed.
-    let voice = config
-        .tts
-        .enabled
-        .then(|| state.voice_spec().ok().map(|spec| spec.id.clone()))
-        .flatten();
-    let voice_installed = !config.tts.enabled
-        || state
-            .voice_spec()
-            .is_ok_and(|spec| state.is_installed(spec));
+    let (voice, voice_installed) = match state.ready_voice() {
+        Some((name, installed)) => (Some(name), installed),
+        // Speech to text is off, so no voice is reported and nothing is missing.
+        None => (None, true),
+    };
     let voice_loaded = state
         .voice
         .lock()
@@ -2451,10 +2490,7 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             .models
             .iter()
             .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)
-            .and_then(|model| model.files.iter().find(|file| file.name.ends_with(".bin")))
-            .map(|file| state.models_dir.join(&file.name))
-            .filter(|path| path.is_file())
-            .and_then(|path| KokoroVoice::voice_names(&path).ok());
+            .and_then(|model| archive_names(&state.models_dir, model));
         archive.is_none_or(|names| names.contains(&config.tts.voice))
     } else {
         state.manifest.find_voice(&config.tts.voice).is_some()
@@ -2539,13 +2575,7 @@ async fn list_voices(
         // the rows a picker can choose. Until the archive is on disk there is nothing to
         // name, and the catalog row stands in for it rather than a list of guesses.
         let styles = if model.engine == "kokoro" && installed {
-            model
-                .files
-                .iter()
-                .find(|file| file.name.ends_with(".bin"))
-                .map(|file| state.models_dir.join(&file.name))
-                .and_then(|path| KokoroVoice::voice_names(&path).ok())
-                .unwrap_or_default()
+            archive_names(&state.models_dir, model).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -4255,6 +4285,78 @@ mod tests {
         assert_eq!(entry["state"], "downloading");
         assert_eq!(entry["downloaded"], 40);
         assert_eq!(entry["commercial_use"], false, "lessac is not commercial");
+    }
+
+    /// A server whose Kokoro model is installed, holding `voices` in its archive.
+    ///
+    /// The graph and the symbol table are one byte each: nothing here loads a session,
+    /// and the catalog's sizes are set to what was written so the model reads as
+    /// installed.
+    fn kokoro_state(voices: &[(&str, usize, usize)]) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let archive = test_archive(voices);
+        std::fs::write(dir.path().join("voices-v1.0.bin"), &archive).unwrap();
+        std::fs::write(dir.path().join("kokoro-v1.0.onnx"), b"x").unwrap();
+        std::fs::write(dir.path().join("kokoro-config.json"), b"x").unwrap();
+        let mut manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
+        for model in &mut manifest.models {
+            for file in &mut model.files {
+                file.size = if file.name.ends_with(".bin") {
+                    archive.len() as u64
+                } else {
+                    1
+                };
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = "af_heart".to_owned();
+        (
+            Arc::new(AppState::new(config, manifest, None).unwrap()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn readiness_checks_that_the_kokoro_voice_is_in_the_archive() {
+        // Installed files are not enough: the style has to be one the archive holds, or
+        // the first request fails to load it.
+        let (state, _dir) = kokoro_state(&[("af_heart", 2, 2)]);
+        let (_, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["voice"], "af_heart",
+            "the style that was checked is named"
+        );
+        assert_eq!(json["voice_installed"], true);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_not_ready_when_the_kokoro_voice_is_absent() {
+        // The same model, installed, holding a different style: nothing can be spoken.
+        let (state, _dir) = kokoro_state(&[("am_michael", 2, 2)]);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "voice_missing");
+        assert_eq!(json["voice"], "af_heart");
+        assert_eq!(json["voice_installed"], false);
     }
 
     #[tokio::test]
