@@ -361,8 +361,10 @@ enum Step<'a> {
     Close {
         /// Where the utterance began in the stream.
         start: u64,
-        /// The last of its audio, which the session has not heard.
+        /// What the segmenter's copy of the utterance holds and the session has not heard.
         audio: &'a [f32],
+        /// The silence that ended the utterance, from where this chunk meets that copy.
+        tail: &'a [f32],
         /// Everything the segmenter kept for it, which is what the final frame covers and
         /// what is decoded when no session was ever opened for it.
         utterance: &'a [f32],
@@ -372,11 +374,18 @@ enum Step<'a> {
 /// What one chunk means for the sessions, in the order it happens.
 ///
 /// The segmenter is the only thing that knows where an utterance ends, so this is built
-/// from what it reported and not from the extent of the chunk. A session that has heard
-/// `fed` samples of the utterance that began at `start` hears the chunk from that point to
-/// where the segmenter closed the utterance, and the speech that opens the next utterance
-/// is behind that point, so no session hears a word that is not its own and no sample is
-/// fed twice.
+/// from what it reported and not from the extent of the chunk. A session hears the
+/// utterance it belongs to and nothing else, and it hears it from the segmenter's own copy:
+/// that copy begins at the utterance's start, so the count a session has already heard
+/// lines up with it however the chunk boundaries fell. The chunk is only read where it
+/// continues the copy, which is the silence that ended the utterance and not the utterance.
+///
+/// Slicing the chunk from the utterance's offset instead lost samples in two places. An
+/// utterance that began in an earlier chunk, with its preroll in audio that arrived before
+/// the utterance existed, has a start before `at`, so the offset clamped to the chunk's
+/// first sample and the preroll was never heard. And a session fed up to the last whole
+/// frame of the previous chunk is short by the samples the segmenter was still holding for
+/// it, which are in the segmenter and not in this chunk.
 ///
 /// `at` is the stream index of `chunk[0]` and `session` is the open session's utterance
 /// start with how many samples it has heard.
@@ -406,11 +415,32 @@ fn plan_chunk<'a>(
         else {
             continue;
         };
-        let from = index(*start + fed(*start) as u64);
-        let to = index(*end);
+        let heard = fed(*start);
+        // A session that has heard nothing is opened by the final instead, which decodes
+        // the segmenter's copy whole. Handing it this chunk would start the session at the
+        // chunk's first sample, and the beginning of an utterance that started in an
+        // earlier chunk is not there.
+        let (audio, tail) = if heard == 0 {
+            (&[][..], &[][..])
+        } else {
+            // The copy starts at the utterance's start, so the rest of it is what the
+            // session has not heard, whichever chunk the two of them fell in.
+            let audio = utterance
+                .get(heard.min(utterance.len())..)
+                .unwrap_or_default();
+            // Past the copy is the silence that ended the utterance, which the segmenter
+            // trims and the stream still has. It is in this chunk only from where the two
+            // meet: reading the chunk from before that point would repeat a sample, and
+            // from the chunk's start would skip one.
+            let meet = (*start + utterance.len() as u64).max(at);
+            let from = index(meet);
+            let to = index(*end).max(from);
+            (audio, &chunk[from..to])
+        };
         steps.push(Step::Close {
             start: *start,
-            audio: &chunk[from..to.max(from)],
+            audio,
+            tail,
             utterance,
         });
     }
@@ -461,12 +491,18 @@ async fn stream_chunk(
             Step::Close {
                 start,
                 audio,
+                tail,
                 utterance,
             } => {
                 // The session hears the last of its own audio, the silence that ended the
                 // utterance included, before it is asked for the final: that silence is
-                // what tells the model the word is over.
+                // what tells the model the word is over. Both slices are empty when the
+                // session has heard nothing, and the final then decodes the segmenter's
+                // copy whole, preroll included.
                 if !feed_utterance(state, out, live, start, audio, gate).await {
+                    return false;
+                }
+                if !feed_utterance(state, out, live, start, tail, gate).await {
                     return false;
                 }
                 if !finish_utterance(state, out, live, utterance, start as usize, gate).await {
@@ -1088,43 +1124,63 @@ mod tests {
     /// Everything each utterance's session heard, by the utterance's start.
     type Heard = std::collections::BTreeMap<u64, Vec<f32>>;
 
+    /// Give one utterance's session the audio it has not heard, as `feed_utterance` does.
+    ///
+    /// A session for another utterance is one the segmenter has moved past, so it is
+    /// dropped rather than kept. Empty audio opens nothing.
+    fn feed(session: &mut Session, heard: &mut Heard, start: u64, audio: &[f32]) {
+        if audio.is_empty() {
+            return;
+        }
+        if session.is_some_and(|(from, _)| from != start) {
+            *session = None;
+        }
+        let already = match *session {
+            Some((from, fed)) if from == start => fed,
+            _ => 0,
+        };
+        heard.entry(start).or_default().extend_from_slice(audio);
+        *session = Some((start, already + audio.len()));
+    }
+
     /// The plan for one chunk, applied the way the socket applies it.
     ///
-    /// The engine is not available in a unit test, so this does what `stream_chunk` does
-    /// with the plan: a session is opened by its first audio, hears each step in turn, and
-    /// is gone once its utterance closes. Returns the finals the chunk produced.
+    /// The engine is not available in a unit test, so this does what `stream_chunk`,
+    /// `feed_utterance` and `finish_utterance` do with the plan: a session is opened by its
+    /// first audio, hears each step in turn, and is gone once its utterance is final. A
+    /// final with no session of its own decodes the segmenter's copy whole, which is the
+    /// fallback `finish_utterance` takes. Returns the utterances the chunk finalised, with
+    /// where the segmenter said each began and the audio it kept for it.
     fn drive(
         segmenter: &mut Segmenter,
         chunk: &[f32],
         session: &mut Session,
         heard: &mut Heard,
-    ) -> Vec<(u64, usize)> {
+    ) -> Vec<(u64, Vec<f32>)> {
         let at = segmenter.heard();
         let events = segmenter.push(chunk);
         let open = segmenter.open();
         let steps = plan_chunk(chunk, at, &events, open, *session);
         let mut finals = Vec::new();
         for step in steps {
-            let (start, audio) = match step {
-                Step::Hear { start, audio } => (start, audio),
+            match step {
+                Step::Hear { start, audio } => feed(session, heard, start, audio),
                 Step::Close {
                     start,
                     audio,
+                    tail,
                     utterance,
                 } => {
-                    finals.push((start, utterance.len()));
-                    (start, audio)
+                    feed(session, heard, start, audio);
+                    feed(session, heard, start, tail);
+                    let own = matches!(*session, Some((from, _)) if from == start);
+                    if !own {
+                        heard.entry(start).or_default().extend_from_slice(utterance);
+                    }
+                    *session = None;
+                    finals.push((start, utterance.to_vec()));
                 }
-            };
-            if audio.is_empty() {
-                continue;
             }
-            let fed = match *session {
-                Some((from, fed)) if from == start => fed,
-                _ => 0,
-            };
-            heard.entry(start).or_default().extend_from_slice(audio);
-            *session = Some((start, fed + audio.len()));
         }
         finals
     }
@@ -1171,7 +1227,7 @@ mod tests {
         let (next, _) = session.expect("the second utterance has a session");
         assert_eq!(finals[0].0, start);
         assert!(
-            start + finals[0].1 as u64 <= next,
+            start + finals[0].1.len() as u64 <= next,
             "the final runs into the next utterance"
         );
 
@@ -1184,6 +1240,137 @@ mod tests {
             voiced(400, 0.7).len(),
             "the next utterance's speech is fed exactly once"
         );
+    }
+
+    /// Every sample of the segmenter's copy reached that utterance's session once, in order,
+    /// and the session heard nothing but trailing silence after it.
+    ///
+    /// This is the invariant the plan exists to keep: a session belongs to one utterance, so
+    /// it hears that utterance's audio from its first sample to its last, and the only other
+    /// audio it may hear is the silence that ended it.
+    fn assert_heard_its_own(heard: &Heard, start: u64, utterance: &[f32]) {
+        let audio = heard
+            .get(&start)
+            .unwrap_or_else(|| panic!("no session heard the utterance at {start}"));
+        assert!(
+            audio.len() >= utterance.len(),
+            "the session at {start} heard {} of the utterance's {} samples",
+            audio.len(),
+            utterance.len()
+        );
+        assert!(
+            audio[..utterance.len()] == *utterance,
+            "the session at {start} did not hear the utterance's own audio, in order"
+        );
+        assert!(
+            audio[utterance.len()..].iter().all(|sample| *sample == 0.0),
+            "the session at {start} heard audio that is not its own"
+        );
+    }
+
+    #[test]
+    fn an_utterance_that_began_in_an_earlier_chunk_hears_its_preroll() {
+        // The preroll of an utterance is audio from before its first speech frame, so it can
+        // arrive in a chunk that came before the utterance existed, when no session was open
+        // for it. The closing chunk was sliced from the utterance's start, which is before
+        // that chunk, so the offset clamped to the chunk's first sample: the session was
+        // opened at the utterance's start and fed the chunk from its own beginning, and the
+        // preroll was never heard. A clipped onset is a word the model guesses at.
+        let mut segmenter = Segmenter::new(STREAM_RATE, test_vad());
+        let mut heard = Heard::new();
+        let mut session: Session = None;
+
+        let before = quiet(200);
+        assert!(drive(&mut segmenter, &before, &mut session, &mut heard).is_empty());
+        assert!(
+            session.is_none(),
+            "no utterance is open, so nothing was fed and no session exists"
+        );
+
+        let mut closing = voiced(400, 0.5);
+        closing.extend(quiet(400));
+        let finals = drive(&mut segmenter, &closing, &mut session, &mut heard);
+        assert_eq!(finals.len(), 1, "the chunk closes one utterance");
+        let (start, utterance) = &finals[0];
+
+        // The last 100 ms of the earlier chunk is the preroll, and it opens the copy.
+        assert_eq!(*start, 100 * u64::from(STREAM_RATE) / 1000);
+        assert_eq!(
+            utterance.len(),
+            quiet(100).len() + voiced(400, 0.5).len() + quiet(100).len(),
+            "the copy is the preroll, the speech and a short tail"
+        );
+        assert!(
+            utterance[..quiet(100).len()]
+                .iter()
+                .all(|sample| *sample == 0.0),
+            "the preroll is the front of the copy"
+        );
+
+        // The session heard the preroll, and heard it once: the copy, exactly.
+        assert_heard_its_own(&heard, *start, utterance);
+        let audio = heard.get(start).expect("the utterance was heard");
+        assert_eq!(audio.len(), utterance.len(), "the copy was fed twice");
+        assert_eq!(
+            audio.iter().filter(|sample| **sample == 0.5).count(),
+            voiced(400, 0.5).len(),
+            "the speech was fed once"
+        );
+    }
+
+    #[test]
+    fn a_frame_split_across_chunks_is_heard_in_full_by_its_own_session() {
+        // The segmenter holds the samples of a frame that a chunk boundary cut in half. When
+        // an utterance closes in the chunk after one, those samples are in the segmenter and
+        // not in the chunk, so a chunk sliced from the utterance's offset clamped to its
+        // first sample and dropped them: up to a frame of the utterance's own audio, and the
+        // frame that starts a word is where the word is.
+        //
+        // A cut ends on speech, so its copy is the whole utterance and a session that lost
+        // samples is short by them, which makes the loss countable.
+        let config = VadConfig {
+            max_utterance_ms: 1_000,
+            ..test_vad()
+        };
+        let mut segmenter = Segmenter::new(STREAM_RATE, config);
+        let mut stream = quiet(300);
+        stream.extend(voiced(2_500, 0.5));
+        stream.extend(quiet(500));
+        stream.extend(voiced(400, 0.7));
+        stream.extend(quiet(500));
+
+        let mut heard = Heard::new();
+        let mut session: Session = None;
+        let mut finals = Vec::new();
+        for chunk in stream.chunks(777) {
+            finals.extend(drive(&mut segmenter, chunk, &mut session, &mut heard));
+        }
+
+        assert_eq!(
+            finals.len(),
+            4,
+            "the two cuts and the pause make four utterances: {finals:?}"
+        );
+        assert_eq!(heard.len(), 4, "four sessions heard audio");
+        for (start, utterance) in &finals {
+            assert_heard_its_own(&heard, *start, utterance);
+        }
+        // The cuts are the first two, and each ends on speech, so nothing may be missing.
+        for (start, utterance) in finals.iter().take(2) {
+            let audio = heard.get(start).expect("the utterance was heard");
+            assert_eq!(
+                audio.len(),
+                utterance.len(),
+                "the session at {start} lost the samples the segmenter was still holding"
+            );
+            let speech = utterance.iter().filter(|sample| **sample == 0.5).count();
+            assert!(speech > 0, "a cut utterance is mostly speech");
+            assert_eq!(
+                audio.iter().filter(|sample| **sample == 0.5).count(),
+                speech,
+                "the speech of the utterance at {start} was fed once"
+            );
+        }
     }
 
     #[test]
