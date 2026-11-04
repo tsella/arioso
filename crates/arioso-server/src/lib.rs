@@ -70,6 +70,20 @@ pub enum ServerError {
     },
 }
 
+/// A speaker a render cannot use, and why.
+///
+/// The two cases answer with different codes on the C ABI: a voice that would not load is an
+/// engine failure, and a speaker the voice does not have is the caller's mistake.
+#[derive(Debug, Error)]
+pub enum SidProblem {
+    /// The voice could not be loaded, so nothing can say what speakers it has.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The voice loaded and does not have this speaker.
+    #[error("{0}")]
+    NoSuchSpeaker(String),
+}
+
 /// Shared server state.
 #[derive(Debug)]
 pub struct AppState {
@@ -255,7 +269,7 @@ impl AppState {
         }
         let cmu = CmuDict::parse(&text);
         let reverse = ReverseIndex::build(&dictionary, &cmu);
-        Ok(Self {
+        let state = Self {
             dictionary: cmu,
             user: Mutex::new(UserState {
                 path,
@@ -282,7 +296,33 @@ impl AppState {
             events,
             manifest,
             models_dir,
-        })
+        };
+        // A manifest with entries is a catalog to hold the config against, so a name that is
+        // not in it is refused now rather than at the first request. An empty manifest is a
+        // models directory with nothing downloaded yet: a voice it does not list is not
+        // wrong there, only absent, and the download route is how it arrives.
+        // Only a catalog that lists a model of that kind can answer the question. A
+        // manifest holding speech models and no voice names is a catalog with nothing to
+        // check against, not a config that is wrong.
+        if state.config().tts.enabled
+            && state
+                .manifest
+                .models
+                .iter()
+                .any(|model| model.kind == Kind::Tts)
+        {
+            state.voice_spec()?;
+        }
+        if state.config().stt.enabled
+            && state
+                .manifest
+                .models
+                .iter()
+                .any(|model| model.kind == Kind::Stt)
+        {
+            state.stt_spec()?;
+        }
+        Ok(state)
     }
 
     /// The config as it stands, cloned.
@@ -1112,22 +1152,26 @@ impl AppState {
     ///
     /// A speaker the voice does not have is the caller's mistake, not an engine failure,
     /// so it is checked before the render and answered with a code a client can switch on.
-    pub(crate) fn check_sid(&self, sid: i64) -> Result<(), String> {
-        self.warm_voice().map_err(|error| error.to_string())?;
+    ///
+    /// Public because the C ABI answers a bad speaker with a distinct code, and it must ask
+    /// the same question the HTTP and WebSocket routes ask rather than a copy of it.
+    pub fn check_sid(&self, sid: i64) -> Result<(), SidProblem> {
+        self.warm_voice()
+            .map_err(|error| SidProblem::Unavailable(error.to_string()))?;
         let guard = self
             .voice
             .lock()
-            .map_err(|_| "the voice lock is poisoned".to_string())?;
+            .map_err(|_| SidProblem::Unavailable("the voice lock is poisoned".to_string()))?;
         match guard.as_ref() {
-            Some(Voice::Piper(voice)) => {
-                voice.check_speaker(sid).map_err(|error| error.to_string())
-            }
+            Some(Voice::Piper(voice)) => voice
+                .check_speaker(sid)
+                .map_err(|error| SidProblem::NoSuchSpeaker(error.to_string())),
             // A Kokoro voice style is one speaker, and the style is the whole choice.
             Some(Voice::Kokoro(_)) if sid == 0 => Ok(()),
-            Some(Voice::Kokoro(_)) => Err(format!(
+            Some(Voice::Kokoro(_)) => Err(SidProblem::NoSuchSpeaker(format!(
                 "this voice has a single speaker, so speaker {sid} does not exist"
-            )),
-            None => Err("voice failed to load".to_string()),
+            ))),
+            None => Err(SidProblem::Unavailable("voice failed to load".to_string())),
         }
     }
 
@@ -1142,6 +1186,10 @@ impl AppState {
         sid: i64,
         mut sink: impl FnMut(&[f32], u32) -> Result<(), String>,
     ) -> Result<(), String> {
+        // Every path to a render passes here, so the check lives here rather than at each
+        // caller. A voice that does not have speaker `sid` refuses it instead of speaking
+        // with the one it does have, which a caller could not tell apart from success.
+        self.check_sid(sid).map_err(|error| error.to_string())?;
         let mut guard = self
             .voice
             .lock()
@@ -1216,7 +1264,7 @@ impl AppState {
     ///
     /// # Errors
     ///
-    /// As [`AppState::render`]: the voice failed to load, or the text has nothing the voice
+    /// As the internal render: the voice failed to load, or the text has nothing the voice
     /// can say.
     pub fn synthesize_wav(&self, text: &str, speed: f32, sid: i64) -> Result<Vec<u8>, String> {
         let (pcm, rate) = self.render(text, speed, sid)?;
@@ -3423,7 +3471,7 @@ async fn synthesize(
         return Err(ApiError::coded(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_value",
-            detail,
+            detail.to_string(),
         ));
     }
 
@@ -3762,6 +3810,9 @@ mod tests {
         config.models.dir = Some(dir.path().to_path_buf());
         config.models.mirror = Some(mirror.to_owned());
         config.models.max_concurrent_downloads = 1;
+        // The catalog holds one voice, and a config naming another is refused at startup, so
+        // this one names the toy.
+        config.tts.voice = Some("toy".into());
         (
             Arc::new(AppState::new(config, toy_manifest(), None).unwrap()),
             dir,
@@ -4502,6 +4553,10 @@ mod tests {
         std::fs::write(dir.path().join("voices-v1.0.bin"), archive).unwrap();
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
+        // A catalog of one Kokoro model cannot answer for a Piper voice, so the config names
+        // the engine the catalog holds.
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = Some("af_heart".to_owned());
         let manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
         let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 
@@ -5228,27 +5283,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_voice_is_reported() {
+    async fn a_config_naming_a_voice_the_catalog_lacks_is_refused_at_startup() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
         config.tts.voice = Some("no-such-voice".into());
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
-        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 
-        let (status, body) = call(
-            router(state),
-            Request::builder()
-                .method("POST")
-                .uri("/v1/tts")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"text":"hello"}"#))
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(String::from_utf8_lossy(&body).contains("no voice matches"));
+        // A catalog that lists voices can answer whether this name is one of them, so the
+        // name is refused where it is written rather than at the first request.
+        let error = AppState::new(config, manifest, None)
+            .expect_err("a voice the catalog does not hold must not start a server");
+        let message = error.to_string();
+        assert!(message.contains("no-such-voice"), "{message}");
     }
 
     #[tokio::test]

@@ -32,9 +32,8 @@ use std::sync::{Arc, Mutex};
 
 use arioso_config::Config;
 use arioso_models::Manifest;
-use arioso_server::AppState;
+use arioso_server::{AppState, SidProblem};
 use arioso_stt_sherpa::StreamSession;
-use arioso_tts_piper::wav;
 
 mod error;
 mod memory;
@@ -116,6 +115,9 @@ pub struct AriosoSttSession {
 struct SessionState {
     /// The model's state, until the utterance ends.
     session: Option<StreamSession>,
+    /// The audio of the current push, kept between calls so a streaming client that sends
+    /// ten pushes a second does not allocate ten times a second.
+    scratch: Vec<f32>,
     /// The last partial the model reported. The tail decode at the end can come back empty
     /// for an utterance that stopped mid-word; the partial is what the model had then.
     last: String,
@@ -162,6 +164,38 @@ pub struct AriosoTtsOptions {
     /// Speaker index. `0` is the only speaker most voices have; a multi-speaker Piper voice
     /// takes an index the voice reports.
     pub speaker: i64,
+}
+
+/// The `struct_size` values an options struct accepts.
+///
+/// A caller may declare a prefix of the struct, so that a header compiled against an older
+/// release keeps working: the fields past the declared bytes keep their defaults. Only sizes
+/// that end exactly at the end of a field are valid, because a size that stops inside one
+/// would splice half an `f32` or half an `i64` onto a default value.
+trait AbiOptions: Copy + Default {
+    /// The sizes this library accepts, in bytes.
+    const VALID_SIZES: &'static [usize];
+}
+
+impl AbiOptions for AriosoTtsOptions {
+    // The size field alone, then a struct that ends after `speed` (twelve bytes when the
+    // caller packed it, sixteen when the compiler padded it), then the whole struct.
+    const VALID_SIZES: &'static [usize] = &[
+        std::mem::size_of::<usize>(),
+        std::mem::offset_of!(Self, speed) + std::mem::size_of::<f32>(),
+        std::mem::offset_of!(Self, speaker),
+        std::mem::size_of::<Self>(),
+    ];
+}
+
+impl AbiOptions for AriosoSttOptions {
+    // The size field alone, then a struct that ends after `sample_rate`, then the whole
+    // struct, which pads that field out to the alignment of the size field.
+    const VALID_SIZES: &'static [usize] = &[
+        std::mem::size_of::<usize>(),
+        std::mem::offset_of!(Self, sample_rate) + std::mem::size_of::<u32>(),
+        std::mem::size_of::<Self>(),
+    ];
 }
 
 /// How to transcribe.
@@ -394,7 +428,7 @@ pub unsafe extern "C" fn arioso_tts_synthesize(
         let state = unsafe { state_of(engine, "arioso_tts_synthesize") }?;
         // Safety: the caller guarantees a NUL-terminated string valid for the call.
         let text = unsafe { c_str(text, "arioso_tts_synthesize: text") }?;
-        check_text(text)?;
+        check_text(state, text)?;
         // Safety: null means the defaults; otherwise the caller guarantees `struct_size`
         // readable bytes starting with the size field.
         let options = unsafe {
@@ -405,9 +439,10 @@ pub unsafe extern "C" fn arioso_tts_synthesize(
             )
         }?;
         let speed = speed_of(state, options.speed)?;
+        let sid = tts_sid(state, options.speaker)?;
 
         let wav = state
-            .synthesize_wav(text, speed, options.speaker)
+            .synthesize_wav(text, speed, sid)
             .map_err(|detail| fail(ARIOSO_ERR_ENGINE, detail))?;
         // Safety: the bytes are released by `arioso_free` and by nothing else.
         let (data, len) = unsafe { memory::copy_out(&wav) };
@@ -449,7 +484,7 @@ pub unsafe extern "C" fn arioso_tts_stream(
         let state = unsafe { state_of(engine, "arioso_tts_stream") }?;
         // Safety: the caller guarantees a NUL-terminated string valid for the call.
         let text = unsafe { c_str(text, "arioso_tts_stream: text") }?;
-        check_text(text)?;
+        check_text(state, text)?;
         let Some(callback) = on_audio else {
             return Err(fail(
                 ARIOSO_ERR_NULL_ARGUMENT,
@@ -465,19 +500,23 @@ pub unsafe extern "C" fn arioso_tts_stream(
             )
         }?;
         let speed = speed_of(state, options.speed)?;
+        let sid = tts_sid(state, options.speaker)?;
 
         // The code the callback stopped on, kept outside the sink: the engines report a sink
         // failure as a string, which cannot say whether the caller cancelled or the engine
         // broke.
         let mut stopped: Option<i32> = None;
-        let rendered = state.synthesize_stream(text, speed, options.speaker, |chunk, rate| {
-            let pcm = wav::pcm_s16le(chunk);
-            // Decoded back into samples rather than cast from the byte buffer: a `Vec<u8>`
-            // promises no more than byte alignment, and the callback reads `int16_t`.
-            let samples: Vec<i16> = pcm
-                .chunks_exact(2)
-                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-                .collect();
+        // One buffer for the whole stream, filled straight from the `f32` chunk: encoding to
+        // little-endian bytes and decoding them back would allocate twice per chunk to hand
+        // the callback the same values it started with.
+        let mut samples: Vec<i16> = Vec::new();
+        let rendered = state.synthesize_stream(text, speed, sid, |chunk, rate| {
+            samples.clear();
+            samples.extend(
+                chunk
+                    .iter()
+                    .map(|&sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
+            );
             match invoke_audio(callback, &samples, rate, user) {
                 Ok(()) => Ok(()),
                 Err(code) => {
@@ -544,6 +583,7 @@ pub unsafe extern "C" fn arioso_stt_open(
         let handle = Box::into_raw(Box::new(AriosoSttSession {
             inner: Mutex::new(SessionState {
                 session: Some(session),
+                scratch: Vec::new(),
                 last: String::new(),
             }),
         }));
@@ -593,11 +633,6 @@ pub unsafe extern "C" fn arioso_stt_push(
                 "arioso_stt_push: pcm is null with samples > 0",
             ));
         }
-        // Safety: the caller guarantees `samples` readable values.
-        let audio: Vec<f32> = unsafe { std::slice::from_raw_parts(pcm, samples) }
-            .iter()
-            .map(|&sample| f32::from(sample) / f32::from(i16::MAX))
-            .collect();
         // Safety: the caller guarantees a live handle, and the lock is released before this
         // call returns.
         let mut guard = unsafe { &*session }.inner.lock().map_err(|_| {
@@ -606,14 +641,29 @@ pub unsafe extern "C" fn arioso_stt_push(
                 "arioso_stt_push: the session lock is poisoned",
             )
         })?;
-        let Some(model) = guard.session.as_mut() else {
+        let SessionState {
+            session,
+            scratch,
+            last,
+        } = &mut *guard;
+        let Some(model) = session.as_mut() else {
             return Err(fail(
                 ARIOSO_ERR_INVALID_ARGUMENT,
                 "arioso_stt_push: the session has already been finished",
             ));
         };
-        if let Some(partial) = model.feed(&audio) {
-            guard.last = partial;
+        scratch.clear();
+        // Safety: the caller guarantees `samples` readable values.
+        let audio = unsafe { std::slice::from_raw_parts(pcm, samples) };
+        // `i16::MIN` is one step further from zero than `i16::MAX`, so dividing by the
+        // maximum lands at -1.00003; the clamp keeps the range the model was trained on.
+        scratch.extend(
+            audio
+                .iter()
+                .map(|&sample| (f32::from(sample) / f32::from(i16::MAX)).max(-1.0)),
+        );
+        if let Some(partial) = model.feed(scratch) {
+            *last = partial;
         }
         Ok(())
     })
@@ -782,13 +832,15 @@ unsafe fn state_of<'a>(engine: *mut AriosoEngine, what: &str) -> Result<&'a AppS
 ///
 /// `pointer` must be null, or point at `struct_size` readable bytes whose first
 /// `size_of::<usize>()` bytes are that size.
-unsafe fn read_options<T: Copy>(pointer: *const T, default: T, what: &str) -> Result<T, i32> {
+unsafe fn read_options<T: AbiOptions>(pointer: *const T, default: T, what: &str) -> Result<T, i32> {
     if pointer.is_null() {
         return Ok(default);
     }
     let mut value = default;
     // Safety: the caller guarantees the size field is readable, and it is the first field.
-    let declared = unsafe { pointer.cast::<usize>().read() };
+    // Read unaligned because a C caller may hand over a packed struct: the size field is a
+    // `usize`, and nothing in the ABI promises the pointer is aligned for one.
+    let declared = unsafe { pointer.cast::<usize>().read_unaligned() };
     let known = std::mem::size_of::<T>();
     if declared > known {
         return Err(fail(
@@ -796,10 +848,17 @@ unsafe fn read_options<T: Copy>(pointer: *const T, default: T, what: &str) -> Re
             format!("{what}: struct_size {declared} is larger than this library's {known}"),
         ));
     }
-    if declared < std::mem::size_of::<usize>() {
+    // A size that stops in the middle of a field would copy part of an `f32` or an `i64`
+    // over the default and render audio nobody asked for, so only whole-field prefixes are
+    // accepted. `VALID_SIZES` is where each type says which those are.
+    if !T::VALID_SIZES.contains(&declared) {
         return Err(fail(
             ARIOSO_ERR_STRUCT_SIZE,
-            format!("{what}: struct_size {declared} cannot hold the size field itself"),
+            format!(
+                "{what}: struct_size {declared} does not end on a field boundary; this \
+                 library reads {:?}",
+                T::VALID_SIZES
+            ),
         ));
     }
     // Safety: the caller declared `declared` bytes, they fit inside `value`, and the two
@@ -818,11 +877,43 @@ unsafe fn read_options<T: Copy>(pointer: *const T, default: T, what: &str) -> Re
 ///
 /// The engine answers "nothing to say" for it anyway, but a caller reading that sentence
 /// cannot tell an empty request from a voice that could not pronounce a single word.
-fn check_text(text: &str) -> Result<(), i32> {
+fn check_text(state: &AppState, text: &str) -> Result<(), i32> {
     if text.trim().is_empty() {
         return Err(fail(ARIOSO_ERR_INVALID_ARGUMENT, "the text is empty"));
     }
+    // The same limit the HTTP route applies, because a C caller can hand over a document
+    // and this function buffers all of it: an unbounded one is an allocation the caller
+    // did not ask for and cannot see.
+    let max_text_chars = state.config().server.limits.max_text_chars;
+    if text.chars().count() > max_text_chars {
+        return Err(fail(
+            ARIOSO_ERR_INVALID_ARGUMENT,
+            format!("text is longer than {max_text_chars} characters"),
+        ));
+    }
     Ok(())
+}
+
+/// The speaker to render with, refused rather than replaced.
+///
+/// A voice that has no speaker `n` must not answer with speaker `0`: the caller would have
+/// no way to notice it got a different voice than it asked for (PRD F3.10).
+fn tts_sid(state: &AppState, speaker: i64) -> Result<i64, i32> {
+    if !(0..=4095).contains(&speaker) {
+        return Err(fail(
+            ARIOSO_ERR_INVALID_ARGUMENT,
+            format!("speaker {speaker} is outside 0 to 4095"),
+        ));
+    }
+    match state.check_sid(speaker) {
+        Ok(()) => Ok(speaker),
+        // The voice loaded and has no such speaker: the caller named something that does not
+        // exist, which is an argument error.
+        Err(SidProblem::NoSuchSpeaker(detail)) => Err(fail(ARIOSO_ERR_INVALID_ARGUMENT, detail)),
+        // The voice would not load at all, so the speaker is not the problem: the render
+        // fails for the same reason and the caller should see that instead.
+        Err(SidProblem::Unavailable(detail)) => Err(fail(ARIOSO_ERR_ENGINE, detail)),
+    }
 }
 
 /// The rate a session accepts, refusing one the model cannot take.

@@ -132,6 +132,7 @@ async fn run(
         return;
     }
     if let Err(detail) = state.check_sid(sid) {
+        let detail = detail.to_string();
         let frame = json!({"type": "error", "detail": detail});
         let _ = socket.send(Message::Text(frame.to_string().into())).await;
         return;

@@ -193,7 +193,11 @@ pub fn read_bytes(bytes: &[u8]) -> std::io::Result<(Vec<f32>, u32)> {
         for channel in 0..usize::from(channels) {
             let at = channel * (frame_bytes / usize::from(channels));
             let value = if format == 1 {
-                f32::from(i16::from_le_bytes([frame[at], frame[at + 1]])) / f32::from(i16::MAX)
+                // `i16::MIN` is one step further from zero than `i16::MAX`, so dividing by
+                // the maximum would give -1.00003: the clamp keeps the range the engines
+                // expect.
+                (f32::from(i16::from_le_bytes([frame[at], frame[at + 1]])) / f32::from(i16::MAX))
+                    .max(-1.0)
             } else {
                 f32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]])
             };

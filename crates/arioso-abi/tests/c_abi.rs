@@ -237,6 +237,118 @@ fn a_struct_size_larger_than_the_library_knows_is_refused() {
 }
 
 #[test]
+fn a_speaker_out_of_range_is_an_invalid_argument() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let text = CString::new("hello").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let options = AriosoTtsOptions {
+        struct_size: std::mem::size_of::<AriosoTtsOptions>(),
+        speed: 1.0,
+        // No voice has four thousand speakers, and the range the routes accept is the range
+        // this surface accepts.
+        speaker: 4096,
+    };
+    // Safety: `options` is a valid struct and `buffer` is writable for one buffer.
+    let code = unsafe {
+        arioso_tts_synthesize(engine, text.as_ptr(), &raw const options, &raw mut buffer)
+    };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT, "{}", last_error());
+    assert!(last_error().contains("4096"), "{}", last_error());
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn text_longer_than_the_configured_limit_is_an_invalid_argument() {
+    let dir = models_dir();
+    let json = document(serde_json::json!({
+        "models": {"dir": dir.path()},
+        "server": {"limits": {"max_text_chars": 8}}
+    }));
+    let mut engine: *mut AriosoEngine = ptr::null_mut();
+    // Safety: `json` outlives the call and `engine` is writable for one pointer.
+    let code = unsafe { arioso_engine_new(json.as_ptr(), &raw mut engine) };
+    assert_eq!(code, ARIOSO_OK, "{}", last_error());
+
+    let text = CString::new("this is longer than eight characters").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // Safety: `engine` is live, the text outlives the call, `buffer` is writable.
+    let code =
+        unsafe { arioso_tts_synthesize(engine, text.as_ptr(), ptr::null(), &raw mut buffer) };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT, "{}", last_error());
+    assert!(last_error().contains("8"), "{}", last_error());
+    assert!(buffer.data.is_null(), "nothing is allocated by a refusal");
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn a_struct_size_that_stops_inside_a_field_is_refused() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let text = CString::new("hello").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // Ten bytes ends two bytes into `speed`: copying it would splice half a float onto the
+    // default and render audio nobody asked for.
+    let mut bytes = [0u8; 24];
+    bytes[..8].copy_from_slice(&10usize.to_le_bytes());
+    // Safety: the buffer is 24 bytes and the library reads the size field, then refuses.
+    let code = unsafe {
+        arioso_tts_synthesize(
+            engine,
+            text.as_ptr(),
+            bytes.as_ptr().cast(),
+            &raw mut buffer,
+        )
+    };
+    assert_eq!(code, ARIOSO_ERR_STRUCT_SIZE, "{}", last_error());
+    assert!(last_error().contains("boundary"), "{}", last_error());
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
+fn options_at_an_unaligned_address_are_read() {
+    let dir = models_dir();
+    let engine = engine(dir.path());
+    let text = CString::new("hello").unwrap();
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    // A packed C struct can sit at any address. The size field is a `usize`, and reading it
+    // with a plain load would be undefined behaviour here.
+    let mut bytes = [0u8; 32];
+    bytes[1..9].copy_from_slice(&24usize.to_le_bytes());
+    bytes[9..13].copy_from_slice(&1.0f32.to_le_bytes());
+    bytes[17..25].copy_from_slice(&0i64.to_le_bytes());
+    // Safety: the buffer is 32 bytes, the struct starts at offset 1 and spans 24 of them.
+    let code = unsafe {
+        arioso_tts_synthesize(
+            engine,
+            text.as_ptr(),
+            bytes.as_ptr().add(1).cast(),
+            &raw mut buffer,
+        )
+    };
+    // The engine has no voice, so the render fails; what matters is that the options were
+    // read rather than refused for their size.
+    assert_ne!(code, ARIOSO_ERR_STRUCT_SIZE, "{}", last_error());
+    // Safety: the handle came from `arioso_engine_new` and is freed once.
+    unsafe { arioso_engine_free(engine) };
+}
+
+#[test]
 fn an_older_shorter_options_struct_is_read_only_up_to_its_size() {
     let dir = models_dir();
     let engine = engine(dir.path());

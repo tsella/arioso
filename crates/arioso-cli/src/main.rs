@@ -114,7 +114,7 @@ enum ModelsCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Sign a manifest, writing the detached signature beside it as <manifest>.sig.
+    /// Sign a manifest, writing the detached signature beside it as `<manifest>.sig`.
     Sign {
         /// Manifest to sign.
         manifest: PathBuf,

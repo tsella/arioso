@@ -109,7 +109,11 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -
 fn pcm16(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(2)
-        .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX))
+        // `i16::MIN` divided by `i16::MAX` lands at -1.00003, outside the range the model
+        // takes; the clamp keeps the samples in it.
+        .map(|pair| {
+            (f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX)).max(-1.0)
+        })
         .collect()
 }
 
