@@ -693,6 +693,16 @@ JSON, at roughly 33 percent size cost.
   have; `mobile.yml` keeps building the library for iOS and Android, and the desktop C
   caller is what CI actually executes.
 
+- F10.9 v2 adds what a front end needs to describe the catalog rather than guess it:
+  `arioso_models_json` (id, engine, kind, speakers, size, licence, commercial use, and
+  whether the model is on disk), `arioso_model_download` with a progress callback,
+  `arioso_phonemes` for the IPA a text will be spoken as, and `arioso_tts_phonemes` /
+  `arioso_tts_phonemes_stream` to synthesize phonemes a caller supplies. The additions are
+  additive: `arioso_abi_version()` stays 1, and a library older than the header fails at
+  link, which F10.6 already names as the intended failure. F10.8's absent download callback
+  is now present, because the terminal front end needed it and a callback is cheaper than a
+  second download implementation.
+
 ### F11. Concurrency, backpressure, and limits
 
 - F11.1 Each engine holds a semaphore. Default permits: TTS 2, STT 1 per streaming
@@ -1089,6 +1099,34 @@ the whole product is there.
   the target, and this repository does not wire one for either mobile target. The workflow
   names the gap in a comment and this requirement names it here, so the exclusion reads as a
   decision rather than an oversight.
+
+### F22. The terminal front end
+
+A person with a terminal should be able to hear a voice, read what it will say, change it,
+and keep the audio, without a server, a socket, or a browser.
+
+- F22.1 `arioso-speaks` is one binary and one window. It uses the library crates directly;
+  it does not load the C ABI, and it does not start a server.
+- F22.2 The engine is chosen first (Kokoro or Piper), then a voice from a list that can be
+  filtered by typing. Each row shows the voice's name, its size on disk, and its licence as
+  the manifest states it. A licence of `unknown`, or a model whose `commercial_use` is
+  false, carries a marker; the app never infers a licence from a name.
+- F22.3 A model that is not on disk offers a download instead of speech, and the offer
+  states the size and the licence before anything is fetched. Progress is shown as bytes
+  received, total, and rate.
+- F22.4 A multi-speaker voice offers its speakers by the names the manifest carries. A
+  Kokoro style is one speaker, and the speaker control says so rather than offering a list
+  of one.
+- F22.5 The phonemes that will be spoken are shown, and are editable. Edited phonemes are
+  spoken as written. A symbol the voice cannot say is refused with the symbol named; the app
+  does not fall back to the generated line, because a caller that asked for one thing and
+  heard another has no way to notice. A reset returns to the generated line.
+- F22.6 Playback is in process. A machine with no output device says so, and the app then
+  offers saving only.
+- F22.7 Audio is saved as WAV or FLAC. The format is chosen at save time, not configured in
+  advance.
+- F22.8 The wordmark carries a waveform of the audio being played, drawn from the rendered
+  samples. It is still when nothing plays.
 
 ## 9. Non-functional requirements
 
