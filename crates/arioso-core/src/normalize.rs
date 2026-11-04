@@ -374,7 +374,7 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
                     index = after;
                     continue;
                 }
-                out.push_str(&currency(scanned.whole, &scanned.fraction));
+                out.push_str(&currency(&scanned));
                 index = scanned.end;
                 continue;
             }
@@ -857,7 +857,17 @@ pub fn ordinal(value: u64, _suffix: &str) -> String {
 }
 
 /// Dollars and cents.
-fn currency(dollars: u64, fraction: &[u64]) -> String {
+///
+/// A fraction longer than two digits is not a number of cents: `$0.005` is half a cent, and
+/// reading the first two digits said "zero dollars", which is the wrong amount by the whole
+/// point of writing it. Those are read as the number written instead: "zero point zero zero
+/// five dollars".
+fn currency(scanned: &Scanned) -> String {
+    let dollars = scanned.whole;
+    let fraction = &scanned.fraction;
+    if fraction.len() > 2 {
+        return format!("{} dollars", number(scanned));
+    }
     let cents = fraction.first().copied().unwrap_or(0) * 10 + fraction.get(1).copied().unwrap_or(0);
     match (dollars, cents) {
         (0, 0) => "zero dollars".to_owned(),
@@ -1046,6 +1056,16 @@ mod tests {
         assert_eq!(normalize("$1"), "one dollar");
         assert_eq!(normalize("$0.50"), "fifty cents");
         assert_eq!(normalize("$1.01"), "one dollar and one cent");
+    }
+
+    #[test]
+    fn a_currency_amount_with_sub_cent_digits_is_read_as_written() {
+        // Two digits of the fraction were read as cents and the rest were dropped, so
+        // `$0.005` was spoken as "zero dollars": an amount that is not zero, said as zero.
+        assert_eq!(normalize("$0.005"), "zero point zero zero five dollars");
+        assert_eq!(normalize("$1.234"), "one point two three four dollars");
+        // Two digits or fewer still read as dollars and cents.
+        assert_eq!(normalize("$0.05"), "five cents");
     }
 
     #[test]
