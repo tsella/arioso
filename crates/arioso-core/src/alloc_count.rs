@@ -6,6 +6,13 @@
 //! eighty allocations fails when the count rises, so the number is the regression test
 //! rather than a note in a document.
 //!
+//! The counters are per thread. A single global counter measured the whole process, and
+//! `cargo test` runs the tests in one binary on several threads: a test that built a
+//! 126,052-entry dictionary string while another one measured put a hundred thousand
+//! allocations into that measurement, which then reported 145 where the call cost 7.
+//! Counting the calling thread's own calls makes the number the number the test asked for,
+//! whatever else is running beside it.
+//!
 //! Always compiled, because a test that is not run is not a measurement. The binary
 //! declares the allocator once:
 //!
@@ -15,24 +22,31 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
-/// A pass-through allocator that counts what the process asks for.
+/// A pass-through allocator that counts what the calling thread asks for.
 #[derive(Debug, Default)]
 pub struct Counting;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Calls this thread made into the allocator.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// Bytes this thread requested.
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+}
 
-/// Tests in one binary run on several threads, so a measurement takes this lock: without
-/// it two tests count each other's allocations and both numbers are wrong.
-static LOCK: Mutex<()> = Mutex::new(());
+/// Count one call and the bytes it asked for, on the calling thread.
+///
+/// A thread that is tearing down has no counter left to write to, and nothing is measuring
+/// it any more, so a failed lookup is not an error.
+fn count(size: usize) {
+    let _ = ALLOCATIONS.try_with(|calls| calls.set(calls.get() + 1));
+    let _ = BYTES.try_with(|bytes| bytes.set(bytes.get() + size));
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -41,14 +55,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(size, Ordering::Relaxed);
+        count(size);
         unsafe { System.realloc(ptr, layout, size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 }
@@ -63,12 +75,12 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// The counters as they stand, without measuring anything.
+    /// The calling thread's counters as they stand, without measuring anything.
     #[must_use]
     pub fn now() -> Self {
         Self {
-            allocations: ALLOCATIONS.load(Ordering::Relaxed),
-            bytes: BYTES.load(Ordering::Relaxed),
+            allocations: ALLOCATIONS.try_with(Cell::get).unwrap_or(0),
+            bytes: BYTES.try_with(Cell::get).unwrap_or(0),
         }
     }
 
@@ -86,9 +98,6 @@ impl Stats {
 ///
 /// The value is returned so a test can keep asserting on the output while measuring it.
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Stats) {
-    let _guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = Stats::now();
     let value = f();
     let after = Stats::now();

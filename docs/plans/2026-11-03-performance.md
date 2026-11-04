@@ -99,9 +99,9 @@ A round trip through one recognizer would be the way to check it, and it has not
 The bounds added with the counting allocator named two costs in `arioso-g2p` that nobody
 had measured: a two-word sentence and a spelled-out word. Both sit in the path every
 synthesis request walks, once per word. The counts below are from
-`cargo test -p arioso-g2p --test allocations -- --test-threads=1`, which is the only way to
-run them: the lock in `alloc_count` keeps two measurements apart, not the rest of the
-process (see `docs/lessons.md`).
+`cargo test -p arioso-g2p --test allocations -- --nocapture`, and they are per thread: the
+process-wide counter this started with absorbed the other tests' setup and reported 145
+allocations for a call that costs 7 (see `docs/lessons.md`).
 
 | Finding | Change | Before | After |
 | --- | --- | --- | --- |
