@@ -3,8 +3,8 @@
 //! The bounds are measured counts. A change that adds an allocation per phoneme, per
 //! word or per dictionary entry fails here and says what it now costs.
 
-use arioso_core::alloc_count::{Counting, measure, measure_warm};
 use arioso_core::NormalizeOptions;
+use arioso_core::alloc_count::{Counting, measure, measure_warm};
 use arioso_g2p::cmudict::CmuDict;
 use arioso_g2p::{lts, phonemes_for_text};
 
@@ -42,9 +42,8 @@ fn parsing_costs_a_bounded_amount_per_entry() {
 fn a_two_word_sentence_is_phonemized_in_a_bounded_number_of_allocations() {
     let parsed = CmuDict::parse(&dictionary(2));
     let options = NormalizeOptions::default();
-    let (phonemes, stats) = measure_warm(|| {
-        phonemes_for_text("hello world", &parsed, options, true)
-    });
+    let (phonemes, stats) =
+        measure_warm(|| phonemes_for_text("hello world", &parsed, options, true));
     eprintln!("two words: {stats:?} symbols={}", phonemes.symbols.len());
     assert!(!phonemes.symbols.is_empty());
     assert!(
