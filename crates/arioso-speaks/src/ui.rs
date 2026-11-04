@@ -36,6 +36,10 @@ const CREAM: Color = Color::Indexed(223);
 /// How wide the wordmark is, including the two columns of margin before it.
 const MARK_WIDTH: u16 = 32;
 
+/// The word beside the mark, and the column it gets.
+const SPEAKS: &str = " s p e a k s";
+const SPEAKS_WIDTH: u16 = 13;
+
 /// Below this width the mark is dropped and the signal takes the row.
 ///
 /// A forty-three column mark in a sixty column window leaves a strip for everything else.
@@ -76,10 +80,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     if area.width < MARK_FLOOR {
         draw_waveform(frame, rows[0], app);
     } else {
-        let columns =
-            Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
+        let columns = Layout::horizontal([
+            Constraint::Length(MARK_WIDTH),
+            Constraint::Length(SPEAKS_WIDTH),
+            Constraint::Min(8),
+        ])
+        .split(rows[0]);
         draw_wordmark(frame, columns[0]);
-        draw_waveform(frame, columns[1], app);
+        draw_speaks(frame, columns[1]);
+        draw_waveform(frame, columns[2], app);
     }
 
     // The rule carries the facts about the voice, right-aligned where the eye looks last.
@@ -140,6 +149,23 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ])),
         rows[2],
     );
+}
+
+/// The word that says what the program is for, set beside the mark.
+///
+/// The mark is a name and a name alone does not say what it does. Tracked on the mark's third
+/// row, so the two read as one line rather than as a title with a subtitle under it.
+fn draw_speaks(frame: &mut Frame, area: Rect) {
+    let lines: Vec<Line> = (0..4)
+        .map(|row| {
+            if row == 2 {
+                Line::from(Span::styled(SPEAKS, Style::default().fg(PETROL)))
+            } else {
+                Line::from("")
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The mark.
