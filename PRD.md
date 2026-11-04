@@ -249,6 +249,15 @@ ready`, or `failed { reason }`.
   a progress bar and enable its UI at the right moment.
 - F2.4 A failed model does not take down the server. The affected engine reports
   `unavailable` with a reason, the rest keeps working.
+- F2.5 `GET /v1/models/events` is a server-sent event stream of the state `GET /v1/models`
+  reports, so a client draws a progress bar without polling. It opens with a `snapshot`
+  event carrying `{id, state, downloaded, total, error}` for every model, then sends a
+  `state` event at each transition and a `progress` event for each byte count. An idle
+  stream carries a comment line every 15 seconds, which keeps a proxy from closing it and
+  is not an event. A subscriber more than 256 events behind is told it lagged, with the
+  count it missed, and handed a fresh snapshot: a stream that skipped events silently
+  would leave a client wrong and unaware of it. Auth and the rate limiter apply as they do
+  to every other route.
 
 ### F3. Text to speech
 
@@ -461,7 +470,7 @@ HTTP, JSON, versioned under `/v1`.
 | GET | `/v1/models` | Catalog with state and progress |
 | POST | `/v1/models/{id}/download` | Start or resume download |
 | DELETE | `/v1/models/{id}` | Remove from disk |
-| GET | `/v1/models/events` | SSE stream of download and load progress (not built) |
+| GET | `/v1/models/events` | SSE stream of model state and download progress |
 | POST | `/v1/models/{id}/warm` | Load a model without waiting for a request |
 | POST | `/v1/stop` | Stop gracefully: drain in-flight work, then exit |
 | POST | `/v1/abort` | Stop now: flush, drop in-flight work, exit |

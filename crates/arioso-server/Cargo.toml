@@ -31,7 +31,10 @@ utoipa-swagger-ui.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 rcgen = "0.14"
+sha2.workspace = true
 tempfile.workspace = true
+# Pauses the clock, so a test can wait out the keep-alive interval without waiting.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.30"
 tower.workspace = true
 
