@@ -57,9 +57,8 @@ Not built yet:
   that needs a build for the target, and no such build is wired here yet
 - Silero voice activity detection, which the PRD names as the default over the energy
   detector that ships
-- A streaming Zipformer model, so partials come from a streaming engine instead of
-  re-running Whisper on the buffer
-- A signed manifest
+- A release signing key: the manifest loader verifies a detached signature when one is
+  compiled in, and no key is compiled in yet
 
 ## Requirements
 
@@ -215,10 +214,9 @@ base, and about 340 ms with tiny: the detector confirms at 4.06 s of audio, and 
 arrives at 4.72 s of wall clock with base.
 
 The same dictionary that fixes a pronunciation on the way out is applied on the way in,
-so a term you taught the voice comes back spelled your way. That path is real but narrow:
-it matches a spoken form exactly, and Whisper rarely reproduces it letter for letter. The
-PRD records the measured pairs and the planned fix, which is to compare sounds rather than
-letters.
+so a term you taught the voice comes back spelled your way. The correction compares sounds
+rather than letters: the transcript is phonemized and matched against the pronunciation the
+dictionary entry produces, so a recognition that spells the term differently still resolves.
 
 ## HTTP
 
@@ -229,7 +227,8 @@ letters.
 | `/v1/info` | GET | Version, target, and the engines built into this binary |
 | `/v1/engines` | GET | What each engine can do, and whether one is loaded |
 | `/v1/models` | GET | Every model in the manifest, with kind, engine, licence, bytes, whether it is installed, and whether commercial use is allowed |
-| `/v1/models/{id}/download` | POST | Start a download; `202` with progress, `409` if one is already running |
+| `/v1/models/events` | GET | The same state as it changes, as server-sent events: a snapshot, then state and progress, and a `lagged` event that says to re-read the snapshot |
+| `/v1/models/{id}/download` | POST | Start a download; `202` with progress, and `202` again with the current byte count if one is already running |
 | `/v1/models/{id}/warm` | POST | Load a model before the first request needs it |
 | `/v1/models/{id}` | DELETE | Remove a model and its partial file, and unload it |
 | `/v1/voices` | GET | Voices with licence, rate, and which one is active |

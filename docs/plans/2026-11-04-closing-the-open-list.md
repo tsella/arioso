@@ -27,9 +27,11 @@ process.
    `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
    `env -u ARIOSO_MODELS_DIR -u ARIOSO_TTS_DICTIONARY -u ARIOSO_TTS_VOICE cargo test --workspace`,
    `cargo doc --no-deps`.
-3. Set `CARGO_TARGET_DIR=/home/tsella/projects/arioso-wt/target` so the artefacts are shared
-   between worktrees. Cargo takes a lock, so a queued build waits instead of corrupting.
-   Expect the first build in a wave to be slow and the rest to be warm.
+3. Give each worktree its own `CARGO_TARGET_DIR`, named after the task, outside the checkout.
+   A shared target directory was tried first and is wrong: cargo keys an artefact by a
+   fingerprint that does not name the source tree, so one checkout's build satisfied another's
+   and a linter reported failures against code that was not there. The cost is a cold build per
+   worktree; the alternative is a result you cannot trust.
 4. One concern per commit, conventional commit subject, message written to
    `/tmp/arioso-<task>.txt` and passed with `git commit -F`. Read `git log --oneline -1` after
    every commit.
