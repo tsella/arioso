@@ -160,6 +160,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "hex",
+ "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",

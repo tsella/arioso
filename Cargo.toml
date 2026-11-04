@@ -29,6 +29,9 @@ http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+# `getrandom` is what makes `OsRng` real: key minting draws from the operating system, not
+# from a seeded generator a test could reproduce.
+rand_core = { version = "0.6", features = ["getrandom"] }
 fs4 = "0.13"
 futures-util = "0.3"
 hex = "0.4"
