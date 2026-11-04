@@ -45,11 +45,14 @@ Working today:
 - Spelling rules for words the dictionary does not hold, reported, never silent
 - Speech to text: Parakeet or Whisper through sherpa-onnx, batch, from a WAV file
 - `arioso doctor`, which says what is wrong before a request fails
+- A C ABI for a program that links the engine in process: `include/arioso.h`, with a static
+  and a shared library. The header is generated from the crate, and CI fails when the two
+  disagree
 - The crates that need no prebuilt native library compile for `aarch64-apple-ios` and
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 402 tests
+- 417 tests
 
 Not built yet:
 
@@ -347,6 +350,34 @@ counts. Audio starts before the last sentence is synthesized, because the queue 
 them holds two frames. A `{"type":"cancel"}` frame stops the render and answers `{"type":"cancelled"}`. A
 failure answers `{"type":"error","detail":...}` and ends the stream.
 
+## C ABI
+
+A program that links the engine in process — a sandboxed app bundle, say — uses
+`include/arioso.h` instead of the HTTP API. The surface is an engine built from the same JSON
+config, synthesis to a buffer or to an audio callback, streaming transcription, and one
+function that releases what the library allocated.
+
+The header is generated from `crates/arioso-abi`, and CI fails when the two disagree:
+
+```bash
+./abi/generate-header.sh                # cbindgen 0.29.0, the version CI pins
+cargo build -p arioso-abi --profile c-abi
+```
+
+`--profile c-abi` is not optional. The workspace release profile aborts on a panic, and the C
+surface's safety net is `catch_unwind`: a build that aborts cannot catch anything, so a panic
+in the caller's process would end the caller's process.
+
+`abi/smoke.c` is a C program that links `libarioso.a`, creates an engine from a config, reads
+a refusal out of `arioso_last_error`, and frees everything. `abi/smoke.sh` builds the library,
+compiles that program against it, and runs it; CI does the same on Linux and macOS, where the
+program is executed rather than only linked.
+
+Not in this version, and named so the absence is a decision: a download progress callback,
+because downloads already have an event stream over HTTP, and a mobile smoke test, because a
+simulator run needs a machine this project does not have. `mobile.yml` still builds the
+library for iOS and Android.
+
 ## Sidecar mode
 
 A program that wants a server, not a shell, sets `server.sidecar` and reads one line:
@@ -499,6 +530,7 @@ code is GPL-3.0, which is why the `gpl-espeak` feature is off by default.
 | `arioso-stt-sherpa` | Speech to text through sherpa-onnx: Parakeet transducers and Whisper |
 | `arioso-vad` | Energy voice activity detection, and the rule that cuts an utterance |
 | `arioso-server` | axum router, the engines behind it, the downloader, and the WebSocket paths |
+| `arioso-abi` | The C surface: the exported functions, and the header generated from them |
 | `arioso-cli` | The `arioso` binary |
 
 More worked examples, with the real output of each, are in [EXAMPLES.md](EXAMPLES.md).

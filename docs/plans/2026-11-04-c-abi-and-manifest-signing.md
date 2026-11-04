@@ -81,10 +81,19 @@ convenience.
 
 ### Shape
 
-A new crate `crates/arioso-abi`, crate types `cdylib`, `staticlib` and `rlib`, library name
-`arioso`. The `rlib` is what makes the surface testable from Rust; the other two are what a C
-caller links against. The header is generated with `cbindgen` into `include/arioso.h` and a CI
-step regenerates it and fails on a diff, so the committed header cannot drift from the code.
+- [x] A new crate `crates/arioso-abi`, crate types `cdylib`, `staticlib` and `rlib`, library
+      name `arioso` (78f8433).
+- [x] The `rlib` is what makes the surface testable from Rust; the other two are what a C
+      caller links against.
+- [x] The header is generated with `cbindgen` into `include/arioso.h` by
+      `abi/generate-header.sh`, which is one command with the config path in it, so nobody has
+      to remember that cbindgen reads `cbindgen.toml` from the crate's directory (78f8433).
+- [x] A CI step regenerates it and fails on a diff, with cbindgen pinned to the version the
+      header was made with, so the committed header cannot drift from the code (77701e5).
+
+The library is built with `--profile c-abi`, which inherits `release` and turns `panic` back
+to `unwind`. `catch_unwind` cannot catch a panic in a build that aborts, and an abort inside
+the host process is what the guard exists to prevent (78f8433).
 
 ```c
 uint32_t arioso_abi_version(void);          /* 1 for this surface */
@@ -112,20 +121,31 @@ void    arioso_free(void *pointer);
 
 ### The rules that make it safe to call from C
 
-- **Every struct starts with `struct_size`** (F10.6). A newer library reads an older caller's
-  struct by size, and refuses a struct larger than it knows rather than reading past the end.
-- **Nothing allocated by the library is freed by the caller's allocator.** `arioso_free` is
-  the only way to release a buffer or a string, and the header says so on every pointer.
-- **No panic crosses the boundary.** Every entry point is wrapped in `catch_unwind`, and a
-  panic becomes `ARIOSO_ERR_PANIC` with the message in `arioso_last_error`. A panic unwinding
-  into C is undefined behaviour, and this is the one place where the cost of the guard is
-  worth it.
-- **Errors are a code plus a sentence.** Negative codes are errors, `0` is success, and
-  `arioso_last_error` returns a thread-local string that the caller does not free.
-- **A callback that returns nonzero cancels** (F10.3). The engine stops within one chunk and
-  returns `ARIOSO_CANCELLED`, which is not an error.
-- **Handles are `Send` and `Sync` behind the scenes** (F10.4): the engine is an `Arc` over the
-  same state the server uses, and the header documents which calls block.
+- [x] **Every struct starts with `struct_size`** (F10.6). A newer library reads an older
+      caller's struct by size, and refuses a struct larger than it knows rather than reading
+      past the end. The copy is bounded by the size the caller declared, so a shorter, older
+      struct keeps the documented defaults for the fields it does not have
+      (`a_struct_size_larger_than_the_library_knows_is_refused`,
+      `an_older_shorter_options_struct_is_read_only_up_to_its_size`) (78f8433).
+- [x] **Nothing allocated by the library is freed by the caller's allocator.** `arioso_free`
+      is the only way to release a buffer, and the header says so on every pointer. The length
+      travels in a header in front of the payload, because the release is handed a pointer and
+      no size (`synthesis_writes_a_wav_and_the_free_path_releases_it`, and the C program's
+      free path) (78f8433).
+- [x] **No panic crosses the boundary.** Every entry point is wrapped in `catch_unwind`, and a
+      panic becomes `ARIOSO_ERR_PANIC` with the message in `arioso_last_error`. The audio
+      callback is caught where it is called, so the unwind never travels through the engine's
+      own frames (`error::tests::a_panic_becomes_a_code_and_a_sentence`,
+      `a_panic_in_the_callback_is_a_code_and_a_sentence`) (78f8433).
+- [x] **Errors are a code plus a sentence.** Negative codes are errors, `0` is success, and
+      `arioso_last_error` returns a thread-local string that the caller does not free. A
+      cancellation leaves it empty, because the caller asked for it (78f8433).
+- [x] **A callback that returns nonzero cancels** (F10.3). The engine stops within one chunk
+      and returns `ARIOSO_CANCELLED`, which is not an error
+      (`a_callback_that_returns_nonzero_cancels_within_one_chunk` asserts the callback ran
+      exactly once for a two-sentence text) (78f8433).
+- [x] **Handles are `Send` and `Sync` behind the scenes** (F10.4): the engine is an `Arc` over
+      the same state the server uses, and the header documents which calls block (78f8433).
 
 ### What this plan does not build
 
@@ -140,14 +160,27 @@ void    arioso_free(void *pointer);
 
 ### Proof
 
-- A Rust integration test that drives the exported functions through the `rlib`: create an
-  engine from a JSON config, read the error string for a bad config, synthesize through the
-  real engine when a voice is present, free everything.
-- A C program, `abi/smoke.c`, compiled with `cc` in CI, linked against the static library. It
-  covers version, engine creation, a bad config producing a code and a sentence, and the free
-  path. Synthesis in C needs a model, so it asserts the refusal is clean rather than pretending
-  to speak.
-- A test that a panic in a callback is caught and reported instead of unwinding into C.
+- [x] Rust integration tests in `crates/arioso-abi/tests/c_abi.rs` that drive the exported
+      functions through the `rlib`: the version, an engine from a valid config, a bad config
+      producing `ARIOSO_ERR_CONFIG` and a sentence that names the field, a null argument, a
+      `struct_size` this build does not know, a cancelled stream, and the free path (78f8433).
+- [x] Synthesis and transcription against real models, `#[ignore]`d and gated on
+      `ARIOSO_TEST_MODELS_DIR` the way `crates/arioso-server/tests/ws_stream.rs` gates its
+      test: a WAV comes back with the right header, a stream hands over one chunk per
+      sentence, and a round trip speaks a sentence through `arioso_tts_synthesize`, feeds the
+      audio back through `arioso_stt_push`, and reads the words out of the event (78f8433).
+- [x] `abi/smoke.c`, a real C program compiled with `cc` and linked against `libarioso.a`. It
+      covers the version, engine creation, a bad config producing a code and a sentence, a
+      null argument, a `struct_size` refusal, and the free path. Synthesis in C needs a
+      downloaded voice, so it asserts the refusal is clean rather than pretending to speak,
+      and says so in the file's own comment (21c167e, run in CI by 77701e5).
+- [x] A test that a panic in a callback is caught and reported instead of unwinding into C
+      (78f8433).
+
+Verified on this machine: the four gate commands exit 0, the ignored tests pass against
+`en_US-joe-medium` and `sherpa-zipformer-streaming-en`, and `abi/smoke.sh` prints
+`all checks passed`. The C program has not been run on macOS or Windows here; CI runs it on
+Linux and macOS, and Windows skips it (F10.8).
 
 ## Order of work
 

@@ -80,3 +80,47 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: fuzz
         run: cargo +nightly fuzz build
+
+  # The C ABI is a second promise: a C caller links the static library and reads a header
+  # that must match the code. Three things fail the job — a header that does not match the
+  # crate, an archive a C compiler cannot link, and a program that misbehaves when run.
+  #
+  # Windows is left out of this job. `cc` is not guaranteed on the runner, and the smoke
+  # program uses mkdtemp, which the Windows C runtime does not have. The crate still builds
+  # on Windows in the job above, which is what "it compiles everywhere" means here; the
+  # header and the link are checked on the two platforms that can run the program.
+  c-abi:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The same fetch as the test job, and for the same reason: the engine links a native
+      # runtime, and the static archive references it, so a C program cannot be linked
+      # without it.
+      - name: onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.30.1
+          case "${{ runner.os }}" in
+            Linux)   archive="onnxruntime-linux-x64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
+            macOS)   archive="onnxruntime-osx-arm64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
+          esac
+          mkdir -p vendor
+          curl -sSL "$url" | tar -xz -C vendor
+          mv "vendor/$archive" vendor/onnxruntime
+      # Pinned: a different cbindgen can format the same declarations differently, and the
+      # diff below would fail for a reason that has nothing to do with the ABI.
+      - name: cbindgen
+        run: cargo install cbindgen --locked --version 0.29.0
+      - name: the header matches the crate
+        run: |
+          ./abi/generate-header.sh
+          git diff --exit-code include/arioso.h
+      - name: the C program links the static library and runs
+        run: ./abi/smoke.sh

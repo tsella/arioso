@@ -523,7 +523,7 @@ impl AppState {
     ///
     /// Cloning an `Arc` is one atomic increment. Cloning the `Config` was a deep copy of
     /// every string and path in it, several times per request.
-    pub(crate) fn config(&self) -> Arc<Config> {
+    pub fn config(&self) -> Arc<Config> {
         self.config
             .read()
             .map(|guard| Arc::clone(&guard))
@@ -1207,6 +1207,53 @@ impl AppState {
             tracing::warn!(entries = ?unusable, "user dictionary entries the voice cannot say");
         }
         Ok(())
+    }
+
+    /// Synthesize text to WAV bytes, for the C ABI.
+    ///
+    /// The route builds its own body because the config chooses between WAV and raw PCM. A
+    /// C caller reads one shape, so this always answers a WAV, whatever `tts.format` says.
+    ///
+    /// # Errors
+    ///
+    /// As [`AppState::render`]: the voice failed to load, or the text has nothing the voice
+    /// can say.
+    pub fn synthesize_wav(&self, text: &str, speed: f32, sid: i64) -> Result<Vec<u8>, String> {
+        let (pcm, rate) = self.render(text, speed, sid)?;
+        Ok(wav::to_bytes_from_pcm(&pcm, rate))
+    }
+
+    /// Synthesize one chunk at a time, for the C ABI's audio callback.
+    ///
+    /// A `sink` that returns an error stops the render at the next chunk boundary: both
+    /// engines propagate the error out of their own loop, so a cancelled stream stops
+    /// synthesizing instead of finishing into a buffer nobody reads.
+    ///
+    /// # Errors
+    ///
+    /// The sink's own message, or the engine's.
+    pub fn synthesize_stream(
+        &self,
+        text: &str,
+        speed: f32,
+        sid: i64,
+        sink: impl FnMut(&[f32], u32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.render_stream(text, speed, sid, sink)
+    }
+
+    /// Open a streaming transcription session, for the C ABI.
+    ///
+    /// The model loads on the first call, so the first session in a process waits for a
+    /// model load. The session owns a share of the recognizer; the lock is not held while
+    /// audio is fed.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming what is wrong: no streaming model configured, the model not
+    /// installed, or a load that failed.
+    pub fn open_stream_session(&self) -> Result<arioso_stt_sherpa::StreamSession, String> {
+        self.stream_session().map_err(|error| error.to_string())
     }
 }
 
