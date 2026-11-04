@@ -55,6 +55,14 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+# What the C ABI is built with. Its safety net is `catch_unwind`, which cannot catch a panic
+# in a build that aborts: `panic = "abort"` is right for the binary, where a panic is a bug
+# and a core dump is the honest report, and wrong for a library loaded into someone else's
+# process, where an abort takes the host application with it.
+[profile.c-abi]
+inherits = "release"
+panic = "unwind"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 missing_debug_implementations = "warn"

@@ -95,6 +95,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arioso-abi"
+version = "0.1.7"
+dependencies = [
+ "arioso-config",
+ "arioso-models",
+ "arioso-server",
+ "arioso-stt-sherpa",
+ "arioso-tts-piper",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "arioso-cli"
 version = "0.1.7"
 dependencies = [

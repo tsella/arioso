@@ -1,0 +1,29 @@
+[package]
+name = "arioso-abi"
+description = "C ABI for arioso: the engine, synthesis, and streaming transcription in process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+# The name a C caller sees: `libarioso.so`, `libarioso.a`, and `-larioso`. The rlib is what
+# lets the integration tests call the exported functions without going through the linker.
+name = "arioso"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+arioso-config.workspace = true
+arioso-models.workspace = true
+arioso-server.workspace = true
+arioso-stt-sherpa.workspace = true
+arioso-tts-piper.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
