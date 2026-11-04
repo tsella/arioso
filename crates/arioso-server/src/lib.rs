@@ -2569,13 +2569,15 @@ async fn patch_config(
         })?;
     }
 
-    // Said, not silent: the caller named an engine and got a voice with it. The note sits
-    // beside the config document rather than inside it, so every field a client already
-    // reads stays where it was.
+    // Said, not silent: the caller named an engine and lost the voice it was using. The note
+    // says what was taken away and what speaks now, and it sits beside the config document
+    // rather than inside it, so every field a client already reads stays where it was. It
+    // does not claim the field was written: the field is cleared, and the engine's own
+    // default answers for it.
     let notes = touched.voice_defaulted.as_ref().map(|(was, is)| {
         vec![format!(
-            "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
-            next.tts.engine
+            "tts.engine is {}, which cannot say {was}, so tts.voice is now unset and {} speaks with its default voice {is}",
+            next.tts.engine, next.tts.engine
         )]
     });
     let body = match serde_json::to_vec(&ConfigResponse {
@@ -4292,6 +4294,12 @@ mod tests {
         let note = notes[0].as_str().unwrap();
         assert!(note.contains("af_heart"), "{note}");
         assert!(note.contains("en_US-lessac-medium"), "{note}");
+        // The field was cleared, not written: the note must not claim a value it did not set.
+        assert!(note.contains("unset"), "{note}");
+        assert!(
+            !note.contains("was set to"),
+            "the field is cleared, so nothing was set: {note}"
+        );
     }
 
     #[tokio::test]
