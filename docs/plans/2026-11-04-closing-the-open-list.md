@@ -305,6 +305,33 @@ Wave 3, the largest and the one most likely to conflict: T5 (config, core, serve
 After every merge the controller runs the gate on `main` and pushes only when it is green. A
 branch that conflicts is rebased onto the new `main` by the controller, not by the task.
 
+## Open defect: Windows cannot open a speech graph
+
+Surfaced by the first test that asks the runtime to load anything, which arrived with T6.
+
+`cargo test -p arioso-stt-sherpa` on `windows-latest` prints
+`The requested API version [28] is not available, only API versions [1, 17] are supported in
+this build` and aborts the process inside C++, so the whole test binary dies and no other test
+in it runs. The C API version belongs to `onnxruntime`, and the caller is sherpa's prebuilt
+library, so the two disagree about which runtime they are talking to.
+
+Two candidate causes, neither verified without a Windows machine:
+
+1. The prebuilt that `sherpa-onnx-sys` downloads on Windows bundles or expects a different
+   `onnxruntime.dll` from the one it finds. The CI step that deletes `target/sherpa-onnx-prebuilt`
+   forces a fresh download, so a stale cache is not the explanation for a first run.
+2. The workspace builds `ort` for the Piper engine into the same `target/debug`, and cargo
+   places its `onnxruntime.dll` beside the test binaries. A DLL search that finds that one
+   would explain a version the speech library never expected.
+
+Until this is settled, the STT engine is unproven on Windows, not merely untested: the matrix
+has never opened a graph there. The one test that does is quarantined on Windows with the
+reason in its attribute, and this entry is the record.
+
+Next step: a Windows runner that prints `dumpbin /dependents` for the speech library, the
+version of every `onnxruntime.dll` in `target/debug` and `target/debug/deps`, and which one the
+loader picked. That is one workflow run, not a guess.
+
 ## Done means
 
 1. `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
