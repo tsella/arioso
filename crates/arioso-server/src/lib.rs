@@ -76,6 +76,10 @@ pub struct AppState {
     voice: Mutex<Option<PiperVoice>>,
     /// Whisper, loaded on first use. One model, so one slot.
     stt: Mutex<Option<arioso_stt_sherpa::Engine>>,
+    /// The streaming model the socket uses, when one is configured. A separate slot from
+    /// the batch one, because the two models are chosen by different settings and the
+    /// socket must not displace the model the file route is using.
+    stt_stream: Mutex<Option<arioso_stt_sherpa::Engine>>,
     /// Where the config came from, so a patch can be written back. Absent when the
     /// server was started with defaults and no file.
     config_file: Option<std::path::PathBuf>,
@@ -194,6 +198,7 @@ impl AppState {
             }),
             voice: Mutex::new(None),
             stt: Mutex::new(None),
+            stt_stream: Mutex::new(None),
             config: std::sync::RwLock::new(Arc::new(config)),
             config_file,
             limiter,
@@ -465,6 +470,9 @@ impl AppState {
         if let Ok(mut guard) = self.stt.lock() {
             *guard = None;
         }
+        if let Ok(mut guard) = self.stt_stream.lock() {
+            *guard = None;
+        }
     }
 
     /// Replace the config.
@@ -570,6 +578,66 @@ impl AppState {
             .ok_or_else(|| ServerError::NoSttModel(model.clone()))
     }
 
+    /// The `meta.model_type` of a catalog entry.
+    fn model_type(spec: &ModelSpec) -> Option<&str> {
+        spec.meta
+            .get("model_type")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// The streaming model the config names, when the catalog knows it and it streams.
+    ///
+    /// `stt.stream_model` is the model the socket is documented to use. A config that
+    /// leaves it naming nothing in the catalog — every config written before streaming
+    /// existed, including the default — gets `None`, and the socket keeps the batch path
+    /// over `stt.batch_model` exactly as it always did.
+    pub(crate) fn stream_spec(&self) -> Option<&ModelSpec> {
+        let config = self.config();
+        let id = config.stt.stream_model.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let spec =
+            self.manifest.models.iter().find(|model| {
+                model.kind == Kind::Stt && model.engine == "sherpa" && model.id == id
+            })?;
+        arioso_stt_sherpa::is_streaming(Self::model_type(spec)).then_some(spec)
+    }
+
+    /// Whether the socket reads partials from the model's own state.
+    ///
+    /// The family comes from the catalog, not from the request: one model is loaded per
+    /// slot, so the choice cannot change mid-session.
+    pub(crate) fn stt_streams(&self) -> bool {
+        self.stream_spec().is_some()
+    }
+
+    /// Start the streaming model's state for one utterance.
+    ///
+    /// The session owns a share of the recognizer, so the lock is held only long enough to
+    /// create it: an utterance that runs for ten seconds must not keep every other caller
+    /// out of the engine slot.
+    pub(crate) fn stream_session(&self) -> Result<arioso_stt_sherpa::StreamSession, SttFailure> {
+        let mut guard = self
+            .stt_stream
+            .lock()
+            .map_err(|_| SttFailure::Engine("the streaming model lock is poisoned".to_string()))?;
+        if guard.is_none() {
+            let spec = self.stream_spec().ok_or_else(|| {
+                SttFailure::Engine("no streaming model is configured".to_string())
+            })?;
+            if !self.is_installed(spec) {
+                return Err(SttFailure::NotInstalled(spec.id.clone()));
+            }
+            *guard = Some(self.build_engine(spec)?);
+        }
+        guard
+            .as_ref()
+            .and_then(arioso_stt_sherpa::Engine::streaming)
+            .map(arioso_stt_sherpa::StreamingEngine::session)
+            .ok_or_else(|| SttFailure::Engine("the streaming model did not load".to_string()))
+    }
+
     /// Transcribe WAV bytes, loading the engine on first use.
     fn transcribe(&self, bytes: &[u8]) -> Result<(String, f64), SttFailure> {
         let (samples, rate) = wav::read_bytes(bytes)
@@ -638,38 +706,40 @@ impl AppState {
             if !self.is_installed(spec) {
                 return Err(SttFailure::NotInstalled(spec.id.clone()));
             }
-            let config = self.config();
-            let configured = &config.stt.language;
-            let language = if configured == "auto" {
-                None
-            } else {
-                Some(configured.as_str())
-            };
-            let threads = std::thread::available_parallelism()
-                .map_or(4, |count| (count.get() / 2).clamp(1, 8));
-            // The manifest names the files and the family, so a directory holding two
-            // models still loads the one the config asks for.
-            let paths: Vec<std::path::PathBuf> = spec
-                .files
-                .iter()
-                .map(|f| self.models_dir.join(&f.name))
-                .collect();
-            let model_type = spec
-                .meta
-                .get("model_type")
-                .and_then(serde_json::Value::as_str);
-            let engine = arioso_stt_sherpa::Engine::from_manifest_files(
-                &self.models_dir,
-                &paths,
-                model_type,
-                language,
-                threads,
-            );
-            *slot =
-                Some(engine.map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))?);
+            *slot = Some(self.build_engine(spec)?);
         }
         slot.as_ref()
             .ok_or_else(|| SttFailure::Engine("the engine failed to load".to_string()))
+    }
+
+    /// Load the model a catalog entry names, into a fresh engine.
+    ///
+    /// The manifest names the files and the family, so a directory holding two models still
+    /// loads the one the config asks for.
+    fn build_engine(&self, spec: &ModelSpec) -> Result<arioso_stt_sherpa::Engine, SttFailure> {
+        let config = self.config();
+        let configured = &config.stt.language;
+        let language = if configured == "auto" {
+            None
+        } else {
+            Some(configured.as_str())
+        };
+        let threads =
+            std::thread::available_parallelism().map_or(4, |count| (count.get() / 2).clamp(1, 8));
+        let paths: Vec<std::path::PathBuf> = spec
+            .files
+            .iter()
+            .map(|f| self.models_dir.join(&f.name))
+            .collect();
+        let model_type = Self::model_type(spec);
+        arioso_stt_sherpa::Engine::from_manifest_files(
+            &self.models_dir,
+            &paths,
+            model_type,
+            language,
+            threads,
+        )
+        .map_err(|e| SttFailure::Engine(format!("loading {}: {e}", spec.id)))
     }
 
     /// Transcribe samples and run the dictionary over the result.
@@ -682,14 +752,18 @@ impl AppState {
         let transcript = engine
             .transcribe(samples, rate)
             .map_err(|e| SttFailure::Engine(e.to_string()))?;
-        // The dictionary runs backwards as well, compared by sound rather than by
-        // letters, because the engine writes "Tonseller" for "tom seller".
+        Ok(self.correct(&transcript.text))
+    }
+
+    /// Spell the words the way the user taught them.
+    ///
+    /// The dictionary runs backwards as well, compared by sound rather than by letters,
+    /// because the engine writes "Tonseller" for "tom seller". Finals get this; a
+    /// provisional partial does not, because it is replaced a moment later and correcting
+    /// it would only make the line flicker.
+    pub(crate) fn correct(&self, text: &str) -> String {
         let user = self.user_dictionary();
-        Ok(arioso_g2p::reverse::correct(
-            &user.dictionary,
-            &self.dictionary,
-            &transcript.text,
-        ))
+        arioso_g2p::reverse::correct(&user.dictionary, &self.dictionary, text)
     }
 
     /// Transcribe for a partial hypothesis, or give up if the engine is busy.
@@ -1359,6 +1433,19 @@ pub(crate) fn too_many_sessions() -> axum::response::Response {
     .into_response()
 }
 
+/// The 409 a caller gets when the configured speech model is not on disk.
+///
+/// The batch route and the socket answer with the same code and the same sentence, so a
+/// client that reads one can read the other.
+pub(crate) fn model_not_installed(id: &str) -> axum::response::Response {
+    ApiError::coded(
+        StatusCode::CONFLICT,
+        "model_not_installed",
+        format!("{id} is not installed. Run `arioso models download {id}`."),
+    )
+    .into_response()
+}
+
 /// Build the router.
 ///
 /// Every route is registered whatever the config says, and each engine handler checks
@@ -1491,6 +1578,11 @@ pub struct InfoView {
     pub target: String,
     /// Engines compiled into this binary, by id.
     pub engines: Vec<String>,
+    /// How the speech-to-text socket reads the configured model: `streaming` when the
+    /// model keeps its own state and a partial is read from it, `batch` when a partial is
+    /// the batch engine run again over the buffer so far. Absent when speech to text is
+    /// switched off, because there is no path to report.
+    pub stt_path: Option<String>,
 }
 
 /// One engine as reported by `GET /v1/engines`.
@@ -1605,10 +1697,15 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
         .unwrap_or(false);
     let stt = config.stt.enabled.then(|| config.stt.batch_model.clone());
     let stt_installed = !config.stt.enabled
-        || state
+        || (state
             .manifest
             .find(&config.stt.batch_model)
-            .is_some_and(|spec| state.is_installed(spec));
+            .is_some_and(|spec| state.is_installed(spec))
+            // A configured streaming model is what the socket will load, so a server
+            // whose socket cannot start is not ready even when the file route could.
+            && state
+                .stream_spec()
+                .is_none_or(|spec| state.is_installed(spec)));
     let stt_loaded = state
         .stt
         .lock()
@@ -1662,10 +1759,21 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     responses((status = 200, body = InfoView))
 )]
 async fn info(State(state): State<Arc<AppState>>) -> Json<InfoView> {
+    // A caller that plans a session reads this instead of guessing from the model id:
+    // the two paths differ in when the first partial can arrive.
+    let stt_path = state.config().stt.enabled.then(|| {
+        if state.stt_streams() {
+            "streaming"
+        } else {
+            "batch"
+        }
+        .to_string()
+    });
     Json(InfoView {
         version: env!("CARGO_PKG_VERSION").to_string(),
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
         engines: state.engines().into_iter().map(|e| e.id).collect(),
+        stt_path,
     })
 }
 
@@ -2859,9 +2967,13 @@ mod tests {
     const DICT: &str = "HELLO  HH AH0 L OW1\nWORLD  W ER1 L D\n";
 
     fn state() -> (Arc<AppState>, tempfile::TempDir) {
+        state_with(Config::default())
+    }
+
+    /// The same server, with a config the test chose.
+    fn state_with(mut config: Config) -> (Arc<AppState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
-        let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
         (
@@ -4536,5 +4648,94 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The catalog's family is what decides the path, so the answer is available before
+    /// the model is downloaded.
+    #[tokio::test]
+    async fn info_names_the_path_the_configured_model_uses() {
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The default stream model names nothing in the catalog, so the socket keeps the
+        // batch path it has always run: a partial is a re-run, not a read.
+        assert_eq!(body["stt_path"], "batch");
+
+        let mut config = Config::default();
+        config.stt.stream_model = "sherpa-zipformer-streaming-en".to_string();
+        let (state, _dir) = state_with(config);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["stt_path"], "streaming");
+    }
+
+    /// With speech to text off there is no path to report, rather than a path a caller
+    /// could mistake for a working one.
+    #[tokio::test]
+    async fn info_reports_no_path_when_speech_to_text_is_off() {
+        let mut config = Config::default();
+        config.stt.enabled = false;
+        config.stt.stream_model = "sherpa-zipformer-streaming-en".to_string();
+        let (state, _dir) = state_with(config);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["stt_path"].is_null(), "{body}");
+    }
+
+    /// A streaming model that is not on disk is refused before the socket upgrades, with
+    /// the same code and sentence the batch route answers.
+    #[tokio::test]
+    async fn a_streaming_model_that_is_not_installed_is_a_409() {
+        let mut config = Config::default();
+        config.stt.stream_model = "sherpa-zipformer-streaming-en".to_string();
+        let (state, _dir) = state_with(config);
+        let refusal =
+            ws_stt::preflight(&state).expect("a streaming model with no files is refused");
+        assert_eq!(refusal.status(), StatusCode::CONFLICT);
+        let body = refusal.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "model_not_installed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("sherpa-zipformer-streaming-en"),
+            "{body}"
+        );
+    }
+
+    /// A batch model keeps the path it had: the socket opens, and the missing model is
+    /// reported as a frame when the engine is asked for it.
+    #[tokio::test]
+    async fn a_batch_model_is_not_refused_before_the_upgrade() {
+        let (state, _dir) = state();
+        assert!(
+            ws_stt::preflight(&state).is_none(),
+            "the batch path must not gain a pre-upgrade check"
+        );
     }
 }

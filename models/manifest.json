@@ -8358,6 +8358,51 @@
         "quantization": "int8",
         "license_note": "CC BY 4.0, NVIDIA Parakeet TDT 0.6B v2; attribution required"
       }
+    },
+    {
+      "id": "sherpa-zipformer-streaming-en",
+      "kind": "stt",
+      "engine": "sherpa",
+      "mode": "streaming",
+      "version": "2023-06-26",
+      "license": "Apache-2.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "sha256": "563fde436d16cf7607cf408cd6b30909819d03162652ef389c2450ced3f45ac1",
+          "size": 71083163
+        },
+        {
+          "name": "decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "sha256": "98da299f471e38bb4e1a8df579b8cc9122d6039576a77e357b3c60f17dd83b02",
+          "size": 1307236
+        },
+        {
+          "name": "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+          "sha256": "d944208d660d67c8d72cd2acaeac971fa5ceb8c80e76c1968148846fedd6e297",
+          "size": 259335
+        },
+        {
+          "name": "tokens.txt",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/tokens.txt",
+          "sha256": "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb",
+          "size": 5048
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "languages": [
+          "en"
+        ],
+        "model_type": "zipformer_streaming",
+        "quantization": "int8",
+        "chunk_ms": 320,
+        "license_note": "Apache-2.0, sherpa-onnx streaming Zipformer for LibriSpeech, trained with icefall"
+      }
     }
   ]
 }

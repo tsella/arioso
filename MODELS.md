@@ -39,7 +39,7 @@ is the rule in `crates/arioso-stt-sherpa`.
 | `sherpa-whisper-tiny-en` | English | MIT | 99 MiB | not scored | not scored | — | yes |
 | whisper `small.en` | English | MIT | 358 MiB | 9.20% | 10.93% | 0.73 | no |
 | parakeet v3 | 25 European languages | CC-BY-4.0 | 641 MiB | not run | 6.95% | 0.27 | no |
-| zipformer-en-2023-06-26 | English | Apache-2.0 | 68 MiB | 6.84% | 14.16% | 0.11 | no |
+| `sherpa-zipformer-streaming-en` | English | Apache-2.0 | 69 MiB | 6.84% | 14.16% | 0.11 | yes, streaming |
 
 Languages of parakeet v3, from the model card: English, Spanish, French, German, Bulgarian,
 Croatian, Czech, Danish, Dutch, Estonian, Finnish, Greek, Hungarian, Italian, Latvian,
@@ -59,7 +59,9 @@ What the table says:
   for accuracy on English.
 - Zipformer is twice as fast and a ninth of the size, and it falls apart on conversation:
   49 of its podcast errors are the word `yeah` heard as `yet`. It fits clean speech where
-  latency dominates, not a meeting recorder.
+  latency dominates, not a meeting recorder. It is also the only model here that streams:
+  `stt.stream_model` names it, and the socket reads its partials from the decoder state
+  instead of re-running the engine over the buffer so far.
 
 Two caveats that belong beside the numbers. The podcast reference transcript is itself
 machine-generated, so its rows compare engines rather than measure any engine absolutely. And

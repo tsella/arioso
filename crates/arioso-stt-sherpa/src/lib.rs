@@ -1,9 +1,10 @@
-//! Batch speech to text through sherpa-onnx.
+//! Speech to text through sherpa-onnx.
 //!
-//! One engine, one job: take samples at any rate, return text. Two families are supported:
-//! Whisper, which the project shipped first, and transducer models (Parakeet, Zipformer),
-//! which the same library loads through a different graph. The manifest names the family,
-//! so a model directory that holds the wrong files is refused rather than guessed at.
+//! One engine, one job: take samples at any rate, return text. Three graphs are supported:
+//! Whisper, which the project shipped first, offline transducer models (Parakeet, and
+//! Zipformer run offline), and streaming transducers, which keep their own state and
+//! produce a hypothesis before the audio ends. The manifest names the family, so a model
+//! directory that holds the wrong files is refused rather than guessed at.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +13,28 @@ use sherpa_onnx::{
     OfflineWhisperModelConfig,
 };
 
+pub mod streaming;
+
+pub use streaming::{StreamSession, StreamingEngine};
+
 /// Rate the engine expects. Anything else is resampled on the way in.
 pub const ENGINE_RATE: u32 = 16_000;
+
+/// The `meta.model_type` of a model that streams.
+///
+/// A Zipformer transducer exported for online decoding, which is the family the socket
+/// path is built for.
+pub const STREAMING_MODEL_TYPE: &str = "zipformer_streaming";
+
+/// Whether a catalog entry describes a model that streams.
+///
+/// The family comes from `meta.model_type`, the same field that selects the graph when the
+/// model is loaded. One value means streaming today; every other value, and an absent one,
+/// is a batch model, which is what every entry written before streaming existed means.
+#[must_use]
+pub fn is_streaming(model_type: Option<&str>) -> bool {
+    model_type == Some(STREAMING_MODEL_TYPE)
+}
 
 /// What went wrong.
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +74,19 @@ pub struct Transcript {
 
 /// A loaded model, either family.
 pub struct Engine {
-    recognizer: OfflineRecognizer,
+    backend: Backend,
+}
+
+/// Which graph the engine loaded.
+///
+/// The two families are different C types in sherpa-onnx and cannot be held in one slot,
+/// so the choice is made once, when the manifest's family is read, and every caller sees
+/// one type.
+enum Backend {
+    /// Whisper or an offline transducer: audio in, text out, no state between calls.
+    Batch(OfflineRecognizer),
+    /// A streaming transducer: state per utterance, and partials read from it.
+    Stream(StreamingEngine),
 }
 
 impl std::fmt::Debug for Engine {
@@ -125,6 +158,15 @@ impl Engine {
         }
         let joiner = find(Role::Joiner)
             .ok_or_else(|| not_a_model(dir, "a joiner *.onnx, which a transducer needs"))?;
+        if is_streaming(Some(model_type)) {
+            // The same four files, a different graph: a streaming transducer is decoded
+            // incrementally, so it is loaded by the online recognizer instead.
+            let engine =
+                StreamingEngine::from_files(dir, &encoder, &decoder, &joiner, &tokens, threads)?;
+            return Ok(Self {
+                backend: Backend::Stream(engine),
+            });
+        }
         Self::load_transducer(
             dir, &encoder, &decoder, &joiner, &tokens, model_type, threads,
         )
@@ -163,7 +205,9 @@ impl Engine {
         };
         let recognizer =
             OfflineRecognizer::create(&config).ok_or_else(|| SttError::Load(dir.to_owned()))?;
-        Ok(Self { recognizer })
+        Ok(Self {
+            backend: Backend::Batch(recognizer),
+        })
     }
 
     /// Load a Whisper model directory.
@@ -245,7 +289,27 @@ impl Engine {
 
         let recognizer =
             OfflineRecognizer::create(&config).ok_or_else(|| SttError::Load(dir.to_owned()))?;
-        Ok(Self { recognizer })
+        Ok(Self {
+            backend: Backend::Batch(recognizer),
+        })
+    }
+
+    /// Whether this engine produces partials from its own state.
+    ///
+    /// A batch model re-runs over a growing buffer to make a partial; a streaming model
+    /// does not need to, and the socket path asks this to decide which loop to run.
+    #[must_use]
+    pub fn streams(&self) -> bool {
+        matches!(self.backend, Backend::Stream(_))
+    }
+
+    /// The streaming model, when this engine holds one.
+    #[must_use]
+    pub fn streaming(&self) -> Option<&StreamingEngine> {
+        match &self.backend {
+            Backend::Stream(engine) => Some(engine),
+            Backend::Batch(_) => None,
+        }
     }
 
     /// Transcribe samples at `rate`, mono.
@@ -258,44 +322,78 @@ impl Engine {
         if samples.is_empty() {
             return Err(SttError::EmptyAudio);
         }
-        // The engine decodes one window of at most thirty seconds and discards whatever
-        // follows, without an error. Handing it an hour of audio returns the first half
-        // minute and a success code, so the audio is cut here and the pieces joined.
-        //
-        // The cut is made at the rate the audio arrived in, and only the window about to be
-        // decoded is converted. Resampling the file first held a second copy of the whole
-        // recording: 115 MB for thirty minutes at 48 kHz, against 1.85 MB for one window.
-        let mut text = String::new();
-        let mut converted: Vec<f32> = Vec::with_capacity(WINDOW_S * ENGINE_RATE as usize);
-        for window in windows(samples, rate) {
-            let audio: &[f32] = if rate == ENGINE_RATE {
-                window
-            } else {
-                converted.clear();
-                resample_into(window, rate, ENGINE_RATE, &mut converted);
-                &converted
-            };
-            let stream = self.recognizer.create_stream();
-            stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), audio);
-            self.recognizer.decode(&stream);
-            let Some(result) = stream.get_result() else {
-                continue;
-            };
-            let piece = result.text.trim();
-            if piece.is_empty() {
-                continue;
-            }
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(piece);
-        }
+        let text = match &self.backend {
+            Backend::Batch(recognizer) => transcribe_batch(recognizer, samples, rate),
+            Backend::Stream(engine) => transcribe_stream(engine, samples, rate),
+        };
         // No speech is a result, not a failure. A file of silence, a muted microphone and a
         // room with nobody in it all produce no words, and the caller asked what was said.
         // Reporting an error made the batch route answer 503 engine_unavailable for silence,
         // which reads as a broken server and sends an operator to look at the model.
         Ok(Transcript { text })
     }
+}
+
+/// Transcribe a whole recording with a batch model.
+fn transcribe_batch(recognizer: &OfflineRecognizer, samples: &[f32], rate: u32) -> String {
+    // The engine decodes one window of at most thirty seconds and discards whatever
+    // follows, without an error. Handing it an hour of audio returns the first half
+    // minute and a success code, so the audio is cut here and the pieces joined.
+    //
+    // The cut is made at the rate the audio arrived in, and only the window about to be
+    // decoded is converted. Resampling the file first held a second copy of the whole
+    // recording: 115 MB for thirty minutes at 48 kHz, against 1.85 MB for one window.
+    let mut text = String::new();
+    let mut converted: Vec<f32> = Vec::with_capacity(WINDOW_S * ENGINE_RATE as usize);
+    for window in windows(samples, rate) {
+        let audio: &[f32] = if rate == ENGINE_RATE {
+            window
+        } else {
+            converted.clear();
+            resample_into(window, rate, ENGINE_RATE, &mut converted);
+            &converted
+        };
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(i32::try_from(ENGINE_RATE).unwrap_or(16_000), audio);
+        recognizer.decode(&stream);
+        let Some(result) = stream.get_result() else {
+            continue;
+        };
+        let piece = result.text.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    text
+}
+
+/// Transcribe a whole recording with a streaming model.
+///
+/// The socket path feeds one utterance at a time and reads partials from the model's
+/// state. This is the batch route answering with a model that streams, so the whole
+/// recording goes through one session and only the final text is returned. A streaming
+/// model has no thirty second window to work around, so the audio is resampled once and
+/// fed in chunks: the chunk boundary is where the model would have asked for more audio
+/// anyway, and feeding it in one block would hand it a single, very long frame of speech.
+fn transcribe_stream(engine: &StreamingEngine, samples: &[f32], rate: u32) -> String {
+    /// Audio per feed, in samples. A streaming Zipformer is exported for a chunk of about
+    /// this length, and a smaller one only adds calls.
+    const CHUNK: usize = ENGINE_RATE as usize / 5;
+
+    let audio: std::borrow::Cow<'_, [f32]> = if rate == ENGINE_RATE {
+        std::borrow::Cow::Borrowed(samples)
+    } else {
+        std::borrow::Cow::Owned(resample(samples, rate, ENGINE_RATE))
+    };
+    let mut session = engine.session();
+    for chunk in audio.chunks(CHUNK) {
+        session.feed(chunk);
+    }
+    session.finish()
 }
 
 /// Longest audio one decode may take, in seconds.
@@ -506,6 +604,119 @@ mod tests {
             "silence produced {:?}",
             transcript.text
         );
+    }
+
+    #[test]
+    fn a_streaming_entry_selects_the_streaming_family() {
+        // The family decides which graph loads and which loop the socket runs, so a
+        // catalogue entry has to name it exactly.
+        assert!(is_streaming(Some(STREAMING_MODEL_TYPE)));
+        // An offline Zipformer is a different export of the same network and stays batch.
+        assert!(!is_streaming(Some("zipformer")));
+        assert!(!is_streaming(Some("nemo_transducer")));
+        assert!(!is_streaming(Some("whisper")));
+        assert!(!is_streaming(None));
+    }
+
+    #[test]
+    fn a_streaming_entry_is_loaded_by_the_streaming_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the encoder should be: the streaming loader refuses it by
+        // name, and that sentence is one the batch loader never writes, so reaching it
+        // proves which path ran.
+        std::fs::create_dir(dir.path().join("encoder.onnx")).unwrap();
+        let paths: Vec<PathBuf> = ["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"]
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        for path in paths.iter().skip(1) {
+            std::fs::write(path, b"").unwrap();
+        }
+        let error =
+            Engine::from_manifest_files(dir.path(), &paths, Some(STREAMING_MODEL_TYPE), None, 1)
+                .unwrap_err();
+        assert!(matches!(error, SttError::NotAModel { .. }), "{error}");
+        assert!(error.to_string().contains("streaming encoder"), "{error}");
+    }
+
+    /// A streaming model decodes while it is fed, and its final text comes from its own
+    /// state rather than from a batch re-run.
+    ///
+    /// Ignored because CI has no model, and a test that returns early when the model is
+    /// missing passes whether or not the bug is fixed. Run it deliberately:
+    ///
+    /// ```text
+    /// ARIOSO_MODELS_DIR=... cargo test -p arioso-stt-sherpa -- --ignored
+    /// ```
+    ///
+    /// The models directory may also hold `speech.wav`, sixteen kilohertz mono. When it
+    /// does, the test asserts words: a partial before the end of the audio and the same
+    /// words in the final. Without it only the loop is proved, because a tone has no
+    /// transcript to compare.
+    #[test]
+    #[ignore = "needs a real streaming model in ARIOSO_MODELS_DIR"]
+    fn a_streaming_model_decodes_while_it_is_fed() {
+        let dir = std::env::var("ARIOSO_MODELS_DIR")
+            .expect("set ARIOSO_MODELS_DIR to a directory holding a streaming model");
+        let files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("a readable ARIOSO_MODELS_DIR")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("onnx" | "txt")
+                )
+            })
+            .collect();
+        let engine = Engine::from_manifest_files(
+            Path::new(&dir),
+            &files,
+            Some(STREAMING_MODEL_TYPE),
+            None,
+            4,
+        )
+        .expect("a streaming model in ARIOSO_MODELS_DIR");
+        assert!(engine.streams(), "the entry must load as a streaming model");
+
+        let speech = Path::new(&dir).join("speech.wav");
+        let (audio, rate) = match std::fs::read(&speech) {
+            Ok(bytes) => arioso_tts_piper::wav::read_bytes(&bytes).expect("a readable speech.wav"),
+            Err(_) => {
+                let rate = ENGINE_RATE;
+                let tone: Vec<f32> = (0..3 * rate)
+                    .map(|i| (i as f32 * 0.05).sin() * 0.3)
+                    .collect();
+                (tone, rate)
+            }
+        };
+
+        let mut session = engine.streaming().expect("a streaming engine").session();
+        let mut partials = Vec::new();
+        for chunk in audio.chunks(ENGINE_RATE as usize / 5) {
+            if let Some(text) = session.feed(chunk) {
+                partials.push(text);
+            }
+        }
+        let final_text = session.finish();
+        if speech.is_file() {
+            assert!(
+                !partials.is_empty(),
+                "no partial arrived before the audio ended"
+            );
+            assert!(!final_text.is_empty(), "the final text is empty");
+        }
+
+        // The batch route keeps working with a streaming model: one session over the
+        // whole recording, the same words out.
+        let transcript = engine
+            .transcribe(&audio, rate)
+            .expect("a streaming model transcribes a whole recording");
+        if speech.is_file() {
+            assert!(
+                !transcript.text.is_empty(),
+                "the batch route lost the words"
+            );
+        }
     }
 
     #[test]

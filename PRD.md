@@ -314,7 +314,13 @@ because it runs batch models and natively streaming models behind the same C API
     uploaded files. The family comes from the catalog entry, in `meta.model_type`;
     an entry without it is read as Whisper.
   - Streaming: Zipformer transducer models, which emit partials as audio arrives.
-    This is the model family the WebSocket path uses.
+    This is the model family the WebSocket path uses. The catalog names it
+    `zipformer_streaming`, and a model loaded that way keeps its own decoder state, so
+    a partial is what it currently believes rather than the batch engine run again over
+    the buffer so far.
+  The socket uses `stt.stream_model` when that id names a catalog model of the streaming
+  family, and `stt.batch_model` otherwise, so a config written before streaming existed
+  keeps the batch path it had.
   The default batch model is Parakeet v2, because it measured best on both corpora at
   whisper-base speed. The measurements, the languages each model covers, and the
   licenses are in MODELS.md.
@@ -330,7 +336,10 @@ because it runs batch models and natively streaming models behind the same C API
   itself on every frame.
 - F4.6 If the configured model cannot stream, the streaming endpoint falls back to
   utterance segmentation: one final per VAD segment, no partials. The response
-  says which mode ran.
+  says which mode ran. `GET /v1/info` reports it as `stt_path`, `streaming` or
+  `batch`, and omits the field when speech to text is off. A caller that plans a
+  session reads it instead of guessing from a model id, because the two paths differ
+  in when the first partial can arrive.
 - F4.7 Optional word timestamps. Off by default because they cost CPU. Zipformer
   models give them cheaply, Whisper does not.
 - F4.8 Language can be forced or left as `auto`. Streaming transducer models are
@@ -340,6 +349,10 @@ because it runs batch models and natively streaming models behind the same C API
   is playing. See F13. Every other platform captures the microphone only in v1.
 - F4.11 Finals pass through the user dictionary in reverse, so a term the user taught
   the system comes back spelled their way. See F14.7.
+- F4.12 A streaming model that is not on disk is refused before the socket upgrades,
+  with `409 model_not_installed` and the same sentence `POST /v1/stt` answers. A batch
+  model keeps the older behaviour: the socket opens and the failure arrives as an
+  `error` frame when the engine is asked for it.
 
 ### F5. Voice activity detection
 
@@ -414,7 +427,7 @@ because it runs batch models and natively streaming models behind the same C API
     "enabled": true,
     "engine": "sherpa",
     "batch_model": "sherpa-parakeet-tdt-0.6b-v2-en",
-    "stream_model": "sherpa-zipformer-en",
+    "stream_model": "",
     "language": "auto",
     "partials": true,
     "partial_interval_ms": 300,
@@ -460,6 +473,10 @@ because it runs batch models and natively streaming models behind the same C API
 }
 ```
 
+`stt.stream_model` is empty by default, which leaves the socket on `stt.batch_model`.
+Setting it to a catalog id of the streaming family moves the socket onto that model and
+leaves the file route where it was; the two are loaded in separate slots.
+
 ### F8. API
 
 HTTP, JSON, versioned under `/v1`.
@@ -468,7 +485,7 @@ HTTP, JSON, versioned under `/v1`.
 |---|---|---|
 | GET | `/healthz` | Process alive |
 | GET | `/readyz` | All enabled engines ready |
-| GET | `/v1/info` | Version, build target, available engines |
+| GET | `/v1/info` | Version, build target, available engines, and the speech-to-text path |
 | GET | `/v1/config` | Effective config, secrets redacted |
 | PATCH | `/v1/config` | Partial update, optional persist |
 | GET | `/v1/models` | Catalog with state and progress |

@@ -258,6 +258,13 @@ the batch engine over the growing buffer.
 then one final; quote the frames. If no streaming model can be installed here, say so and
 leave the test `#[ignore]`d with the command that runs it.
 
+**Closed:** the streaming loop lives in `crates/arioso-stt-sherpa/src/streaming.rs` and is
+chosen from `meta.model_type`; `stt.stream_model` names the model the socket uses and an
+unset one leaves the socket on the batch path. A session against
+`sherpa-zipformer-streaming-en` printed twelve partials and one final over the same frames
+the client already parses, and `GET /v1/info` reports `stt_path`. The ignored test runs with
+`ARIOSO_MODELS_DIR=<dir> cargo test -p arioso-stt-sherpa -- --ignored`.
+
 ---
 
 ## T7 — The iOS and Android targets are compiled
