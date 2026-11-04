@@ -1074,18 +1074,22 @@ impl AppState {
     }
 
     /// Synthesize text, loading the voice on first use.
-    fn render(&self, text: &str, speed: f32, sid: i64) -> Result<(Vec<f32>, u32), String> {
+    ///
+    /// The document is collected as 16-bit PCM, converted chunk by chunk as it arrives.
+    /// Holding it as `f32` and converting at the end kept four bytes a sample alive for
+    /// the length of the render and then allocated the WAV beside it.
+    fn render(&self, text: &str, speed: f32, sid: i64) -> Result<(Vec<u8>, u32), String> {
         let mut rate = 0;
-        let mut samples = Vec::new();
+        let mut pcm: Vec<u8> = Vec::new();
         self.render_stream(text, speed, sid, |chunk, chunk_rate| {
             rate = chunk_rate;
-            samples.extend_from_slice(chunk);
+            wav::write_pcm_s16le(chunk, &mut pcm);
             Ok(())
         })?;
-        if samples.is_empty() {
+        if pcm.is_empty() {
             return Err("nothing to say: none of the words are in the dictionary".into());
         }
-        Ok((samples, rate))
+        Ok((pcm, rate))
     }
 
     /// Load the configured voice without rendering anything.
@@ -1534,7 +1538,10 @@ impl RateLimiter {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
             buckets: Mutex::new(Buckets {
-                map: std::collections::HashMap::new(),
+                // Sized for a table that fills. The map is capped at `MAX_BUCKETS` and a
+                // real deployment sees far more than one client, so an empty map would
+                // rehash its way up through the first few hundred addresses.
+                map: std::collections::HashMap::with_capacity(64),
                 last_sweep: std::time::Instant::now(),
             }),
         }
@@ -2422,15 +2429,24 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// The config as JSON, with floats written the way the file writes them.
+/// A patch response: the config document, with a `notes` array beside it when a change
+/// needs saying.
 ///
-/// `to_value` turns an f32 into an f64, so a speed of 1.4 comes back as
-/// 1.399999976158142. Serialising to text first uses the f32 formatter and keeps 1.4.
-fn config_json(config: &Config) -> serde_json::Value {
-    serde_json::to_string(config)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+/// The config is flattened rather than nested, so every field a client already reads stays
+/// where it was, and the response is serialised straight from the struct — one pass, in the
+/// declaration order `GET /v1/config` sends. The document used to be serialised to text,
+/// parsed back into a `Value`, given its note, and serialised again by Axum: three passes
+/// and a tree for one body.
+///
+/// The floats matter: `to_value` turns an f32 into an f64, so a speed of 1.4 would come
+/// back as 1.399999976158142. A struct serialises through the f32 formatter and keeps 1.4.
+#[derive(Serialize)]
+struct ConfigResponse<'a> {
+    #[serde(flatten)]
+    config: &'a Config,
+    /// What was replaced without being asked for. Absent when nothing was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<Vec<String>>,
 }
 
 /// Stop the server gracefully.
@@ -2530,7 +2546,7 @@ async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
 async fn patch_config(
     State(state): State<Arc<AppState>>,
     Json(patch): Json<ConfigPatch>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let persist = patch.persist;
     // One deep copy per patch: patches are rare, reads are not.
     let mut next = (*state.config()).clone();
@@ -2553,27 +2569,35 @@ async fn patch_config(
         })?;
     }
 
-    let mut body = config_json(&next);
-    if let Some((was, is)) = &touched.voice_defaulted {
-        // Said, not silent: the caller named an engine and got a voice with it. The note
-        // sits beside the config document rather than inside it, so every field a client
-        // already reads stays where it was.
-        if let Some(document) = body.as_object_mut() {
-            document.insert(
-                "notes".to_string(),
-                serde_json::json!([format!(
-                    "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
-                    next.tts.engine
-                )]),
-            );
+    // Said, not silent: the caller named an engine and got a voice with it. The note sits
+    // beside the config document rather than inside it, so every field a client already
+    // reads stays where it was.
+    let notes = touched.voice_defaulted.as_ref().map(|(was, is)| {
+        vec![format!(
+            "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
+            next.tts.engine
+        )]
+    });
+    let body = match serde_json::to_vec(&ConfigResponse {
+        config: &next,
+        notes,
+    }) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::error!(%error, "the config could not be serialised");
+            return Err(ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "the config could not be written; the server log has the detail",
+            ));
         }
-    }
+    };
     state.set_config(next);
     state.retarget_voice(touched.voice);
     if touched.stt {
         state.drop_stt();
     }
-    Ok(Json(body))
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 /// The API document for this server, as it stands.
@@ -3357,7 +3381,7 @@ async fn synthesize(
     let text = text.to_owned();
     let worker = Arc::clone(&state);
     let rendered = tokio::task::spawn_blocking(move || worker.render(&text, speed, sid)).await;
-    let (samples, rate) = match rendered {
+    let (pcm, rate) = match rendered {
         Ok(Ok(pair)) => pair,
         Ok(Err(detail)) => {
             // The engine's own message can name a path or a file. It goes to the log, and
@@ -3383,15 +3407,11 @@ async fn synthesize(
     // caller needs the rate in the content type to make anything of them.
     if state.config().tts.format == "pcm" {
         let content_type = format!("audio/pcm;rate={rate}");
-        return Ok((
-            [(header::CONTENT_TYPE, content_type)],
-            wav::pcm_s16le(&samples),
-        )
-            .into_response());
+        return Ok(([(header::CONTENT_TYPE, content_type)], pcm).into_response());
     }
     Ok((
         [(header::CONTENT_TYPE, "audio/wav".to_owned())],
-        wav::to_bytes(&samples, rate),
+        wav::to_bytes_from_pcm(&pcm, rate),
     )
         .into_response())
 }
@@ -3504,10 +3524,18 @@ async fn transcribe_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arioso_core::alloc_count::measure;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    /// Count heap traffic in the unit tests, so a memory claim is a bound rather than a note.
+    ///
+    /// The counters are per thread, so a measurement is the work of the test's own thread
+    /// and not of whatever the suite beside it allocated.
+    #[global_allocator]
+    static ALLOCATOR: arioso_core::alloc_count::Counting = arioso_core::alloc_count::Counting;
 
     const MANIFEST: &str = include_str!("../../../models/manifest.json");
     const DICT: &str = "HELLO  HH AH0 L OW1\nWORLD  W ER1 L D\n";
@@ -3526,6 +3554,59 @@ mod tests {
             Arc::new(AppState::new(config, manifest, None).unwrap()),
             dir,
         )
+    }
+
+    /// Five sentences, and long enough that the document has to grow to hold them.
+    const DOCUMENT: &str = "The quick brown fox jumps over the lazy dog. \
+                            Pack my box with five dozen liquor jugs. \
+                            How vexingly quick daft zebras jump. \
+                            Sphinx of black quartz, judge my vow. \
+                            The five boxing wizards jump quickly.";
+
+    #[test]
+    fn a_document_is_held_as_pcm_not_floats() {
+        // Needs a real voice, like `tests/ws_stream.rs`: the claim is about the buffer the
+        // real path builds, and the engine is what produces the chunks it is built from.
+        let Ok(dir) = std::env::var("ARIOSO_TEST_MODELS_DIR") else {
+            eprintln!("skipped: ARIOSO_TEST_MODELS_DIR is not set");
+            return;
+        };
+        let mut config = Config::default();
+        config.models.dir = Some(PathBuf::from(&dir));
+        config.tts.voice = Some("en_US-joe-medium".to_owned());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        // The first render loads the graph; the load is not what this measures.
+        let _ = state.render(DOCUMENT, 1.0, 0).expect("the voice speaks");
+
+        // The engine alone, with a sink that keeps nothing, so the difference below is the
+        // document and not the inference.
+        let (_, engine) = measure(|| {
+            state
+                .render_stream(DOCUMENT, 1.0, 0, |_, _| Ok(()))
+                .expect("the voice speaks")
+        });
+        let ((pcm, _rate), full) = measure(|| state.render(DOCUMENT, 1.0, 0).unwrap());
+        let samples = pcm.len() / 2;
+        assert!(
+            samples > 100_000,
+            "the text is too short to grow the document: {samples} samples"
+        );
+
+        // Measured at 7.7 bytes a sample; the f32 document this replaced measured 13.5,
+        // because the floats are twice the size and every doubling copies them again.
+        let collected = full.bytes.saturating_sub(engine.bytes);
+        assert!(
+            collected <= 9 * samples,
+            "collecting {samples} samples allocated {collected} bytes"
+        );
+        // What is held when the render returns: measured at 3.8 bytes a sample, which is
+        // the doubling of a two-byte document. The float document alone held 7.2.
+        assert!(
+            pcm.capacity() <= 5 * samples,
+            "the document holds {} bytes for {samples} samples",
+            pcm.capacity()
+        );
     }
 
     async fn call(app: Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
@@ -4069,6 +4150,66 @@ mod tests {
         // Everything else is untouched.
         assert_eq!(state.config().tts.voice, before.tts.voice);
         assert_eq!(state.config().tts.format, before.tts.format);
+    }
+
+    #[tokio::test]
+    async fn a_patch_body_is_the_config_document_byte_for_byte() {
+        // The response is the config struct serialised once, with the note flattened in
+        // beside it. A client that reads a field must see the same document as before,
+        // including the float: 1.4 is written by the f32 formatter, not as the f64 it
+        // widens to.
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state.clone()),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"tts":{"speed":1.4}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(
+            text,
+            serde_json::to_string(&*state.config()).unwrap(),
+            "the body is the document, unchanged"
+        );
+        assert!(text.contains(r#""speed":1.4"#), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_replaces_a_voice_says_so_beside_the_document() {
+        // The note is the one thing the response adds. It sits after every config field,
+        // so nothing a client already reads moves.
+        let (state, _dir) = state();
+        // A named voice, so the switch to the other engine replaces it and owes a note.
+        let (status, _) = patch(state.clone(), r#"{"tts":{"voice":"en_US-lessac-medium"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            router(state.clone()),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"tts":{"engine":"kokoro"}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = String::from_utf8(body).unwrap();
+        let document = serde_json::to_string(&*state.config()).unwrap();
+        let fields = document.strip_suffix('}').expect("a document is an object");
+        assert!(
+            text.starts_with(fields),
+            "every config field is where it was: {text}"
+        );
+        let notes = text
+            .strip_prefix(fields)
+            .expect("the note follows the fields");
+        assert!(notes.starts_with(r#","notes":["#), "{notes}");
+        assert!(notes.ends_with("]}"), "{notes}");
     }
 
     #[tokio::test]
@@ -5657,6 +5798,27 @@ mod tests {
             !dropped.iter().any(|slot| slot == "stt"),
             "the batch slot holds a different model: {body}"
         );
+    }
+
+    /// The first clients do not rehash the table.
+    ///
+    /// The constructor sizes the map for 64 entries, which costs 6,288 bytes once. Filling
+    /// it from empty costs 12,444 bytes in six rehashes to reach the same place, and a
+    /// deployment sees more than one client.
+    #[test]
+    fn the_first_clients_do_not_rehash_the_table() {
+        let limiter = RateLimiter::new(50, 100);
+        let (_, stats) = measure(|| {
+            for index in 1..=64u32 {
+                limiter.take(std::net::IpAddr::V4(std::net::Ipv4Addr::from(index)));
+            }
+        });
+        assert_eq!(
+            stats.allocations, 0,
+            "64 clients cost {} allocations and {} bytes",
+            stats.allocations, stats.bytes
+        );
+        assert_eq!(limiter.buckets.lock().unwrap().map.len(), 64);
     }
 
     /// The bucket table has a fixed maximum, however many distinct addresses arrive.

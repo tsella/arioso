@@ -5,6 +5,13 @@ the rule that prevents the repeat. New entries go at the top of their section.
 
 ## Testing and verification
 
+**"Byte-identical" is a claim about bytes, not values.** Removing the string-and-tree round
+trip from `PATCH /v1/config` left every field and value alone, and the body still parsed to
+the same document — but the keys came out in the struct's declaration order instead of
+alphabetical, because the tree it used to pass through is a `BTreeMap`. Comparing the two
+bodies as parsed values cannot see that. Compare the text, and when it differs, say which
+difference is deliberate.
+
 **A gate reads every result, not the ones you expect to pass.** The four checks ran as one
 chain writing `FMT=`, `CLIPPY=`, `TEST=` and `DOC=` markers. Three were read. `FMT=1` sat in
 the log while six files were committed unformatted, and a later `cargo fmt --all` produced a

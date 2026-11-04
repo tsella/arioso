@@ -81,7 +81,8 @@ A round trip through one recognizer would be the way to check it, and it has not
   static words into a `&mut String` as well.
 - **P2.4, the rate limiter.** The plan's own fix is a pre-sized map; the lock is held for
   four arithmetic operations. Sharding it is a change to the shape of the limiter with no
-  measured cost behind it.
+  measured cost behind it. The pre-sized map is in now (PERF-L2 below): six reallocations
+  and 12,444 bytes for the first 64 clients became none.
 
 ## What the plan claimed that the code did not need
 
@@ -199,3 +200,29 @@ the existing key up, and every other line inserted, so a word written twice with
 overwrote its first pronunciation instead of appending. No test covered it; the corpus did,
 on its `DUP` line. The test that pins it now is `a_word_written_twice_without_an_index_keeps_both`,
 which passes on both trees.
+
+## A fourth pass: the streaming path and the config routes
+
+A review of the streaming and config routes found five costs the earlier passes left. Each is
+one commit, and each carries its measurement in the message.
+
+| Finding | Change | Before | After |
+| --- | --- | --- | --- |
+| PERF-M1a | `ws.rs` converts each chunk inside the `spawn_blocking` closure and sends `(pcm, samples, rate)`; the socket task sends those bytes as they are | 132,300 bytes for a 22,050-sample chunk: a clone of the floats into the channel, then `pcm_s16le` on a Tokio worker | 44,100 bytes in one allocation, converted off the event loop |
+| PERF-M1b | `AppState::render` collects the document as 16-bit PCM and `POST /v1/tts` wraps it with `to_bytes_from_pcm` | 13.45 bytes a sample asked for by the document, 7.18 held, then 2.00 more for the WAV | 7.70 asked for, 3.81 held, the WAV copy unchanged |
+| PERF-M1c | `write_wav_pcm` writes the 44 byte header and then the payload to the file handle | 44,144 bytes for 44,100 bytes of audio | 0 bytes, 0 allocations |
+| PERF-L1 | `PATCH /v1/config` serialises the config once through `ConfigResponse`, with `notes` flattened beside it | a string, a `Value` tree, and a third serialisation by Axum for every patch | one pass, no tree |
+| PERF-L2 | `RateLimiter::new` sizes its table for 64 clients | 6 allocations, 12,444 bytes to reach 64 clients | 0, for 6,288 bytes at construction |
+
+The M1 figures are `arioso_core::alloc_count` on a five-sentence document through the real
+Piper voice, warm, with the engine's own allocations measured separately by a render whose
+sink keeps nothing. The bounds are in `crates/arioso-server/src/lib.rs` and
+`crates/arioso-tts-piper/tests/allocations.rs`; each fails on the tree before its commit.
+
+One visible change came with PERF-L1. The old patch body's keys were alphabetically sorted,
+because the round trip went through a `BTreeMap`; the response now uses the struct's
+declaration order, which is what `GET /v1/config` has sent since `8b569fd`. The fields and
+values are unchanged — the old body and the new one parse to the same document — and the
+float is still written by the f32 formatter, so a speed of 1.4 stays `1.4` rather than the
+`1.399999976158142` that `to_value` would produce. Keeping the sorted order would have meant
+keeping the tree.
