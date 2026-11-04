@@ -5821,10 +5821,15 @@ mod tests {
                 limiter.take(std::net::IpAddr::V4(std::net::Ipv4Addr::from(index)));
             }
         });
-        assert_eq!(
-            stats.allocations, 0,
+        // The table is sized at construction, so filling it costs nothing that grows. macOS
+        // spends one small allocation the first time the lock is taken, which is the
+        // platform's lock and not the table: the byte bound is what says so, because the
+        // growth this test replaced cost 6 allocations and 12,444 bytes.
+        assert!(
+            stats.allocations <= 1 && stats.bytes <= 1024,
             "64 clients cost {} allocations and {} bytes",
-            stats.allocations, stats.bytes
+            stats.allocations,
+            stats.bytes
         );
         assert_eq!(limiter.buckets.lock().unwrap().map.len(), 64);
     }
