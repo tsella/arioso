@@ -227,6 +227,13 @@ Requirements:
   key loads the document and reports it unsigned; a build with a key refuses a
   document whose sibling `<name>.sig` is absent or does not verify, and the
   refusal names the signature file.
+- F1.14 The binary can mint and apply the signature it verifies. `arioso models keygen`
+  writes a private key to a path the operator chooses, with owner-only permissions, refuses
+  to overwrite, and prints the public key as the hex string that goes into the compiled
+  constant. `arioso models sign <manifest> --key <file>` writes the sibling `.sig` over the
+  manifest's bytes as they sit on disk. The private key is never written into the repository,
+  never printed, and never logged; a release build carries exactly one public key, and
+  rotating it invalidates every signature made with the old one.
 - F1.11 Model upgrades do not interrupt service. A new version downloads alongside
   the old one, both appear in `GET /v1/models`, and the switch happens on the next
   load or restart. The old version is deleted only after a successful load of the
@@ -671,6 +678,20 @@ JSON, at roughly 33 percent size cost.
 - F10.6 The header exports `arioso_abi_version()` and every options struct starts
   with a `struct_size` field, so a newer library accepts an older caller and the
   reverse fails with a clear error instead of reading past the end.
+- F10.7 v1 exposes the engine and both directions in process: `arioso_abi_version`,
+  `arioso_last_error` (thread-local, not freed by the caller), `arioso_engine_new`
+  from a JSON config and `arioso_engine_free`, `arioso_tts_synthesize` to a buffer,
+  `arioso_tts_stream` with an audio callback that can cancel, `arioso_stt_open` /
+  `arioso_stt_push` / `arioso_stt_finish` / `arioso_stt_close` with an event callback
+  that can cancel, and `arioso_free` as the only way to release what the library
+  allocated. Every entry point catches a panic and reports it as a code with a
+  sentence, because a panic unwinding into a C caller is undefined behaviour.
+- F10.8 Two things in F10.2 are deliberately absent from v1 and named so the absence is
+  a decision: the download progress callback, because a C caller in the store build has
+  no model manager and downloads already have an event stream over HTTP, and the mobile
+  smoke test in F10.5, because a simulator run needs a machine this project does not
+  have; `mobile.yml` keeps building the library for iOS and Android, and the desktop C
+  caller is what CI actually executes.
 
 ### F11. Concurrency, backpressure, and limits
 
