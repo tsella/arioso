@@ -1538,7 +1538,10 @@ impl RateLimiter {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
             buckets: Mutex::new(Buckets {
-                map: std::collections::HashMap::new(),
+                // Sized for a table that fills. The map is capped at `MAX_BUCKETS` and a
+                // real deployment sees far more than one client, so an empty map would
+                // rehash its way up through the first few hundred addresses.
+                map: std::collections::HashMap::with_capacity(64),
                 last_sweep: std::time::Instant::now(),
             }),
         }
@@ -5795,6 +5798,27 @@ mod tests {
             !dropped.iter().any(|slot| slot == "stt"),
             "the batch slot holds a different model: {body}"
         );
+    }
+
+    /// The first clients do not rehash the table.
+    ///
+    /// The constructor sizes the map for 64 entries, which costs 6,288 bytes once. Filling
+    /// it from empty costs 12,444 bytes in six rehashes to reach the same place, and a
+    /// deployment sees more than one client.
+    #[test]
+    fn the_first_clients_do_not_rehash_the_table() {
+        let limiter = RateLimiter::new(50, 100);
+        let (_, stats) = measure(|| {
+            for index in 1..=64u32 {
+                limiter.take(std::net::IpAddr::V4(std::net::Ipv4Addr::from(index)));
+            }
+        });
+        assert_eq!(
+            stats.allocations, 0,
+            "64 clients cost {} allocations and {} bytes",
+            stats.allocations, stats.bytes
+        );
+        assert_eq!(limiter.buckets.lock().unwrap().map.len(), 64);
     }
 
     /// The bucket table has a fixed maximum, however many distinct addresses arrive.
