@@ -7,6 +7,7 @@ use arioso_config::{AUDIO_FORMATS, Config};
 use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
+use arioso_tts_kokoro::{KokoroError, KokoroVoice};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
@@ -35,7 +36,7 @@ pub enum ServerError {
         source: std::io::Error,
     },
     /// The configured voice is not in the manifest.
-    #[error("no piper voice matches tts.voice {0:?}")]
+    #[error("no voice matches tts.voice {0:?} on the engine in tts.engine")]
     NoVoice(String),
     /// The configured speech to text model is not in the manifest.
     #[error("no speech to text model matches stt.batch_model {0:?}")]
@@ -73,7 +74,7 @@ pub struct AppState {
     models_dir: PathBuf,
     dictionary: CmuDict,
     user: Mutex<UserState>,
-    voice: Mutex<Option<PiperVoice>>,
+    voice: Mutex<Option<Voice>>,
     /// Whisper, loaded on first use. One model, so one slot.
     stt: Mutex<Option<arioso_stt_sherpa::Engine>>,
     /// The streaming model the socket uses, when one is configured. A separate slot from
@@ -484,16 +485,48 @@ impl AppState {
         }
     }
 
-    /// The voice the config asks for.
+    /// The catalog entry the config asks for.
+    ///
+    /// A Piper voice is one entry per voice, so the voice id resolves it. Kokoro is one
+    /// entry holding every voice style, so the entry is chosen by engine and
+    /// `tts.voice` names a row inside its archive.
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
         let config = self.config();
         let voice = &config.tts.voice;
-        self.manifest
-            .find_voice(voice)
-            .ok_or_else(|| ServerError::NoVoice(voice.clone()))
+        let found = if config.tts.engine == "kokoro" {
+            self.manifest
+                .models
+                .iter()
+                .find(|model| model.engine == "kokoro" && model.kind == Kind::Tts)
+        } else {
+            self.manifest.find_voice(voice)
+        };
+        found.ok_or_else(|| ServerError::NoVoice(voice.clone()))
     }
 
-    /// The speech to text model the config asks for.
+    /// Load the configured engine into the one voice slot.
+    ///
+    /// One engine per process: the slot holds whichever `tts.engine` names, and a
+    /// caller that changes it reloads rather than running both.
+    fn load_voice(&self) -> Result<Voice, String> {
+        let spec = self.voice_spec().map_err(|error| error.to_string())?;
+        let config = self.config();
+        if config.tts.engine == "kokoro" {
+            let model = self.file_of(spec, ".onnx")?;
+            let voices = self.file_of(spec, ".bin")?;
+            let symbols = self.file_of(spec, "config.json")?;
+            let voice = config.tts.voice.clone();
+            let loaded = KokoroVoice::load(&model, &voices, &symbols, &voice)
+                .map_err(|error| error.to_string())?;
+            Ok(Voice::Kokoro(loaded))
+        } else {
+            let onnx = self.file_of(spec, ".onnx")?;
+            let symbols = self.file_of(spec, ".onnx.json")?;
+            let loaded = PiperVoice::load(&onnx, &symbols).map_err(|error| error.to_string())?;
+            Ok(Voice::Piper(loaded))
+        }
+    }
+
     /// Every engine this binary can serve, with what it can do.
     ///
     /// A disabled engine is absent rather than reported as unavailable: its routes do
@@ -502,18 +535,21 @@ impl AppState {
         let mut engines = Vec::new();
         let config = self.config();
         if config.tts.enabled {
-            engines.push(EngineView {
-                id: "piper".to_string(),
-                kind: "tts".to_string(),
-                streaming: true,
-                languages: self.catalog_languages("piper"),
-                models: self.catalog_count("piper"),
-                loaded: self
-                    .voice
-                    .lock()
-                    .map(|guard| guard.is_some())
-                    .unwrap_or(false),
-            });
+            let loaded = self
+                .voice
+                .lock()
+                .map(|guard| guard.as_ref().map(Voice::engine))
+                .unwrap_or(None);
+            for engine in TTS_ENGINES {
+                engines.push(EngineView {
+                    id: engine.to_string(),
+                    kind: "tts".to_string(),
+                    streaming: true,
+                    languages: self.catalog_languages(engine),
+                    models: self.catalog_count(engine),
+                    loaded: loaded == Some(engine),
+                });
+            }
         }
         if config.stt.enabled {
             engines.push(EngineView {
@@ -855,10 +891,7 @@ impl AppState {
         if guard.is_some() {
             return Ok(());
         }
-        let spec = self.voice_spec().map_err(|e| e.to_string())?;
-        let onnx = self.file_of(spec, ".onnx")?;
-        let config = self.file_of(spec, ".onnx.json")?;
-        *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
+        *guard = Some(self.load_voice()?);
         Ok(())
     }
 
@@ -873,7 +906,14 @@ impl AppState {
             .lock()
             .map_err(|_| "the voice lock is poisoned".to_string())?;
         match guard.as_ref() {
-            Some(voice) => voice.check_speaker(sid).map_err(|error| error.to_string()),
+            Some(Voice::Piper(voice)) => {
+                voice.check_speaker(sid).map_err(|error| error.to_string())
+            }
+            // A Kokoro voice style is one speaker, and the style is the whole choice.
+            Some(Voice::Kokoro(_)) if sid == 0 => Ok(()),
+            Some(Voice::Kokoro(_)) => Err(format!(
+                "this voice has a single speaker, so speaker {sid} does not exist"
+            )),
             None => Err("voice failed to load".to_string()),
         }
     }
@@ -894,56 +934,89 @@ impl AppState {
             .lock()
             .map_err(|_| "the voice lock is poisoned".to_string())?;
         if guard.is_none() {
-            let spec = self.voice_spec().map_err(|e| e.to_string())?;
-            let onnx = self.file_of(spec, ".onnx")?;
-            let config = self.file_of(spec, ".onnx.json")?;
-            *guard = Some(PiperVoice::load(&onnx, &config).map_err(|e| e.to_string())?);
+            *guard = Some(self.load_voice()?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
         let user = self.user_dictionary();
-        let options = arioso_tts_piper::RenderOptions {
-            speed,
-            normalize: arioso_core::NormalizeOptions {
-                time_of_day: self.config().tts.time_of_day,
-            },
-            sid,
+        let normalize = arioso_core::NormalizeOptions {
+            time_of_day: self.config().tts.time_of_day,
         };
-        let report = voice
-            .render(
-                text,
-                &self.dictionary,
-                &user.dictionary,
-                options,
-                |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
-            )
-            .map_err(|error| error.to_string())?;
+        // Both engines report the same three lists; the match ends here so the log
+        // below is written once rather than twice.
+        let (guessed, missing, unusable) = match voice {
+            Voice::Piper(voice) => {
+                let report = voice
+                    .render(
+                        text,
+                        &self.dictionary,
+                        &user.dictionary,
+                        arioso_tts_piper::RenderOptions {
+                            speed,
+                            normalize,
+                            sid,
+                        },
+                        |audio, rate| sink(audio, rate).map_err(PiperError::Consumer),
+                    )
+                    .map_err(|error| error.to_string())?;
+                (report.guessed, report.missing, report.unusable)
+            }
+            Voice::Kokoro(voice) => {
+                let report = voice
+                    .render(
+                        text,
+                        &self.dictionary,
+                        &user.dictionary,
+                        arioso_tts_kokoro::RenderOptions { speed, normalize },
+                        |audio, rate| sink(audio, rate).map_err(KokoroError::Consumer),
+                    )
+                    .map_err(|error| error.to_string())?;
+                (report.guessed, report.missing, report.unusable)
+            }
+        };
         // The words themselves are text, and F9.9 says text is not logged unless the
         // operator turned `log.log_text` on. The counts are not text, so they always go.
         let log_text = self.config().log.log_text;
-        if !report.guessed.is_empty() {
+        if !guessed.is_empty() {
             if log_text {
-                tracing::debug!(guessed = ?report.guessed, "words spoken by spelling rules");
+                tracing::debug!(guessed = ?guessed, "words spoken by spelling rules");
             } else {
-                tracing::debug!(
-                    count = report.guessed.len(),
-                    "words spoken by spelling rules"
-                );
+                tracing::debug!(count = guessed.len(), "words spoken by spelling rules");
             }
         }
-        if !report.missing.is_empty() {
+        if !missing.is_empty() {
             if log_text {
-                tracing::debug!(missing = ?report.missing, "words nothing could pronounce");
+                tracing::debug!(missing = ?missing, "words nothing could pronounce");
             } else {
-                tracing::debug!(
-                    count = report.missing.len(),
-                    "words nothing could pronounce"
-                );
+                tracing::debug!(count = missing.len(), "words nothing could pronounce");
             }
         }
-        if !report.unusable.is_empty() {
-            tracing::warn!(entries = ?report.unusable, "user dictionary entries the voice cannot say");
+        if !unusable.is_empty() {
+            tracing::warn!(entries = ?unusable, "user dictionary entries the voice cannot say");
         }
         Ok(())
+    }
+}
+
+/// The one speech engine this process has loaded.
+///
+/// One slot, because one engine loads per process: `tts.engine` chooses it, and a change
+/// reloads the slot rather than running two graphs. The enum is what lets the routes be
+/// written once.
+#[derive(Debug)]
+enum Voice {
+    /// A Piper voice: one model per voice.
+    Piper(PiperVoice),
+    /// Kokoro: one model and a voice style.
+    Kokoro(KokoroVoice),
+}
+
+impl Voice {
+    /// Which engine this is, for the engine list.
+    fn engine(&self) -> &'static str {
+        match self {
+            Self::Piper(_) => "piper",
+            Self::Kokoro(_) => "kokoro",
+        }
     }
 }
 
@@ -1958,7 +2031,7 @@ impl ConfigPatch {
 }
 
 /// Engines this binary can actually serve, and what they are called.
-const TTS_ENGINES: [&str; 1] = ["piper"];
+const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
 const STT_ENGINES: [&str; 1] = ["sherpa"];
 
 #[utoipa::path(
@@ -2188,14 +2261,30 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             "server.first_message_timeout_ms must be at least 100".to_string(),
         ));
     }
-    let voice_known = state.manifest.models.iter().any(|model| {
-        model.kind == arioso_models::Kind::Tts
-            && (model.id == config.tts.voice || model.id.ends_with(&config.tts.voice))
-    });
+    // A Piper voice is a catalog id. A Kokoro voice is a style inside one archive, so it
+    // is checked against the archive when it is on disk; before that there is nothing to
+    // check against, and a wrong name fails at load naming the ones that exist.
+    let voice_known = if config.tts.engine == "kokoro" {
+        let archive = state
+            .manifest
+            .models
+            .iter()
+            .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)
+            .and_then(|model| model.files.iter().find(|file| file.name.ends_with(".bin")))
+            .map(|file| state.models_dir.join(&file.name))
+            .filter(|path| path.is_file())
+            .and_then(|path| KokoroVoice::voice_names(&path).ok());
+        archive.is_none_or(|names| names.contains(&config.tts.voice))
+    } else {
+        state.manifest.models.iter().any(|model| {
+            model.kind == arioso_models::Kind::Tts
+                && (model.id == config.tts.voice || model.id.ends_with(&config.tts.voice))
+        })
+    };
     if !voice_known {
         return Err(unprocessable(format!(
-            "tts.voice {} is not in the catalog; GET /v1/voices lists what is",
-            config.tts.voice
+            "tts.voice {} is not one of the voices the {} engine has; GET /v1/voices lists what is",
+            config.tts.voice, config.tts.engine
         )));
     }
     let model_known =
@@ -2233,6 +2322,9 @@ async fn list_voices(
     // Resolve the way the loader does: the config may name the voice by its bare name,
     // so comparing the raw string to a catalog id marks nothing active.
     let active = state.voice_spec().ok().map(|spec| spec.id.clone());
+    let config = state.config();
+    let active_engine = config.tts.engine.clone();
+    let active_voice = config.tts.voice.clone();
     // Voice ids write en_GB and the catalog writes en-GB, so the separator must not
     // decide whether a client finds its language.
     let normalise = |language: &str| language.to_lowercase().replace('_', "-");
@@ -2242,35 +2334,54 @@ async fn list_voices(
         .map(normalise)
         .filter(|language| !language.is_empty());
 
-    let voices = state
+    let mut voices = Vec::new();
+    for model in state
         .manifest
         .models
         .iter()
         .filter(|model| model.kind == arioso_models::Kind::Tts)
-        .filter_map(|model| {
-            let languages = meta_strings(&model.meta, "languages");
-            if let Some(wanted) = &wanted {
-                let speaks = languages
-                    .iter()
-                    .any(|language| normalise(language).starts_with(wanted.as_str()));
-                if !speaks {
-                    return None;
-                }
+    {
+        let languages = meta_strings(&model.meta, "languages");
+        if let Some(wanted) = &wanted {
+            let speaks = languages
+                .iter()
+                .any(|language| normalise(language).starts_with(wanted.as_str()));
+            if !speaks {
+                continue;
             }
-            Some(VoiceView {
+        }
+        let installed = state.is_installed(model);
+        // A Kokoro entry is one model holding dozens of voice styles, so the styles are
+        // the rows a picker can choose. Until the archive is on disk there is nothing to
+        // name, and the catalog row stands in for it rather than a list of guesses.
+        let styles = if model.engine == "kokoro" && installed {
+            model
+                .files
+                .iter()
+                .find(|file| file.name.ends_with(".bin"))
+                .map(|file| state.models_dir.join(&file.name))
+                .and_then(|path| KokoroVoice::voice_names(&path).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let sample_rate = model
+            .meta
+            .get("sample_rate")
+            .and_then(serde_json::Value::as_u64);
+        let quality = model
+            .meta
+            .get("quality")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if styles.is_empty() {
+            voices.push(VoiceView {
                 id: model.id.clone(),
                 engine: model.engine.clone(),
                 license: model.license.clone(),
                 commercial_use: model.commercial_use,
-                sample_rate: model
-                    .meta
-                    .get("sample_rate")
-                    .and_then(serde_json::Value::as_u64),
-                quality: model
-                    .meta
-                    .get("quality")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                sample_rate,
+                quality,
                 languages,
                 num_speakers: model
                     .meta
@@ -2278,11 +2389,27 @@ async fn list_voices(
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(1),
                 speakers: model.meta.get("speakers").cloned(),
-                installed: state.is_installed(model),
-                active: active.as_ref() == Some(&model.id),
-            })
-        })
-        .collect();
+                installed,
+                active: active_engine == model.engine && active.as_ref() == Some(&model.id),
+            });
+            continue;
+        }
+        for name in styles {
+            voices.push(VoiceView {
+                id: name.clone(),
+                engine: model.engine.clone(),
+                license: model.license.clone(),
+                commercial_use: model.commercial_use,
+                sample_rate,
+                quality: None,
+                languages: languages.clone(),
+                num_speakers: 1,
+                speakers: None,
+                installed,
+                active: active_engine == "kokoro" && active_voice == name,
+            });
+        }
+    }
     Json(VoiceListView { voices })
 }
 
@@ -3008,6 +3135,46 @@ mod tests {
     /// Bytes of the toy model the stream tests download.
     const TOY_BYTES: &[u8] = b"arioso toy model, small enough to fetch in a test";
 
+    /// A catalog with one Kokoro entry, for the tests that are about its voice archive.
+    const KOKORO_MANIFEST: &str = r#"{"schema_version":1,"models":[
+        {"id":"kokoro-82m","kind":"tts","engine":"kokoro","version":"1.0",
+         "license":"Apache-2.0","commercial_use":true,
+         "files":[
+           {"name":"kokoro-v1.0.onnx","url":"https://example.invalid/kokoro.onnx","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1},
+           {"name":"voices-v1.0.bin","url":"https://example.invalid/voices.bin","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1},
+           {"name":"kokoro-config.json","url":"https://example.invalid/config.json","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1}
+         ],
+         "meta":{"sample_rate":24000,"languages":["en-US"],"num_speakers":1}}]}"#;
+
+    /// A voice archive holding `rows` by `width` of zeros per name, in the shape
+    /// `numpy.savez` writes: a zip whose entries are stored `.npy` arrays.
+    fn test_archive(voices: &[(&str, usize, usize)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, rows, width) in voices {
+            let header = format!(
+                "{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, 1, {width}), }}"
+            );
+            let mut npy = vec![0x93, b'N', b'U', b'M', b'P', b'Y', 1, 0];
+            npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+            npy.extend_from_slice(header.as_bytes());
+            npy.resize(npy.len() + rows * width * 4, 0);
+            let file_name = format!("{name}.npy");
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags
+            out.extend_from_slice(&0u16.to_le_bytes()); // stored
+            out.extend_from_slice(&[0; 4]); // time and date
+            out.extend_from_slice(&0u32.to_le_bytes()); // crc
+            out.extend_from_slice(&(npy.len() as u32).to_le_bytes()); // compressed
+            out.extend_from_slice(&(npy.len() as u32).to_le_bytes()); // uncompressed
+            out.extend_from_slice(&(file_name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(file_name.as_bytes());
+            out.extend_from_slice(&npy);
+        }
+        out
+    }
+
     /// A catalog with one model small enough to fetch inside a test.
     ///
     /// The URL names a host that does not resolve: the tests point the config at a loopback
@@ -3512,15 +3679,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_engine_that_is_not_built_is_refused_with_the_alternative() {
+    async fn an_engine_that_is_not_built_is_refused_with_the_alternatives() {
         let (state, _dir) = state();
-        let (status, body) = patch(state, r#"{"tts":{"engine":"kokoro"}}"#).await;
+        let (status, body) = patch(state, r#"{"tts":{"engine":"espeak"}}"#).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         let detail = body["detail"].as_str().unwrap();
         assert!(
-            detail.contains("piper"),
+            detail.contains("piper") && detail.contains("kokoro"),
             "the refusal names what works: {detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn switching_the_engine_is_accepted_and_drops_the_loaded_voice() {
+        // The slot holds one engine, so a patch that changes it must not leave a Piper
+        // voice answering for Kokoro.
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            state.clone(),
+            r#"{"tts":{"engine":"kokoro","voice":"af_heart"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().tts.engine, "kokoro");
+        assert_eq!(state.config().tts.voice, "af_heart");
+    }
+
+    #[tokio::test]
+    async fn a_kokoro_voice_the_archive_does_not_hold_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        // An archive holding one style, built the way numpy writes one.
+        let archive = test_archive(&[("af_heart", 2, 2)]);
+        std::fs::write(dir.path().join("voices-v1.0.bin"), archive).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        let manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let (status, body) =
+            patch(state, r#"{"tts":{"engine":"kokoro","voice":"xx_nobody"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let detail = body["detail"].as_str().unwrap();
+        assert!(detail.contains("xx_nobody"), "{detail}");
     }
 
     #[tokio::test]
@@ -4157,7 +4358,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(String::from_utf8_lossy(&body).contains("no piper voice"));
+        assert!(String::from_utf8_lossy(&body).contains("no voice matches"));
     }
 
     #[tokio::test]

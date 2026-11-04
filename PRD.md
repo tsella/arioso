@@ -266,7 +266,10 @@ ready`, or `failed { reason }`.
 ### F3. Text to speech
 
 - F3.1 Engines: `piper` and `kokoro` in v1. Selection is per request and by default
-  from config.
+  from config. One engine loads per process: `tts.engine` chooses it and the voice slot
+  holds that engine. A `PATCH /v1/config` that changes it drops the slot, so the next
+  request loads the other engine; editing the file takes a restart, because the server
+  reads it at start.
 - F3.2 Piper: 178 voices across 53 languages, all of them in the catalog. Sample rate follows
   the quality tier: 22.05 kHz for 124 medium and most high voices, 16 kHz for the low and x_low
   ones, and one outlier at 44.1 kHz (`fr_FR-tom-medium`). The rate is read from the voice's own
@@ -274,7 +277,16 @@ ready`, or `failed { reason }`.
   (`en_US-lessac-medium`), one of which is not ASCII (`pt_PT-tugão-medium`), so ids are matched
   and encoded as UTF-8 end to end.
 - F3.3 Kokoro: 54 voices, 24 kHz, English plus seven other languages. Voice IDs are
-  the upstream names (`af_heart`, `am_michael`).
+  the upstream names (`af_heart`, `am_michael`). The catalog holds one entry for the
+  model and the voices are styles inside `voices-v1.0.bin`, so `tts.voice` names a
+  style and `GET /v1/voices` lists the styles the installed archive holds. A name the
+  archive does not have is a 422 naming the ones it does.
+- F3.3.1 Kokoro's phonemes come from the same permissive path as Piper's: CMUdict,
+  then a regular suffix, then letter-to-sound rules, written as IPA. The model was
+  trained on espeak-ng's phonemes and this is the same family of symbols, so the engine
+  needs no espeak and no GPL code: `gpl-espeak` stays the only way to link espeak-ng,
+  and it stays off by default. The cost is the one F3.2 already carries — names outside
+  the dictionary are spelled by rule rather than by a phonemizer that knows them.
 - F3.4 Controls: voice, speed (0.5 to 2.0), speaker (`sid`), and format (`wav`, `pcm`). `pcm` is raw
   16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
   `opus` are not implemented: the config refuses them rather than answering with WAV bytes
@@ -1095,7 +1107,9 @@ the whole product is there.
 - Core crates: dual MIT or Apache-2.0.
 - `gpl-espeak` feature: off by default. Turning it on links espeak-ng and makes the
   resulting binary GPL-3.0. The README states this plainly, and CI fails a job that
-  enables the feature in a release build.
+  enables the feature in a release build. The Kokoro engine adds no part of it: its
+  phonemes come from `arioso-g2p`, so a second speech engine did not make the default
+  binary any less permissive.
 - Model licenses are per model. The manifest carries a `license` field, and
   `GET /v1/models` exposes it. Non-commercial voices (CC BY-NC-SA, Blizzard) are
   marked `commercial_use: false` and the default catalog ships only permissive ones:
@@ -1116,7 +1130,7 @@ the whole product is there.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Kokoro int8 ONNX has a dtype mismatch in `kokoro-onnx` 0.4.7 (speed fed as int32, model wants float) | Engine fails on first run | Pin the model revision, cast inputs in our own session wrapper, add a golden-audio test |
+| Kokoro int8 ONNX has a dtype mismatch in `kokoro-onnx` 0.4.7 (speed fed as int32, model wants float) | Engine fails on first run | The speed input's dtype is read from the graph, so either export loads; the catalog pins the revision and hashes, and an ignored test renders against the real files |
 | sherpa-onnx models are directories of ONNX files plus tokens and config, so a wrong pair loads and produces garbage | Silent bad output | One manifest entry per model directory, pinned revision and hashes, and a CI job that loads every catalog model and transcribes a fixture |
 | Zipformer transducers are language specific and trail Whisper large on hard audio | Worse transcripts than a user expects | Ship Whisper for batch, transducers for live, and state the accuracy difference in `/v1/engines` |
 | Dual capture drifts: mic and render endpoint run on separate clocks | Transcripts slide out of sync on long calls | Independent resampling per source with frame-level drift compensation, plus a 30 minute soak test in CI |

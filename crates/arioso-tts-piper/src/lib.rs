@@ -5,9 +5,9 @@
 
 use std::path::Path;
 
-use arioso_core::{Entry, Piece, UserDictionary, normalize_with};
+use arioso_core::{Entry, Piece, UserDictionary};
 use arioso_core::{chunk_text, sentences};
-use arioso_g2p::{CmuDict, PhonemeMap, arpabet};
+use arioso_g2p::{CmuDict, PhonemeMap};
 use ort::session::Session;
 use ort::value::Tensor;
 use thiserror::Error;
@@ -120,21 +120,6 @@ pub fn check_speaker(sid: i64, num_speakers: usize) -> Result<(), PiperError> {
     }
 }
 
-/// Whether a form is written in ARPAbet rather than as a respelling.
-///
-/// Every token must be a phoneme the table knows, in any case. A capitalised
-/// respelling such as "TOM SELLER" fails this test and is looked up as words.
-fn is_arpabet(form: &str) -> bool {
-    let mut seen = false;
-    for token in form.split_whitespace() {
-        if !arioso_g2p::arpabet::is_phoneme(token) {
-            return false;
-        }
-        seen = true;
-    }
-    seen
-}
-
 /// A loaded Piper voice.
 pub struct PiperVoice {
     session: Session,
@@ -148,6 +133,10 @@ pub struct PiperVoice {
     /// Whether the graph takes a speaker id. A multi-speaker voice without it produces
     /// the same voice for every number, so the two facts are kept apart.
     has_sid: bool,
+    /// The speaker [`TtsEngine::render`] uses. The trait has no speaker parameter,
+    /// because a voice style is the whole of Kokoro's choice; a caller that wants
+    /// another speaker on this voice sets it here.
+    speaker: i64,
 }
 
 impl std::fmt::Debug for PiperVoice {
@@ -231,6 +220,7 @@ impl PiperVoice {
             length_scale,
             num_speakers,
             has_sid,
+            speaker: 0,
         })
     }
 
@@ -392,10 +382,25 @@ impl PiperVoice {
     /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
     pub fn synthesize(&mut self, symbols: &[&str], sid: i64) -> Result<Vec<f32>, PiperError> {
         let input = self.map.to_ids_i64(symbols);
+        self.synthesize_ids(&input, sid)
+    }
+
+    /// Synthesize a run of phoneme ids, the form the graph takes.
+    ///
+    /// [`arioso_core::TtsEngine::render`] lands here; [`PiperVoice::synthesize`] converts symbols and
+    /// then calls it, so there is one place that builds the feeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
+    pub fn synthesize_ids(&mut self, input: &[i64], sid: i64) -> Result<Vec<f32>, PiperError> {
         let length = input.len() as i64;
 
         let mut feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
-            ("input", Tensor::from_array(([1i64, length], input))?.into()),
+            (
+                "input",
+                Tensor::from_array(([1i64, length], input.to_vec()))?.into(),
+            ),
             (
                 "input_lengths",
                 Tensor::from_array(([1i64], vec![length]))?.into(),
@@ -415,9 +420,41 @@ impl PiperVoice {
         let (_shape, samples) = output.try_extract_tensor::<f32>()?;
         Ok(samples.to_vec())
     }
+
+    /// Choose the speaker [`arioso_core::TtsEngine::render`] will use.
+    ///
+    /// Not validated here: [`PiperVoice::check_speaker`] is the check, and the trait path
+    /// is for callers that already hold a voice they chose.
+    pub fn set_speaker(&mut self, sid: i64) {
+        self.speaker = sid;
+    }
+}
+
+impl arioso_core::TtsEngine for PiperVoice {
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate()
+    }
+
+    /// Render a run of phoneme ids at `speed`, using the speaker last set.
+    ///
+    /// The error is flattened to a string because the trait is shared and Piper's
+    /// variants mean nothing to another engine.
+    fn render(
+        &mut self,
+        symbols: &[i64],
+        speed: f32,
+    ) -> Result<Vec<f32>, arioso_core::EngineError> {
+        self.set_speed(speed);
+        let sid = self.speaker;
+        self.synthesize_ids(symbols, sid)
+            .map_err(|error| arioso_core::EngineError::Backend(error.to_string()))
+    }
 }
 
 /// Symbols for a run of text, after normalization.
+///
+/// The work is [`arioso_g2p::phonemes_for_text`]; this wrapper only files the guesses
+/// and the misses into the report the callers already print.
 fn text_symbols(
     text: &str,
     dictionary: &CmuDict,
@@ -425,52 +462,10 @@ fn text_symbols(
     options: arioso_core::NormalizeOptions,
     allow_rules: bool,
 ) -> Vec<&'static str> {
-    let expanded = normalize_with(text, options);
-    let mut symbols = Vec::new();
-    for word in
-        expanded.split(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}'))
-    {
-        let cleaned: String = word
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '\'')
-            .collect::<String>()
-            .to_lowercase();
-        if cleaned.is_empty() {
-            continue;
-        }
-        let spoken: Vec<&'static str> = if let Some(pronunciations) = dictionary.lookup(&cleaned) {
-            arpabet::to_ipa(&pronunciations[0])
-        } else if let Some(derived) = arioso_g2p::inflect::derive(&cleaned, dictionary) {
-            // A regular suffix on an entry: the dictionary holds `avenger` and not
-            // `avengers`, `walk` and not `walked`. This is not a guess, so it is not
-            // reported as one.
-            arpabet::to_ipa(&derived)
-        } else {
-            // Not in the dictionary and not a regular form, so spell it out. A guessed
-            // word is heard and named; a skipped one leaves a hole.
-            let guessed = if allow_rules {
-                arioso_g2p::lts::pronounce(&cleaned)
-            } else {
-                Vec::new()
-            };
-            if guessed.is_empty() {
-                report.missing.push(cleaned);
-            } else {
-                report.guessed.push(cleaned);
-            }
-            guessed
-        };
-        if spoken.is_empty() {
-            continue;
-        }
-        if !symbols.is_empty() {
-            // Words need the space symbol between them: the voice was trained with
-            // word boundaries, and without them the sequence reads as one long word.
-            symbols.push(" ");
-        }
-        symbols.extend(spoken);
-    }
-    symbols
+    let phonemes = arioso_g2p::phonemes_for_text(text, dictionary, options, allow_rules);
+    report.guessed.extend(phonemes.guessed);
+    report.missing.extend(phonemes.missing);
+    phonemes.symbols
 }
 
 /// Symbols for one dictionary form, if this voice can render all of them.
@@ -484,17 +479,7 @@ pub fn form_symbols(
     options: arioso_core::NormalizeOptions,
     allow_rules: bool,
 ) -> Option<Vec<&'static str>> {
-    let symbols = if is_arpabet(form) {
-        arpabet::to_ipa(form)
-    } else {
-        text_symbols(
-            form,
-            dictionary,
-            &mut RenderReport::default(),
-            options,
-            allow_rules,
-        )
-    };
+    let symbols = arioso_g2p::phonemes_for_form(form, dictionary, options, allow_rules);
     if symbols.is_empty() || symbols.iter().any(|symbol| map.ids_of(symbol).is_none()) {
         return None;
     }

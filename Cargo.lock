@@ -105,6 +105,7 @@ dependencies = [
  "arioso-models",
  "arioso-server",
  "arioso-stt-sherpa",
+ "arioso-tts-kokoro",
  "arioso-tts-piper",
  "axum",
  "axum-server",
@@ -179,6 +180,7 @@ dependencies = [
  "arioso-g2p",
  "arioso-models",
  "arioso-stt-sherpa",
+ "arioso-tts-kokoro",
  "arioso-tts-piper",
  "arioso-vad",
  "axum",
@@ -209,6 +211,18 @@ dependencies = [
  "arioso-models",
  "arioso-tts-piper",
  "sherpa-onnx",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "arioso-tts-kokoro"
+version = "0.1.7"
+dependencies = [
+ "arioso-core",
+ "arioso-g2p",
+ "ort",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

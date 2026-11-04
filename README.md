@@ -276,16 +276,17 @@ accepts but the server cannot use answers in the problem-details shape instead.
 
 Validation runs on the whole resulting config before anything is applied, so a patch that
 names one bad value changes none of its good ones. An engine this binary cannot serve is
-refused with the name of the one it can:
+refused with the names of the ones it can:
 
 ```console
 $ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
-    -H 'content-type: application/json' -d '{"tts": {"engine": "kokoro"}}'
-{"code":"invalid_value","detail":"tts.engine kokoro is not built into this binary;
-the engines here are piper","status":422,...}
+    -H 'content-type: application/json' -d '{"tts": {"engine": "espeak"}}'
+{"code":"invalid_value","detail":"tts.engine espeak is not built into this binary;
+the engines here are piper, kokoro","status":422,...}
 ```
 
-Kokoro is M4. Until then the switch mechanism works and has one destination.
+`piper` and `kokoro` are both built in. One engine loads per process: a patch that changes
+`tts.engine` drops the loaded voice, so the next request speaks with the other engine.
 
 The WebSocket stream sends a `start` frame with the sample rate and the sample format
 (`pcm_s16le`), one binary frame per sentence, and an `end` frame with the chunk and sample

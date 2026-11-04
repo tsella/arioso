@@ -225,6 +225,20 @@ renders audio, and `arioso say "hello" --engine kokoro` writes a WAV whose durat
 If the model cannot be fetched in this environment, report exactly that and leave the manifest
 entry out.
 
+**Closed:** `tts.engine = "kokoro"` speaks. `arioso-tts-kokoro` loads the graph, the
+`voices-v1.0.bin` archive and the model's `config.json` symbol table; the archive is a
+numpy `.npz`, indexed and read one style at a time. `TtsEngine` in `arioso-core` is the
+two-method contract, Piper implements it, and the server's voice slot is an enum over the
+two engines chosen by `tts.engine`. `/v1/voices` lists the 54 styles of an installed
+archive and `PATCH /v1/config` that changes the engine drops the slot, so the change takes
+effect on the next request instead of needing a restart. Phonemization is `arioso-g2p`:
+no espeak, no GPL dependency, `gpl-espeak` untouched. The catalog entry was written from
+the downloaded bytes — `sha256 7d5df8ec…a6c5` for the 325,532,387 byte graph,
+`bca610b8…bf7d` for the 28,214,398 byte archive and `5abb01e2…c17f` for the 2,351 byte
+config. A real `arioso say --engine kokoro` wrote 6.80 s of audio at 24 kHz (326,444
+bytes), and the ignored test renders the same sentence. RTF was measured on a shared
+machine and is an upper bound, as `MODELS.md` says.
+
 ---
 
 ## T6 — Streaming Zipformer on the speech-to-text socket

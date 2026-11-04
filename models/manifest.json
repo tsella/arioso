@@ -8403,6 +8403,50 @@
         "chunk_ms": 320,
         "license_note": "Apache-2.0, sherpa-onnx streaming Zipformer for LibriSpeech, trained with icefall"
       }
+    },
+    {
+      "id": "kokoro-82m",
+      "kind": "tts",
+      "engine": "kokoro",
+      "version": "1.0",
+      "license": "Apache-2.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "kokoro-v1.0.onnx",
+          "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+          "sha256": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+          "size": 325532387
+        },
+        {
+          "name": "voices-v1.0.bin",
+          "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+          "sha256": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+          "size": 28214398
+        },
+        {
+          "name": "kokoro-config.json",
+          "url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/config.json",
+          "sha256": "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+          "size": 2351
+        }
+      ],
+      "meta": {
+        "sample_rate": 24000,
+        "languages": [
+          "en-US",
+          "en-GB",
+          "es-ES",
+          "fr-FR",
+          "hi-IN",
+          "it-IT",
+          "ja-JP",
+          "pt-BR",
+          "zh-CN"
+        ],
+        "num_speakers": 1,
+        "license_text": "Apache 2.0"
+      }
     }
   ]
 }

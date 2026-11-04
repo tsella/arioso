@@ -19,6 +19,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// the caller asks for one thing and receives another.
 pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
+/// Speech engines this binary can load.
+///
+/// One engine per process: `tts.engine` chooses it at load, and a change takes a
+/// restart. The list is here so the refusal names both, not so a config can use both.
+pub const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
+
 /// Everything arioso reads at startup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -767,6 +773,16 @@ impl Config {
                     message: format!("expected none or bearer, got {other}"),
                 });
             }
+        }
+        if !TTS_ENGINES.contains(&self.tts.engine.as_str()) {
+            return Err(ConfigError::Invalid {
+                path: "tts.engine".into(),
+                message: format!(
+                    "expected one of {}, got {:?}; one engine loads per process",
+                    TTS_ENGINES.join(", "),
+                    self.tts.engine
+                ),
+            });
         }
         if !(0.5..=2.0).contains(&self.tts.speed) {
             return Err(ConfigError::Invalid {
