@@ -387,7 +387,7 @@ impl PiperVoice {
 
     /// Synthesize a run of phoneme ids, the form the graph takes.
     ///
-    /// [`TtsEngine::render`] lands here; [`PiperVoice::synthesize`] converts symbols and
+    /// [`arioso_core::TtsEngine::render`] lands here; [`PiperVoice::synthesize`] converts symbols and
     /// then calls it, so there is one place that builds the feeds.
     ///
     /// # Errors
@@ -421,7 +421,7 @@ impl PiperVoice {
         Ok(samples.to_vec())
     }
 
-    /// Choose the speaker [`TtsEngine::render`] will use.
+    /// Choose the speaker [`arioso_core::TtsEngine::render`] will use.
     ///
     /// Not validated here: [`PiperVoice::check_speaker`] is the check, and the trait path
     /// is for callers that already hold a voice they chose.
