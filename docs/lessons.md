@@ -416,3 +416,13 @@ answer before the fix. Check both directions of a rule before committing it: the
 motivated the change, and the input that was already right. The exception kept here is
 deliberate — an adverb ending in `ly` keeps its ordinal — and it is written in the commit
 message so the next reader knows it is a decision.
+
+## A voice is not always a model
+
+`PATCH /v1/config` dropped the loaded engine whenever `tts.voice` changed. That is right for
+Piper, where each voice is its own graph, and wrong for Kokoro, where 54 voices are rows of
+one archive under one graph: the switch re-read and re-compiled 325 MB to read 522 KB, and
+paid it on the next request, where it looked like slow synthesis rather than a config change.
+A field that names a choice says nothing about what the choice costs; the invalidation rule
+belongs to the engine, and a second engine is when the first one's assumption starts costing
+time.

@@ -280,7 +280,9 @@ ready`, or `failed { reason }`.
   the upstream names (`af_heart`, `am_michael`). The catalog holds one entry for the
   model and the voices are styles inside `voices-v1.0.bin`, so `tts.voice` names a
   style and `GET /v1/voices` lists the styles the installed archive holds. A name the
-  archive does not have is a 422 naming the ones it does.
+  archive does not have is a 422 naming the ones it does. Because one graph and one
+  vocabulary serve every style, a `tts.voice` change swaps the style table on the
+  loaded engine and keeps the model; only the 522 KB table is read.
 - F3.3.1 Kokoro's phonemes come from the same permissive path as Piper's: CMUdict,
   then a regular suffix, then letter-to-sound rules, written as IPA. The model was
   trained on espeak-ng's phonemes and this is the same family of symbols, so the engine

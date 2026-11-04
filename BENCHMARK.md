@@ -68,6 +68,33 @@ routes differ by the size of the response, 2 bytes against 1,243 and 1,453.
 The two memory figures are the ones worth knowing before sizing a machine: a ten minute
 stereo file costs 227 MB to read, and the dictionary costs 36.5 MB to hold.
 
+## A voice switch
+
+Kokoro is one 325 MB graph and an archive of 54 style tables, 522,368 bytes each. Changing
+`tts.voice` used to drop the loaded engine, so the next request re-read and re-compiled the
+graph; it now reads the one style table and swaps it on the engine already in memory. Both
+builds served the same request on the same machine:
+
+- Five voice switches each, alternating `af_heart` and `af_bella`, one synthesis of the same
+  sentence after each. Median quoted. Load average 3.9 to 5.4 on the older build and 4.5 to
+  6.1 on the newer one, so the machine was not quiet and the synthesis figures are not a
+  controlled comparison; the forced load is, because one build did it and the other did not.
+- `POST /v1/models/{id}/warm` loads the configured voice only when the slot is empty, so its
+  latency is exactly the work the patch left for the next request.
+
+| what | before | after |
+| --- | --- | --- |
+| `PATCH /v1/config` (`tts.voice` only) | 16.6 ms | 1.1 ms |
+| load forced by the patch, paid by the next request | 804.9 ms | 0.5 ms |
+| `voice_loaded` on `/readyz` right after the patch | `false`, 5 of 5 | `true`, 5 of 5 |
+| first synthesis after the patch | 1.90 s | 2.02 s |
+| `notes` in the PATCH response | absent | absent |
+
+The first switch on the newer build cost 715 ms, against 1.0 to 1.2 ms for the four after it:
+that is the 522 KB table being read from disk the first time. The first load on the older
+build cost 2.45 s against 0.80 s for the four after it, which is the 325 MB graph being read
+from disk with nothing in the page cache. Neither is a steady-state figure.
+
 ## What this pass changed, and what it bought
 
 Each row is one change, measured on both builds with the same harness. The right hand
