@@ -72,6 +72,16 @@ fn is_cancel(text: &str) -> bool {
     serde_json::from_str::<Control>(text).is_ok_and(|control| control.kind == "cancel")
 }
 
+/// One chunk as the payload of a binary frame, and how many samples it holds.
+///
+/// The conversion runs on the thread that synthesized the audio, inside the blocking
+/// render task, so the channel carries what the socket sends and the event loop does no
+/// per-chunk work beyond the frame. Cloning the floats across the channel and converting
+/// them on a Tokio worker cost a copy of the chunk in `f32` for every sentence.
+fn chunk_payload(samples: &[f32]) -> (Vec<u8>, usize) {
+    (wav::pcm_s16le(samples), samples.len())
+}
+
 /// The first message, or `None` when the client sends nothing in time or the
 /// connection ends first.
 async fn first_message(socket: &mut WebSocket, limit: std::time::Duration) -> Option<Message> {
@@ -139,12 +149,13 @@ async fn run(
         }
     };
 
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Vec<f32>, u32)>(QUEUE);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Vec<u8>, usize, u32)>(QUEUE);
     let worker = Arc::clone(&state);
     let joining = tokio::task::spawn_blocking(move || {
         worker.render_stream(&text, speed, sid, |samples, rate| {
+            let (pcm, count) = chunk_payload(samples);
             sender
-                .blocking_send((samples.to_vec(), rate))
+                .blocking_send((pcm, count, rate))
                 .map_err(|_| "the client went away".to_string())
         })
     });
@@ -175,7 +186,7 @@ async fn run(
             }
             chunk = receiver.recv() => chunk,
         };
-        let Some((samples, rate)) = chunk else {
+        let Some((pcm, samples, rate)) = chunk else {
             break;
         };
         if chunks == 0 {
@@ -189,12 +200,8 @@ async fn run(
             }
         }
         chunks += 1;
-        total_samples += samples.len();
-        if socket
-            .send(Message::Binary(wav::pcm_s16le(&samples).into()))
-            .await
-            .is_err()
-        {
+        total_samples += samples;
+        if socket.send(Message::Binary(pcm.into())).await.is_err() {
             break;
         }
     }
@@ -236,6 +243,25 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arioso_core::alloc_count::measure;
+
+    #[test]
+    fn a_chunk_crosses_the_channel_as_bytes() {
+        // One sentence of 22,050 Hz audio. The chunk leaves the render thread as the
+        // frame's payload: two bytes a sample, one allocation. The previous path cloned
+        // the floats into the channel (four bytes a sample) and converted them on the
+        // socket task (two more), which is 132,300 bytes for this chunk.
+        let samples = vec![0.25f32; 22_050];
+        let ((pcm, count), stats) = measure(|| chunk_payload(&samples));
+        assert_eq!(count, samples.len(), "the frame reports every sample");
+        assert_eq!(pcm.len(), samples.len() * 2, "16-bit mono");
+        assert!(
+            stats.bytes <= samples.len() * 2 + 64,
+            "a chunk of {} samples allocated {} bytes",
+            samples.len(),
+            stats.bytes
+        );
+    }
 
     #[test]
     fn a_cancel_frame_is_recognised_and_nothing_else_is() {

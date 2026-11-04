@@ -3509,6 +3509,13 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    /// Count heap traffic in the unit tests, so a memory claim is a bound rather than a note.
+    ///
+    /// The counters are per thread, so a measurement is the work of the test's own thread
+    /// and not of whatever the suite beside it allocated.
+    #[global_allocator]
+    static ALLOCATOR: arioso_core::alloc_count::Counting = arioso_core::alloc_count::Counting;
+
     const MANIFEST: &str = include_str!("../../../models/manifest.json");
     const DICT: &str = "HELLO  HH AH0 L OW1\nWORLD  W ER1 L D\n";
 
