@@ -118,7 +118,7 @@ curl -s -X POST localhost:10101/v1/tts -H 'content-type: application/json' \
 
 | Command | What it does |
 | --- | --- |
-| `arioso say <text> [--out FILE] [--dict FILE]` | Write a WAV file |
+| `arioso say <text> [--out FILE] [--dict FILE] [--engine ENGINE] [--voice VOICE]` | Write a WAV file |
 | `arioso transcribe <file.wav> [--json]` | Read a WAV file back as text |
 | `arioso serve` | Run the HTTP and WebSocket server |
 | `arioso stop` | Stop a server started in sidecar mode |
