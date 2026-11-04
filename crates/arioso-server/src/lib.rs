@@ -41,6 +41,12 @@ pub enum ServerError {
     /// The configured speech to text model is not in the manifest.
     #[error("no speech to text model matches stt.batch_model {0:?}")]
     NoSttModel(String),
+    /// The configured streaming speech to text model cannot be served.
+    ///
+    /// The detail is the same sentence PATCH answers with, so a config refused at startup
+    /// and one refused at runtime say the same thing.
+    #[error("{0}")]
+    StreamModel(String),
     /// The user dictionary could not be used.
     #[error("user dictionary: {0}")]
     UserDictionary(#[from] arioso_core::DictError),
@@ -128,6 +134,50 @@ struct UserState {
     error: Option<String>,
 }
 
+/// The catalog entry `stt.stream_model` names, when it names one that streams.
+///
+/// Empty is the documented "use `stt.batch_model`" value, so it resolves to nothing. A
+/// non-empty value that names no catalog entry, or one whose family does not stream, is
+/// not silently ignored: [`stream_model_problem`] reports it to startup and to PATCH.
+fn stream_spec_in<'a>(config: &Config, manifest: &'a Manifest) -> Option<&'a ModelSpec> {
+    let id = config.stt.stream_model.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let spec = manifest
+        .models
+        .iter()
+        .find(|model| model.kind == Kind::Stt && model.engine == "sherpa" && model.id == id)?;
+    arioso_stt_sherpa::is_streaming(AppState::model_type(spec)).then_some(spec)
+}
+
+/// Why `stt.stream_model` cannot be served, when it names anything at all.
+///
+/// A config that leaves the field empty keeps the batch path over `stt.batch_model`, which
+/// is what every config written before streaming existed means. A non-empty value must name
+/// a catalog entry whose `meta.model_type` streams; a typo or a batch model would otherwise
+/// fall back to the batch loop with no error anywhere.
+fn stream_model_problem(config: &Config, manifest: &Manifest) -> Option<String> {
+    let id = config.stt.stream_model.trim();
+    if id.is_empty() {
+        return None;
+    }
+    match manifest
+        .models
+        .iter()
+        .find(|model| model.kind == Kind::Stt && model.engine == "sherpa" && model.id == id)
+    {
+        Some(spec) if arioso_stt_sherpa::is_streaming(AppState::model_type(spec)) => None,
+        Some(_) => Some(format!(
+            "stt.stream_model {id} is not a streaming model; its meta.model_type is not {}",
+            arioso_stt_sherpa::STREAMING_MODEL_TYPE
+        )),
+        None => Some(format!(
+            "stt.stream_model {id} is not in the catalog; GET /v1/models lists what is"
+        )),
+    }
+}
+
 impl AppState {
     /// Build state, loading the pronunciation dictionary.
     ///
@@ -189,6 +239,9 @@ impl AppState {
                 return Err(ServerError::UserDictionary(error));
             }
         };
+        if let Some(detail) = stream_model_problem(&config, &manifest) {
+            return Err(ServerError::StreamModel(detail));
+        }
         Ok(Self {
             dictionary: CmuDict::parse(&text),
             user: Mutex::new(UserState {
@@ -466,14 +519,42 @@ impl AppState {
         }
     }
 
-    /// Drop the loaded transcription model.
-    fn drop_stt(&self) {
+    /// Drop the loaded batch transcription model.
+    fn drop_batch_stt(&self) {
         if let Ok(mut guard) = self.stt.lock() {
             *guard = None;
         }
+    }
+
+    /// Drop the loaded streaming model.
+    fn drop_stream_stt(&self) {
         if let Ok(mut guard) = self.stt_stream.lock() {
             *guard = None;
         }
+    }
+
+    /// Drop both loaded transcription models.
+    fn drop_stt(&self) {
+        self.drop_batch_stt();
+        self.drop_stream_stt();
+    }
+
+    /// Whether a speech model is in memory, in either slot.
+    ///
+    /// The batch route loads the batch slot and the socket loads the streaming one, so a
+    /// readiness answer that read only the batch slot called a warm socket cold.
+    fn stt_loaded(&self) -> bool {
+        let batch = self
+            .stt
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        let stream = self
+            .stt_stream
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        batch || stream
     }
 
     /// Replace the config.
@@ -558,11 +639,7 @@ impl AppState {
                 streaming: true,
                 languages: self.catalog_languages("sherpa"),
                 models: self.catalog_count("sherpa"),
-                loaded: self
-                    .stt
-                    .lock()
-                    .map(|guard| guard.is_some())
-                    .unwrap_or(false),
+                loaded: self.stt_loaded(),
             });
         }
         engines
@@ -624,20 +701,12 @@ impl AppState {
     /// The streaming model the config names, when the catalog knows it and it streams.
     ///
     /// `stt.stream_model` is the model the socket is documented to use. A config that
-    /// leaves it naming nothing in the catalog — every config written before streaming
-    /// existed, including the default — gets `None`, and the socket keeps the batch path
-    /// over `stt.batch_model` exactly as it always did.
+    /// leaves it empty gets `None`, and the socket keeps the batch path over
+    /// `stt.batch_model` exactly as it always did. A non-empty value is checked by
+    /// [`stream_model_problem`] at startup and on PATCH, so a name that does not resolve
+    /// to a streaming entry is refused rather than silently falling back.
     pub(crate) fn stream_spec(&self) -> Option<&ModelSpec> {
-        let config = self.config();
-        let id = config.stt.stream_model.trim();
-        if id.is_empty() {
-            return None;
-        }
-        let spec =
-            self.manifest.models.iter().find(|model| {
-                model.kind == Kind::Stt && model.engine == "sherpa" && model.id == id
-            })?;
-        arioso_stt_sherpa::is_streaming(Self::model_type(spec)).then_some(spec)
+        stream_spec_in(&self.config(), &self.manifest)
     }
 
     /// Whether the socket reads partials from the model's own state.
@@ -728,6 +797,28 @@ impl AppState {
         self.ensure_engine(&mut guard)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// Load the streaming model without opening a session.
+    ///
+    /// The socket's slot, not the batch one: warming `stt.stream_model` must not leave the
+    /// first socket to pay for the load, and must not displace the model the file route
+    /// uses.
+    pub(crate) fn warm_stream(&self) -> Result<(), String> {
+        let mut guard = self
+            .stt_stream
+            .lock()
+            .map_err(|_| "the streaming model lock is poisoned".to_string())?;
+        if guard.is_none() {
+            let spec = self
+                .stream_spec()
+                .ok_or_else(|| "no streaming model is configured".to_string())?;
+            if !self.is_installed(spec) {
+                return Err(SttFailure::NotInstalled(spec.id.clone()).to_string());
+            }
+            *guard = Some(self.build_engine(spec).map_err(|error| error.to_string())?);
+        }
+        Ok(())
     }
 
     /// The engine, loaded on first use.
@@ -1281,8 +1372,25 @@ struct Bucket {
 pub struct RateLimiter {
     per_second: f64,
     burst: f64,
-    buckets: Mutex<std::collections::HashMap<std::net::IpAddr, Bucket>>,
+    buckets: Mutex<Buckets>,
 }
+
+/// The bucket table, and when it was last swept.
+///
+/// The sweep time lives beside the table so one lock covers both: two locks would let a
+/// request see a swept table and a stale timestamp, and sweep again for nothing.
+#[derive(Debug)]
+struct Buckets {
+    map: std::collections::HashMap<std::net::IpAddr, Bucket>,
+    last_sweep: std::time::Instant,
+}
+
+/// The table never holds more than this, however many addresses a burst brings.
+///
+/// A public server sees an address once and never again; without a bound the table is a
+/// leak an attacker controls. 4,096 buckets is a few hundred kilobytes and far more than
+/// the number of clients one host serves at once.
+const MAX_BUCKETS: usize = 4_096;
 
 impl RateLimiter {
     /// Build a limiter from the configured rate and burst.
@@ -1291,7 +1399,23 @@ impl RateLimiter {
         Self {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
-            buckets: Mutex::new(std::collections::HashMap::new()),
+            buckets: Mutex::new(Buckets {
+                map: std::collections::HashMap::new(),
+                last_sweep: std::time::Instant::now(),
+            }),
+        }
+    }
+
+    /// How long an empty bucket takes to refill.
+    ///
+    /// A bucket idle for this long is indistinguishable from a new one, so it is what the
+    /// sweep drops and how often the sweep is worth running. A rate of zero never refills,
+    /// so nothing is ever idle enough to drop.
+    fn refill_interval(&self) -> std::time::Duration {
+        if self.per_second > 0.0 {
+            std::time::Duration::from_secs_f64(self.burst / self.per_second)
+        } else {
+            std::time::Duration::MAX
         }
     }
 
@@ -1302,14 +1426,31 @@ impl RateLimiter {
     pub fn take(&self, client: std::net::IpAddr) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        // A table that grows with every address ever seen is a leak. Dropping the buckets
-        // that have been idle long enough to be full again costs one pass and bounds it.
-        if buckets.len() > 1024 {
-            buckets.retain(|_, bucket| {
+        let refill = self.refill_interval();
+        // A table that grows with every address ever seen is a leak, so buckets idle long
+        // enough to be full again are dropped. At most one pass per refill interval: during
+        // a burst no bucket is idle enough to drop, so a pass per request removed nothing
+        // and repeated the full scan.
+        if now.duration_since(buckets.last_sweep) >= refill {
+            buckets.map.retain(|_, bucket| {
                 now.duration_since(bucket.last).as_secs_f64() * self.per_second < self.burst
             });
+            buckets.last_sweep = now;
         }
-        let bucket = buckets.entry(client).or_insert(Bucket {
+        // The sweep is not enough on its own: a burst of distinct addresses is all active,
+        // so nothing is idle and the map would grow without bound. At the cap, the least
+        // recently used entry makes room for a new client.
+        if buckets.map.len() >= MAX_BUCKETS && !buckets.map.contains_key(&client) {
+            if let Some(oldest) = buckets
+                .map
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last)
+                .map(|(address, _)| *address)
+            {
+                buckets.map.remove(&oldest);
+            }
+        }
+        let bucket = buckets.map.entry(client).or_insert(Bucket {
             tokens: self.burst,
             last: now,
         });
@@ -1779,11 +1920,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
             && state
                 .stream_spec()
                 .is_none_or(|spec| state.is_installed(spec)));
-    let stt_loaded = state
-        .stt
-        .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false);
+    let stt_loaded = state.stt_loaded();
 
     let status = if !voice_installed {
         "voice_missing"
@@ -1910,6 +2047,9 @@ pub struct SttPatch {
     pub enabled: Option<bool>,
     /// Catalog id of the batch model.
     pub batch_model: Option<String>,
+    /// Catalog id of the model the streaming socket uses. Empty means the socket runs
+    /// the batch model instead.
+    pub stream_model: Option<String>,
     /// `auto`, or a language code.
     pub language: Option<String>,
     /// Whether the stream sends partial transcripts.
@@ -1988,6 +2128,10 @@ impl ConfigPatch {
             }
             if let Some(model) = stt.batch_model {
                 config.stt.batch_model = model;
+                touched.stt = true;
+            }
+            if let Some(model) = stt.stream_model {
+                config.stt.stream_model = model;
                 touched.stt = true;
             }
             if let Some(language) = stt.language {
@@ -2261,9 +2405,10 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             "server.first_message_timeout_ms must be at least 100".to_string(),
         ));
     }
-    // A Piper voice is a catalog id. A Kokoro voice is a style inside one archive, so it
-    // is checked against the archive when it is on disk; before that there is nothing to
-    // check against, and a wrong name fails at load naming the ones that exist.
+    // A Piper voice is a catalog id, and the manifest decides whether one is known. A Kokoro
+    // voice is a style inside one archive, so it is checked against the archive when it is on
+    // disk; before that there is nothing to check against, and a wrong name fails at load
+    // naming the ones that exist.
     let voice_known = if config.tts.engine == "kokoro" {
         let archive = state
             .manifest
@@ -2276,10 +2421,7 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             .and_then(|path| KokoroVoice::voice_names(&path).ok());
         archive.is_none_or(|names| names.contains(&config.tts.voice))
     } else {
-        state.manifest.models.iter().any(|model| {
-            model.kind == arioso_models::Kind::Tts
-                && (model.id == config.tts.voice || model.id.ends_with(&config.tts.voice))
-        })
+        state.manifest.find_voice(&config.tts.voice).is_some()
     };
     if !voice_known {
         return Err(unprocessable(format!(
@@ -2296,6 +2438,12 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             "stt.batch_model {} is not in the catalog; GET /v1/models lists what is",
             config.stt.batch_model
         )));
+    }
+    // Empty is the documented fallback to the batch model; anything else must resolve to
+    // a streaming entry, or the socket would quietly run the batch loop under a name the
+    // operator thought selected streaming.
+    if let Some(detail) = stream_model_problem(config, &state.manifest) {
+        return Err(unprocessable(detail));
     }
     Ok(())
 }
@@ -2535,9 +2683,24 @@ async fn delete_model(
         state.drop_voice();
         dropped.push("voice");
     }
-    if spec.kind == Kind::Stt && state.config().stt.batch_model == spec.id {
-        state.drop_stt();
-        dropped.push("stt");
+    if spec.kind == Kind::Stt {
+        // The batch route and the socket hold different slots, so only the slots that
+        // name the deleted model are dropped. Reporting the slot without unloading it was
+        // how the active streaming model kept its files mapped after a delete.
+        let config = state.config();
+        let is_batch = config.stt.batch_model == spec.id;
+        let is_stream = state
+            .stream_spec()
+            .is_some_and(|active| active.id == spec.id);
+        drop(config);
+        if is_batch {
+            state.drop_batch_stt();
+            dropped.push("stt");
+        }
+        if is_stream {
+            state.drop_stream_stt();
+            dropped.push("stt_stream");
+        }
     }
     tracing::info!(model = %id, files = removed.len(), dropped = ?dropped, "model removed");
     (
@@ -2564,9 +2727,11 @@ impl Drop for DeleteReservation {
 
 /// Load a model so the next request does not pay for the load.
 ///
-/// Only the configured voice can be warmed: there is one voice slot, and loading a
-/// different model into it would change what the next request speaks. A model that is
-/// not installed is refused rather than fetched, because warming is not downloading.
+/// A voice can only be warmed when it is the configured one: there is one voice slot, and
+/// loading a different model into it would change what the next request speaks. Speech to
+/// text has two slots, the batch model and the streaming model, and either configured one
+/// can be warmed. A model that is not installed is refused rather than fetched, because
+/// warming is not downloading.
 #[utoipa::path(
     post,
     path = "/v1/models/{id}/warm",
@@ -2576,7 +2741,7 @@ impl Drop for DeleteReservation {
     responses(
         (status = 200, description = "The model is loaded", body = serde_json::Value),
         (status = 404, description = "No such model", body = Problem),
-        (status = 409, description = "Not installed, or not the active voice", body = Problem)
+        (status = 409, description = "Not installed, or not a configured model", body = Problem)
     )
 )]
 async fn warm_model(
@@ -2642,18 +2807,37 @@ async fn warm_model(
         };
     }
 
-    // Speech to text holds one model, in the slot the routes read. Warming an id that is
-    // not that model would load something else and report success for the wrong name.
-    if state.config().stt.batch_model != spec.id {
+    // Speech to text has two slots: the batch model the file route reads and the
+    // streaming model the socket reads. Warming an id that names neither would load
+    // something else and report success for the wrong name.
+    let config = state.config();
+    let is_batch = config.stt.batch_model == spec.id;
+    let is_stream = state
+        .stream_spec()
+        .is_some_and(|active| active.id == spec.id);
+    drop(config);
+    if !is_batch && !is_stream {
         return ApiError::coded(
             StatusCode::CONFLICT,
             "not_active_model",
-            "only the configured batch model can be warmed; there is one speech slot",
+            "only the configured batch or streaming model can be warmed",
         )
         .into_response();
     }
     let worker = Arc::clone(&state);
-    match tokio::task::spawn_blocking(move || worker.warm_stt()).await {
+    // Both slots when one id is configured for both routes: they are separate engines, and
+    // a warm that loaded only one would leave the other paying for its first request.
+    let warmed = tokio::task::spawn_blocking(move || {
+        if is_batch {
+            worker.warm_stt()?;
+        }
+        if is_stream {
+            worker.warm_stream()?;
+        }
+        Ok::<(), String>(())
+    })
+    .await;
+    match warmed {
         Ok(Ok(())) => {
             tracing::info!(model = %id, "model warmed");
             (
@@ -4811,6 +4995,197 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "not_active_model");
+    }
+
+    #[test]
+    fn a_stream_model_outside_the_catalog_is_refused_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.stt.stream_model = "sherpa-nobody-streaming-en".to_string();
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let error = AppState::new(config, manifest, None)
+            .expect_err("a stream model the catalog does not hold must not start");
+        let detail = error.to_string();
+        assert!(detail.contains("stt.stream_model"), "{detail}");
+        assert!(detail.contains("sherpa-nobody-streaming-en"), "{detail}");
+    }
+
+    #[test]
+    fn a_batch_model_is_refused_as_the_stream_model_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        // The default batch model is a batch family, so naming it here would leave the
+        // socket on the batch loop while the config says otherwise.
+        config.stt.stream_model = config.stt.batch_model.clone();
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let error = AppState::new(config, manifest, None)
+            .expect_err("a batch model cannot be the streaming model");
+        let detail = error.to_string();
+        assert!(detail.contains("stt.stream_model"), "{detail}");
+        assert!(detail.contains("not a streaming model"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_patch_can_choose_and_clear_the_streaming_model() {
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            state.clone(),
+            r#"{"stt":{"stream_model":"sherpa-zipformer-streaming-en"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            state.config().stt.stream_model,
+            "sherpa-zipformer-streaming-en"
+        );
+        assert!(state.stt_streams());
+
+        let (status, body) = patch(state.clone(), r#"{"stt":{"stream_model":""}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state.config().stt.stream_model.is_empty());
+        assert!(!state.stt_streams(), "empty means the batch path");
+    }
+
+    #[tokio::test]
+    async fn a_stream_model_outside_the_catalog_is_refused_and_nothing_is_applied() {
+        let (state, _dir) = state();
+        let before = state.config();
+        let (status, body) =
+            patch(state.clone(), r#"{"stt":{"stream_model":"sherpa-nobody"}}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let detail = body["detail"].as_str().unwrap();
+        assert!(detail.contains("stt.stream_model"), "{detail}");
+        assert_eq!(state.config(), before, "a refused patch changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_batch_model_cannot_be_chosen_as_the_streaming_model() {
+        let (state, _dir) = state();
+        let batch = state.config().stt.batch_model.clone();
+        let request = format!(r#"{{"stt":{{"stream_model":"{batch}"}}}}"#);
+        let (status, body) = patch(state.clone(), &request).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("not a streaming model"),
+            "{body}"
+        );
+    }
+
+    /// The streaming model has its own slot, so warming it must not be refused as "not the
+    /// batch model". The files here are empty, so the load itself fails; what is under test
+    /// is that the active-model gate let the id through to its slot.
+    #[tokio::test]
+    async fn the_configured_streaming_model_can_be_warmed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        // Every size is zero in this copy of the catalog, so an empty file counts as
+        // installed and the test does not write a few hundred megabytes to prove a refusal.
+        let mut manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        for spec in &mut manifest.models {
+            for file in &mut spec.files {
+                file.size = 0;
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.stt.stream_model = "sherpa-zipformer-streaming-en".to_string();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let spec = state
+            .manifest
+            .find("sherpa-zipformer-streaming-en")
+            .expect("the catalog holds the streaming model")
+            .clone();
+        for file in &spec.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/models/sherpa-zipformer-streaming-en/warm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_ne!(
+            status,
+            StatusCode::CONFLICT,
+            "the streaming slot refused its own model: {body}"
+        );
+        assert_ne!(body["code"], "not_active_model", "{body}");
+    }
+
+    /// Deleting the active streaming model drops its slot. The batch slot holds a different
+    /// model, so it must stay untouched.
+    #[tokio::test]
+    async fn deleting_the_streaming_model_unloads_its_slot() {
+        let mut config = Config::default();
+        config.stt.stream_model = "sherpa-zipformer-streaming-en".to_string();
+        let (state, _dir) = state_with(config);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/models/sherpa-zipformer-streaming-en")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let dropped = body["dropped"].as_array().unwrap();
+        assert!(dropped.iter().any(|slot| slot == "stt_stream"), "{body}");
+        assert!(
+            !dropped.iter().any(|slot| slot == "stt"),
+            "the batch slot holds a different model: {body}"
+        );
+    }
+
+    /// The bucket table has a fixed maximum, however many distinct addresses arrive.
+    #[test]
+    fn the_rate_limiter_table_stops_at_its_cap() {
+        let limiter = RateLimiter::new(1, 1);
+        let address = |index: u32| std::net::IpAddr::V4(std::net::Ipv4Addr::from(index));
+        for index in 1..=(MAX_BUCKETS as u32 + 64) {
+            limiter.take(address(index));
+        }
+        let buckets = limiter.buckets.lock().unwrap();
+        assert_eq!(buckets.map.len(), MAX_BUCKETS);
+    }
+
+    /// At the cap, a new client evicts the bucket that has gone unused longest.
+    #[test]
+    fn the_rate_limiter_evicts_the_least_recently_used_client() {
+        let limiter = RateLimiter::new(1, 1);
+        let address = |index: u32| std::net::IpAddr::V4(std::net::Ipv4Addr::from(index));
+        let first = address(1);
+        limiter.take(first);
+        for index in 2..=(MAX_BUCKETS as u32) {
+            limiter.take(address(index));
+        }
+        // Timestamps from a fast loop can tie, so the oldest bucket is aged explicitly.
+        {
+            let mut buckets = limiter.buckets.lock().unwrap();
+            buckets.map.get_mut(&first).unwrap().last =
+                std::time::Instant::now() - std::time::Duration::from_secs(60);
+        }
+        let newcomer = address(MAX_BUCKETS as u32 + 1);
+        limiter.take(newcomer);
+        let buckets = limiter.buckets.lock().unwrap();
+        assert!(
+            !buckets.map.contains_key(&first),
+            "the oldest bucket stayed"
+        );
+        assert!(buckets.map.contains_key(&newcomer));
+        assert_eq!(buckets.map.len(), MAX_BUCKETS);
     }
 
     #[tokio::test]
