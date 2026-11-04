@@ -126,6 +126,8 @@ curl -s -X POST localhost:10101/v1/tts -H 'content-type: application/json' \
 | `arioso doctor` | Check the config, the models, and the dictionary |
 | `arioso models list` | Show the manifest and what is installed |
 | `arioso models download <id>` | Fetch a model, resuming if it was interrupted |
+| `arioso models keygen [--out FILE]` | Mint the Ed25519 keypair that signs the manifest, and print its public key |
+| `arioso models sign <manifest> --key FILE` | Write `<manifest>.sig` over the manifest's bytes |
 | `arioso config schema` | Print the JSON Schema for the config file |
 
 `arioso normalize` is the fastest way to find a pronunciation problem, because it prints
@@ -135,6 +137,42 @@ the expansion without synthesizing anything:
 $ arioso normalize "It costs \$3.99 on the 3rd at 14:30."
 It costs three dollars and ninety nine cents on the third at two thirty in the afternoon.
 ```
+
+## Signing the manifest
+
+The manifest names every file the downloader will fetch, so the signature is what makes a
+mirror hostile instead of merely wrong: per-file SHA-256 stops corruption, and only the
+signature stops a swapped manifest.
+
+Mint a key once, on the machine that holds the release, and keep the private half offline:
+
+```console
+$ arioso models keygen --out release.key
+<64 lowercase hex characters>
+$ arioso models sign models/manifest.json --key release.key
+wrote models/manifest.json.sig
+public key <the same 64 characters>
+```
+
+The shape is the contract: `keygen` writes 65 bytes to stdout, the public key and a newline,
+and nothing else, so `PUB=$(arioso models keygen --out k)` is the whole of it. Where the
+private key went is reported on stderr.
+
+`keygen` writes 32 raw bytes with mode `0600` on unix and refuses to overwrite a file that
+already exists. On Windows there is no file mode to set: the key inherits the access control
+list of the directory it is written into, so choose a directory only your account can read.
+The refusal to overwrite holds on both.
+
+`sign` reads the bytes exactly as they sit on disk, with no re-serialization, and writes
+`<manifest>.sig` as lowercase hex. Paste the printed public key into `RELEASE_PUBKEY_HEX`
+in `crates/arioso-models/src/manifest.rs` and commit the `.sig` beside the manifest. The
+private key never enters the repository.
+
+A build with that constant set refuses to load a manifest whose `.sig` is missing or does
+not verify, and names the file it wanted. A build with the constant empty loads the
+manifest as `Unsigned`, says so in `arioso doctor`, and warns at startup. A new key
+invalidates every signature made with the old one; the old public key stays compiled into
+the releases that already exist, and one build carries exactly one key.
 
 ## Voices
 

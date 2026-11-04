@@ -28,20 +28,27 @@ signed, so the compiled key is empty, so nothing is ever verified.
 
 ### What to add
 
-1. `arioso models keygen [--out PATH]` mints an Ed25519 keypair. It writes the private key to
-   `PATH` with mode `0600`, refuses to overwrite an existing file, and prints the public key
-   as lowercase hex on stdout, which is the exact string that goes into `RELEASE_PUBKEY_HEX`.
-   The private key file is 32 raw bytes. It is never written anywhere else, never logged, and
-   never printed.
-2. `arioso models sign <manifest> --key PATH` writes `<manifest>.sig` as lowercase hex over
-   the manifest's bytes exactly as they sit on disk. It prints the path it wrote and the
-   public key the signature belongs to, so an operator can check that it matches the compiled
-   one before shipping.
-3. A test that signs a manifest with a generated key, verifies it, then tampers with one byte
-   and is refused. A test that a signature from a different key is refused. A test that a
-   missing `.sig` is refused when a key is compiled in, and reported as `Unsigned` when none
-   is.
-4. Documentation: how to mint a key, where the private half lives, and what rotation costs.
+- [x] `arioso models keygen [--out PATH]` mints an Ed25519 keypair. It writes the private key
+  to `PATH` with mode `0600`, refuses to overwrite an existing file, and prints the public key
+  as lowercase hex on stdout, which is the exact string that goes into `RELEASE_PUBKEY_HEX`.
+  The private key file is 32 raw bytes. It is never written anywhere else, never logged, and
+  never printed. (`365a574`, `d940f3a`)
+- [x] `arioso models sign <manifest> --key PATH` writes `<manifest>.sig` as lowercase hex over
+  the manifest's bytes exactly as they sit on disk. It prints the path it wrote and the public
+  key the signature belongs to, so an operator can check that it matches the compiled one
+  before shipping. (`365a574`, `d940f3a`)
+- [x] A test that signs a manifest with a generated key, verifies it, then tampers with one
+  byte and is refused. A test that a signature from a different key is refused. A test that a
+  missing `.sig` is refused when a key is compiled in, and reported as `Unsigned` when none
+  is. (`365a574`)
+- [x] Documentation: how to mint a key, where the private half lives, and what rotation costs.
+  (`d940f3a` in `README.md`, with the output shape corrected in the commit after it;
+  `aa38e70` in `docs/security.md`)
+- [ ] The signing step in `AGENTS.md`'s "Add a model" recipe. The edit was written and refused
+  by the tool policy that protects agent-instruction files, so it is still owed; the recipe
+  text lives in `README.md` under "Signing the manifest" until it can be applied.
+- [x] The startup warning for an unsigned manifest, which the "Rules the code has to keep"
+  section below requires and `doctor` alone did not provide. (`aa38e70`)
 
 ### Rules the code has to keep
 
@@ -145,6 +152,7 @@ void    arioso_free(void *pointer);
 ## Order of work
 
 1. Signing: the tools, the tests, the documentation. Small, self-contained, no new crate.
+   Done, except the `AGENTS.md` recipe step, which is owed and noted above.
 2. The C ABI: crate, header, Rust tests, C smoke test, CI wiring.
 3. PRD and `AGENTS.md` in the same commits as the behaviour they describe.
 

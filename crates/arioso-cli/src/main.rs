@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use arioso_config::Config;
 use arioso_g2p::CmuDict;
 use arioso_models::{
-    Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX, SignatureState,
-    models_dir, signature_path,
+    CheckedManifest, Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX,
+    SignatureState, generate_keypair, models_dir, sign_manifest_file, signature_path,
 };
 use arioso_tts_kokoro::KokoroVoice;
 use arioso_tts_piper::{PiperVoice, form_symbols};
@@ -108,6 +108,20 @@ enum ModelsCommand {
         /// Model id from the manifest.
         id: String,
     },
+    /// Mint the Ed25519 keypair that signs a released manifest.
+    Keygen {
+        /// Where to write the private key. Refuses a path that already exists.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Sign a manifest, writing the detached signature beside it as <manifest>.sig.
+    Sign {
+        /// Manifest to sign.
+        manifest: PathBuf,
+        /// Private key written by `arioso models keygen`.
+        #[arg(long)]
+        key: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,6 +152,8 @@ fn main() -> Result<()> {
                 },
             ),
             ModelsCommand::Download { id } => download(&config, &id),
+            ModelsCommand::Keygen { out } => keygen(out),
+            ModelsCommand::Sign { manifest, key } => sign(&manifest, &key),
         },
         Command::Doctor { strict } => doctor(&config, &config_path, strict),
         Command::Say {
@@ -195,13 +211,58 @@ fn manifest_path(config: &Config) -> PathBuf {
 }
 
 fn load_manifest(config: &Config) -> Result<Manifest> {
+    load_manifest_checked(config).map(|checked| checked.manifest)
+}
+
+/// Load the manifest and the signature state that loading it established.
+///
+/// [`load_manifest`] throws the state away, which is right for a command whose answer does
+/// not depend on it. `serve` keeps it, because an unsigned manifest is a fact the operator
+/// has to hear at startup rather than find later in `doctor`.
+fn load_manifest_checked(config: &Config) -> Result<CheckedManifest> {
     let path = manifest_path(config);
-    Manifest::load(&path).with_context(|| {
+    Manifest::load_checked(&path, &signature_path(&path), RELEASE_PUBKEY_HEX).with_context(|| {
         format!(
             "loading the model manifest at {} (place a manifest.json there)",
             path.display()
         )
     })
+}
+
+/// Where `arioso models keygen` writes when `--out` is left out.
+const DEFAULT_SIGNING_KEY: &str = "arioso-signing.key";
+
+/// Mint a release keypair, printing the public half and nothing else on stdout.
+///
+/// The private half goes to a file the operator chose, and nowhere else: not the log, not
+/// stderr, not a summary. The one line on stdout is the exact string that belongs in
+/// `RELEASE_PUBKEY_HEX`, so a release script can capture it without parsing prose.
+fn keygen(out: Option<PathBuf>) -> Result<()> {
+    let path = out.unwrap_or_else(|| PathBuf::from(DEFAULT_SIGNING_KEY));
+    let public = generate_keypair(&path)?;
+    println!("{public}");
+    eprintln!(
+        "private key written to {} (0600 on unix); never commit it",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Sign a manifest in place, writing `<manifest>.sig` beside it.
+///
+/// The public key is printed next to the path because the operator's next act is to compare
+/// it with the constant compiled into the build they are about to ship.
+fn sign(manifest: &Path, key: &Path) -> Result<()> {
+    let signed = sign_manifest_file(manifest, key)?;
+    println!("wrote {}", signed.signature_path.display());
+    println!("public key {}", signed.public_key_hex);
+    if !RELEASE_PUBKEY_HEX.trim().is_empty() && RELEASE_PUBKEY_HEX.trim() != signed.public_key_hex {
+        eprintln!(
+            "warning: this build compiles in {}, so it will refuse this signature",
+            RELEASE_PUBKEY_HEX
+        );
+    }
+    Ok(())
 }
 
 /// Which models `arioso models list` prints.
@@ -340,7 +401,18 @@ fn serve(config: Config, config_path: &Path) -> Result<()> {
 
 /// Serve in this process, reporting the port before serving it.
 fn serve_here(config: Config, config_path: &Path) -> Result<()> {
-    let manifest = load_manifest(&config)?;
+    let checked = load_manifest_checked(&config)?;
+    // Said here, at startup, because `doctor` is a command an operator runs on purpose and
+    // a release that ships without one is exactly the accident this line exists to stop.
+    if checked.signature == SignatureState::Unsigned {
+        tracing::warn!(
+            target: SIGNING_LOG_TARGET,
+            manifest = %manifest_path(&config).display(),
+            "the model manifest is unsigned: no release key is compiled into this build, \
+             so a swapped manifest would be accepted"
+        );
+    }
+    let manifest = checked.manifest;
     let sidecar = config.server.sidecar;
     let state = Arc::new(arioso_server::AppState::new(
         config.clone(),
@@ -1745,9 +1817,22 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
+/// Log target of the manifest-signature warning, and the directive that keeps it visible.
+///
+/// The default `log.level` is `error`, so a plain `warn` would be filtered out on exactly
+/// the installs that never changed it. A target directive is more specific than the global
+/// level and therefore wins, which makes this one line survive any level the operator chose.
+const SIGNING_LOG_TARGET: &str = "arioso::signing";
+const SIGNING_WARN_DIRECTIVE: &str = "arioso::signing=warn";
+
 fn init_tracing(config: &Config) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()));
+        .unwrap_or_else(|_| EnvFilter::new(config.log.level.clone()))
+        .add_directive(
+            SIGNING_WARN_DIRECTIVE
+                .parse()
+                .expect("a static filter directive"),
+        );
     // stderr unless the config names a file. stdout belongs to the caller: in sidecar mode
     // it carries the port line and nothing else, and a log line on that pipe would be read
     // as the port.
