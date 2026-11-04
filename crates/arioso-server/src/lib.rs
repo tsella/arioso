@@ -528,7 +528,10 @@ impl AppState {
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         self.note_download(&id, downloaded, total);
-                        if !progress(downloaded, total) {
+                        // The callback's answer is "stop". Reading it the other way round
+                        // ended every download at its first tick with "cancelled", which is
+                        // exactly what a caller that asked to continue was told.
+                        if progress(downloaded, total) {
                             abort.abort();
                             return Err("the download was cancelled".to_owned());
                         }

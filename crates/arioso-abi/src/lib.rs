@@ -624,12 +624,15 @@ pub unsafe extern "C" fn arioso_model_download(
         let mut cancelled = false;
         let result = state.download_blocking(id, |received, total| {
             let Some(callback) = on_progress else {
-                return true;
+                // No callback is no reason to stop.
+                return false;
             };
             // Safety: the callback is the caller's, and `user` is theirs to keep valid.
             let answer = unsafe { callback(received, total, user) };
             cancelled = answer != 0;
-            !cancelled
+            // The C contract is "return 0 to continue, nonzero to stop", which is the same
+            // answer this closure must give.
+            cancelled
         });
         if cancelled {
             return Err(ARIOSO_CANCELLED);
