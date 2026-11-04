@@ -34,10 +34,20 @@ fn parsing_costs_a_bounded_amount_per_entry() {
     let (parsed, stats) = measure(|| CmuDict::parse(&text));
     eprintln!("parse 126k entries: {stats:?}");
     assert!(parsed.lookup("hello").is_some());
+    // One key and one pronunciation per entry. A word with a single form holds no vector,
+    // so nothing is paid for a capacity that entry never uses.
     let per_entry = stats.allocations / 126_052;
     assert!(
-        per_entry <= 4,
+        per_entry <= 2,
         "parsing costs {per_entry} allocations per entry: {stats:?}"
+    );
+    // Bytes as well as calls: the point of the inline form is memory. A `Vec` per entry
+    // cost 198 bytes an entry, most of it the pointer, capacity and length of a one-element
+    // vector and the wider map slot that held them.
+    let bytes_per_entry = stats.bytes / 126_052;
+    assert!(
+        bytes_per_entry <= 102,
+        "parsing costs {bytes_per_entry} bytes per entry: {stats:?}"
     );
 }
 
