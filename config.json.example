@@ -29,6 +29,7 @@
     "engine": "piper",
     "voice": "en_US-joe-medium",
     "speed": 1.0,
+    "sid": 0,
     "format": "wav",
     "dictionary": null,
     "time_of_day": true

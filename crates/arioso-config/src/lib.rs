@@ -634,6 +634,12 @@ impl Config {
                 message: e.to_string(),
             })?;
         }
+        if let Some(v) = get("ARIOSO_TTS_SID") {
+            self.tts.sid = v.parse::<i64>().map_err(|e| ConfigError::Invalid {
+                path: "ARIOSO_TTS_SID".into(),
+                message: e.to_string(),
+            })?;
+        }
         if let Some(v) = get("ARIOSO_TTS_DICTIONARY") {
             self.tts.dictionary = Some(PathBuf::from(v));
         }
@@ -774,6 +780,15 @@ impl Config {
                 message: format!("expected 0.5 to 2.0, got {}", self.tts.speed),
             });
         }
+        // The routes refuse a speaker number outside this range, so a config that names one
+        // has to be refused here too: otherwise it loads, `doctor` calls it valid, and the
+        // first request is the thing that fails.
+        if !(0..=4095).contains(&self.tts.sid) {
+            return Err(ConfigError::Invalid {
+                path: "tts.sid".into(),
+                message: format!("expected 0 to 4095, got {}", self.tts.sid),
+            });
+        }
         if self.log.retention_days == 0 {
             return Err(ConfigError::Invalid {
                 path: "log.retention_days".into(),
@@ -876,13 +891,86 @@ mod tests {
         PathBuf::from("<test>")
     }
 
+    /// Every key path in a JSON document, so a key the example omits shows up as a
+    /// difference.
+    fn key_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    out.push(path.clone());
+                    key_paths(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    key_paths(item, prefix, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn the_example_config_is_the_defaults() {
         // The example is what a new user copies, so a default that moves without it
         // leaves a file that claims to be complete and is not.
         let text = include_str!("../../../config.json.example");
+        let example: serde_json::Value = serde_json::from_str(text).expect("the example parses");
+        let defaults = serde_json::to_value(Config::default()).expect("the defaults serialize");
+
+        // The keys are compared as well as the values, because every section carries
+        // `#[serde(default)]`: a key the example is missing is filled from the very
+        // defaults it documents, so parsing alone would pass without the key ever being
+        // written down.
+        let mut example_keys = Vec::new();
+        key_paths(&example, "", &mut example_keys);
+        example_keys.sort();
+        let mut default_keys = Vec::new();
+        key_paths(&defaults, "", &mut default_keys);
+        default_keys.sort();
+        assert_eq!(example_keys, default_keys, "the example names every field");
+
+        // Values are compared through `Config`, which compares the `f32` threshold as the
+        // number it is rather than as the decimal JSON writes.
         let parsed: Config = serde_json::from_str(text).expect("the example parses");
         assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn a_speaker_number_outside_the_route_range_is_refused() {
+        // The routes answer 422 for a sid outside 0 to 4095, and the config used to load
+        // one anyway, so `doctor` called a config valid that no request could use.
+        for sid in ["-1", "99999"] {
+            let json = format!(r#"{{"tts":{{"sid":{sid}}}}}"#);
+            let err = Config::from_json(&json, &origin()).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("tts.sid"), "{sid}: {message}");
+        }
+        // Both ends of the range are usable.
+        for sid in ["0", "4095"] {
+            let json = format!(r#"{{"tts":{{"sid":{sid}}}}}"#);
+            let config = Config::from_json(&json, &origin()).expect("in range");
+            assert_eq!(config.tts.sid, sid.parse::<i64>().unwrap());
+        }
+    }
+
+    #[test]
+    fn the_speaker_number_can_come_from_the_environment() {
+        let mut cfg = Config::default();
+        cfg.apply_env(|k| (k == "ARIOSO_TTS_SID").then(|| "7".to_string()))
+            .unwrap();
+        assert_eq!(cfg.tts.sid, 7);
+
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_env(|k| (k == "ARIOSO_TTS_SID").then(|| "seven".to_string()))
+            .unwrap_err();
+        assert!(err.to_string().contains("ARIOSO_TTS_SID"));
     }
 
     #[test]
