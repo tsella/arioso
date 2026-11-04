@@ -364,10 +364,12 @@ impl KokoroVoice {
             }
             symbols.extend(group);
         }
-        if !symbols.is_empty() && self.vocab.id('.').is_some() {
-            // One stop per utterance: the model was trained on punctuated phonemes, and
-            // a run that ends without one stops in the middle of a breath.
-            symbols.push(".");
+        if let Some(stop) = closing_stop(text, &self.vocab).filter(|_| !symbols.is_empty()) {
+            // One stop per utterance: the model was trained on punctuated phonemes, and a
+            // run that ends without one stops in the middle of a breath. A run that
+            // already ends in a mark keeps its own, because a period on `Hello?` makes it
+            // a statement.
+            symbols.push(stop);
         }
         symbols
     }
@@ -414,6 +416,27 @@ fn sayable(symbols: &[&str], vocab: &Vocab) -> bool {
 fn collect(phonemes: &arioso_g2p::Phonemes, report: &mut RenderReport) {
     report.guessed.extend(phonemes.guessed.iter().cloned());
     report.missing.extend(phonemes.missing.iter().cloned());
+}
+
+/// The stop to end a run with, when the table has one.
+///
+/// Phonemization drops punctuation, so `Hello?` and `Hello.` reach the graph as the same
+/// symbols. The mark is taken from the text before that happens: the table's own `?` and
+/// `!` are used when the sentence ended with one, because the graph was trained with them
+/// and a period in their place turns a question into a statement. Anything else, and a
+/// sentence with no mark at all, gets a period.
+fn closing_stop(text: &str, vocab: &Vocab) -> Option<&'static str> {
+    let mark = match text.trim_end().chars().next_back() {
+        Some('!') => "!",
+        Some('?') => "?",
+        _ => ".",
+    };
+    if vocab.id(mark.chars().next()?).is_some() {
+        return Some(mark);
+    }
+    // A table without the mark the sentence ended with still gets a stop rather than
+    // none: a run with no stop at all is what this is here to avoid.
+    vocab.id('.').is_some().then_some(".")
 }
 
 /// A run with the pad frame at each end, which is the shape the graph was exported for.
@@ -529,6 +552,38 @@ mod tests {
             Some(wanted),
             "the first form the table can say is the one used"
         );
+    }
+
+    #[test]
+    fn a_sentence_keeps_the_mark_it_ends_with() {
+        let vocab = Vocab::from_config(r#"{"vocab":{"a":1,".":4,"!":5,"?":6," ":16}}"#).unwrap();
+        assert_eq!(closing_stop("Hello.", &vocab), Some("."));
+        assert_eq!(closing_stop("Hello!", &vocab), Some("!"));
+        assert_eq!(
+            closing_stop("Hello?", &vocab),
+            Some("?"),
+            "a question stays a question"
+        );
+        assert_eq!(
+            closing_stop("Hello", &vocab),
+            Some("."),
+            "a run with no mark gets a period"
+        );
+        assert_eq!(
+            closing_stop("Hello?  ", &vocab),
+            Some("?"),
+            "trailing space hides nothing"
+        );
+    }
+
+    #[test]
+    fn a_table_without_the_mark_falls_back_to_a_period() {
+        // A stripped table may have no `?`. The run still ends in something: no stop at
+        // all is the failure the period is there to prevent.
+        let partial = Vocab::from_config(r#"{"vocab":{"a":1,".":4}}"#).unwrap();
+        assert_eq!(closing_stop("Hello?", &partial), Some("."));
+        let bare = Vocab::from_config(r#"{"vocab":{"a":1}}"#).unwrap();
+        assert_eq!(closing_stop("Hello.", &bare), None);
     }
 
     #[test]
