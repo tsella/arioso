@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "piper-ar_JO-kareem-low",
+      "kind": "tts",
+      "engine": "piper",
+      "version": "2026.11",
+      "license": "unknown",
+      "commercial_use": false,
+      "files": [
+        {
+          "name": "ar_JO-kareem-low.onnx",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/low/ar_JO-kareem-low.onnx",
+          "sha256": "2887e9d68b125965c747e1371fa21e1cef19555ea98d0795a0d5d71188b13890",
+          "size": 63201294
+        },
+        {
+          "name": "ar_JO-kareem-low.onnx.json",
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/low/ar_JO-kareem-low.onnx.json",
+          "sha256": "da328e52896826135508f797c1c77b45b35117e967c71befc377d654f100f328",
+          "size": 5022
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "languages": [
+          "ar-JO"
+        ],
+        "num_speakers": 1,
+        "quality": "low",
+        "license_text": "See URL",
+        "finetuned_from": "U.S English lessac voice"
+      }
+    }
+  ]
+}
