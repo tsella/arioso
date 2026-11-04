@@ -1341,7 +1341,12 @@ impl RotatingLog {
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(today, |since| since.as_secs() / SECONDS_PER_DAY);
-        Self::with_day(path, retention_days, day)
+        let log = Self::with_day(path.clone(), retention_days, day)?;
+        // Pruning used to happen only inside a roll, so a process that started after a gap
+        // never pruned anything and the files from the days it was not running stayed
+        // forever. One pass here is what makes the window hold across restarts.
+        prune_old_logs(&path, today(), retention_days);
+        Ok(log)
     }
 
     fn with_day(path: PathBuf, retention_days: u32, day: u64) -> std::io::Result<Self> {
@@ -1646,6 +1651,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "day two\n");
         let rotated = dir.path().join(format!("arioso.log.{}", date_of(20_000)));
         assert_eq!(std::fs::read_to_string(rotated).unwrap(), "day one\n");
+    }
+
+    #[test]
+    fn a_fresh_start_prunes_rotated_logs_past_the_window() {
+        // Pruning only ran on a roll, so a process that started on a new day with a file
+        // it had just created never pruned: the logs from the days it was not running
+        // stayed until a rollover happened to catch them, which is never.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("arioso.log");
+        let now = today();
+        let stale = dir
+            .path()
+            .join(format!("arioso.log.{}", date_of(now.saturating_sub(30))));
+        let recent = dir
+            .path()
+            .join(format!("arioso.log.{}", date_of(now.saturating_sub(1))));
+        std::fs::write(&stale, "stale\n").unwrap();
+        std::fs::write(&recent, "recent\n").unwrap();
+
+        let _log = RotatingLog::open(path.clone(), 7).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "a log past the window survived a fresh start"
+        );
+        assert!(recent.exists(), "a log inside the window was removed");
+        assert!(path.exists(), "the active file is there");
     }
 
     #[test]
