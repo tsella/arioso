@@ -34,7 +34,7 @@ const FAINT: Color = Color::Indexed(238);
 const CREAM: Color = Color::Indexed(223);
 
 /// How wide the wordmark is, including the two columns of margin before it.
-const MARK_WIDTH: u16 = 40;
+const MARK_WIDTH: u16 = 32;
 
 /// Below this width the mark is dropped and the signal takes the row.
 ///
@@ -152,15 +152,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The rows fade downwards, cream to petrol to a darker shade, so the mark looks lit from
 /// above instead of stamped.
 fn draw_wordmark(frame: &mut Frame, area: Rect) {
-    // One glyph at a time, each padded to its own width and set against its neighbour with
-    // no gap, so the word reads as one mark rather than six letters in a row. The glyphs are
-    // a, r, i, o, s, o: six separate shapes, because a word that has to be guessed at is not
-    // a mark.
+    // figlet's standard font, which already sets the letters against each other: the `r`'s
+    // right bar is the `i`'s stem, and the `i`'s stem is the `o`'s left edge, so one stroke
+    // serves two letters. This is that font's output, not a hand-kerning of it.
+    //
+    // It is four rows where the font uses five, because the `i`'s dot is set on the same row
+    // as the top of the letters beside it. A header is not a poster.
     const MARK: [&str; 4] = [
-        "  __ _  _ __  (_)   ___   ___   ___",
-        " / _` || '__| | |  / _ \\ / __| / _ \\",
-        "| (_| || |    | | | (_) |\\__ \\| (_) ||",
-        " \\__,_||_|    |_|  \\___/ |___/ \\___/",
+        "  __ _ _ __(_) ___  ___  ___",
+        " / _` | '__| |/ _ \\/ __|/ _ \\",
+        "| (_| | |  | | (_) \\__ \\ (_) |",
+        " \\__,_|_|  |_|\\___/|___/\\___/",
     ];
     let lines: Vec<Line> = MARK
         .iter()
