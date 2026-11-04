@@ -2426,15 +2426,24 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// The config as JSON, with floats written the way the file writes them.
+/// A patch response: the config document, with a `notes` array beside it when a change
+/// needs saying.
 ///
-/// `to_value` turns an f32 into an f64, so a speed of 1.4 comes back as
-/// 1.399999976158142. Serialising to text first uses the f32 formatter and keeps 1.4.
-fn config_json(config: &Config) -> serde_json::Value {
-    serde_json::to_string(config)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+/// The config is flattened rather than nested, so every field a client already reads stays
+/// where it was, and the response is serialised straight from the struct — one pass, in the
+/// declaration order `GET /v1/config` sends. The document used to be serialised to text,
+/// parsed back into a `Value`, given its note, and serialised again by Axum: three passes
+/// and a tree for one body.
+///
+/// The floats matter: `to_value` turns an f32 into an f64, so a speed of 1.4 would come
+/// back as 1.399999976158142. A struct serialises through the f32 formatter and keeps 1.4.
+#[derive(Serialize)]
+struct ConfigResponse<'a> {
+    #[serde(flatten)]
+    config: &'a Config,
+    /// What was replaced without being asked for. Absent when nothing was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<Vec<String>>,
 }
 
 /// Stop the server gracefully.
@@ -2534,7 +2543,7 @@ async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
 async fn patch_config(
     State(state): State<Arc<AppState>>,
     Json(patch): Json<ConfigPatch>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let persist = patch.persist;
     // One deep copy per patch: patches are rare, reads are not.
     let mut next = (*state.config()).clone();
@@ -2557,27 +2566,35 @@ async fn patch_config(
         })?;
     }
 
-    let mut body = config_json(&next);
-    if let Some((was, is)) = &touched.voice_defaulted {
-        // Said, not silent: the caller named an engine and got a voice with it. The note
-        // sits beside the config document rather than inside it, so every field a client
-        // already reads stays where it was.
-        if let Some(document) = body.as_object_mut() {
-            document.insert(
-                "notes".to_string(),
-                serde_json::json!([format!(
-                    "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
-                    next.tts.engine
-                )]),
-            );
+    // Said, not silent: the caller named an engine and got a voice with it. The note sits
+    // beside the config document rather than inside it, so every field a client already
+    // reads stays where it was.
+    let notes = touched.voice_defaulted.as_ref().map(|(was, is)| {
+        vec![format!(
+            "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
+            next.tts.engine
+        )]
+    });
+    let body = match serde_json::to_vec(&ConfigResponse {
+        config: &next,
+        notes,
+    }) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::error!(%error, "the config could not be serialised");
+            return Err(ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "the config could not be written; the server log has the detail",
+            ));
         }
-    }
+    };
     state.set_config(next);
     state.retarget_voice(touched.voice);
     if touched.stt {
         state.drop_stt();
     }
-    Ok(Json(body))
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 /// The API document for this server, as it stands.
@@ -3504,9 +3521,9 @@ async fn transcribe_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arioso_core::alloc_count::measure;
     use axum::body::Body;
     use axum::http::Request;
-    use arioso_core::alloc_count::measure;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -4130,6 +4147,66 @@ mod tests {
         // Everything else is untouched.
         assert_eq!(state.config().tts.voice, before.tts.voice);
         assert_eq!(state.config().tts.format, before.tts.format);
+    }
+
+    #[tokio::test]
+    async fn a_patch_body_is_the_config_document_byte_for_byte() {
+        // The response is the config struct serialised once, with the note flattened in
+        // beside it. A client that reads a field must see the same document as before,
+        // including the float: 1.4 is written by the f32 formatter, not as the f64 it
+        // widens to.
+        let (state, _dir) = state();
+        let (status, body) = call(
+            router(state.clone()),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"tts":{"speed":1.4}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(
+            text,
+            serde_json::to_string(&*state.config()).unwrap(),
+            "the body is the document, unchanged"
+        );
+        assert!(text.contains(r#""speed":1.4"#), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_replaces_a_voice_says_so_beside_the_document() {
+        // The note is the one thing the response adds. It sits after every config field,
+        // so nothing a client already reads moves.
+        let (state, _dir) = state();
+        // A named voice, so the switch to the other engine replaces it and owes a note.
+        let (status, _) = patch(state.clone(), r#"{"tts":{"voice":"en_US-lessac-medium"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            router(state.clone()),
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"tts":{"engine":"kokoro"}}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = String::from_utf8(body).unwrap();
+        let document = serde_json::to_string(&*state.config()).unwrap();
+        let fields = document.strip_suffix('}').expect("a document is an object");
+        assert!(
+            text.starts_with(fields),
+            "every config field is where it was: {text}"
+        );
+        let notes = text
+            .strip_prefix(fields)
+            .expect("the note follows the fields");
+        assert!(notes.starts_with(r#","notes":["#), "{notes}");
+        assert!(notes.ends_with("]}"), "{notes}");
     }
 
     #[tokio::test]
