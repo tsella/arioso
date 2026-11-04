@@ -1,0 +1,65 @@
+name: mobile
+
+# The engine crates are not in these jobs on purpose. arioso-tts-piper links a
+# prebuilt ONNX Runtime and arioso-stt-sherpa links prebuilt sherpa-onnx; each needs
+# a native build for the target, and this repository does not wire one for iOS or
+# Android. The five crates checked here need no prebuilt native library: the native
+# code they do pull in (ring's C and assembly, through rustls) is compiled from
+# source by its build script with the target C toolchain, which both jobs provide.
+# So the check is a real check: if one stops compiling for a phone, the job fails.
+#
+# No continue-on-error. A job that cannot fail is not a check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    name: aarch64-apple-ios
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-ios
+      - name: cargo check
+        run: >
+          cargo check
+          -p arioso-config -p arioso-models -p arioso-g2p -p arioso-core -p arioso-vad
+          --target aarch64-apple-ios
+
+  android:
+    name: aarch64-linux-android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-android
+      - name: cargo check
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner image preinstalls the NDK and exports ANDROID_NDK_HOME.
+          # Resolve it instead of pinning a version, because the label moves.
+          ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [ -z "$ndk" ]; then
+            ndk="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | sort -V | tail -n 1)"
+          fi
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # The API-21 wrapper is the documented spelling; the unversioned one is
+          # the fallback in case a later NDK drops the versioned name.
+          cc="$bin/aarch64-linux-android21-clang"
+          if [ ! -x "$cc" ]; then cc="$bin/aarch64-linux-android-clang"; fi
+          test -x "$cc" || { echo "no NDK clang wrapper under $bin" >&2; exit 1; }
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
+          export CC_aarch64_linux_android="$cc"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          cargo check -p arioso-config -p arioso-models -p arioso-g2p -p arioso-core -p arioso-vad --target aarch64-linux-android

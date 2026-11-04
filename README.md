@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/tsella/arioso/actions/workflows/ci.yml/badge.svg)](https://github.com/tsella/arioso/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-lightgrey)
+![platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows%20%7C%20iOS%20arm64%20%7C%20Android%20arm64-lightgrey)
 ![inference](https://img.shields.io/badge/inference-local-brightgreen)
 
 Speech out of text, and text out of speech, on your own machine. No account, no API key,
@@ -45,10 +45,14 @@ Working today:
 - Spelling rules for words the dictionary does not hold, reported, never silent
 - Speech to text: Parakeet or Whisper through sherpa-onnx, batch, from a WAV file
 - `arioso doctor`, which says what is wrong before a request fails
+- The crates that need no prebuilt native library compile for `aarch64-apple-ios` and
+  `aarch64-linux-android` in CI
 - 288 tests
 
 Not built yet:
 
+- The Piper and sherpa-onnx engines on iOS and Android: each links a prebuilt native library
+  that needs a build for the target, and no such build is wired here yet
 - Silero voice activity detection, which the PRD names as the default over the energy
   detector that ships
 - A streaming Zipformer model, so partials come from a streaming engine instead of
