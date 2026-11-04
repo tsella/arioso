@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version written by this build.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Audio formats this binary can produce.
 ///
@@ -250,7 +250,13 @@ pub struct Tts {
     /// Engine id: `piper` or `kokoro`.
     pub engine: String,
     /// Voice id understood by the engine.
-    pub voice: String,
+    ///
+    /// Absent means the engine's own default, which is what a config that never named a
+    /// voice should get. The two engines do not share names — a Piper voice is a catalog id
+    /// and a Kokoro voice is a style inside one archive — so a single stored default would
+    /// be wrong for whichever engine did not choose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
     /// Speaking rate multiplier.
     pub speed: f32,
     /// Speaker number on a multi-speaker voice. Voices with one speaker ignore it.
@@ -281,9 +287,7 @@ impl Default for Tts {
         Self {
             enabled: true,
             engine: "piper".into(),
-            // The same voice `default_voice("piper")` names, so a config that switches
-            // engines and one that starts fresh land on the same default.
-            voice: PIPER_DEFAULT_VOICE.into(),
+            voice: None,
             speed: 1.0,
             sid: 0,
             format: "wav".into(),
@@ -600,6 +604,7 @@ impl Config {
             source,
         })?;
         cfg.fold_legacy_limits();
+        cfg.migrate();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -679,7 +684,7 @@ impl Config {
             self.tts.time_of_day = parse_bool(&v, "ARIOSO_TTS_TIME_OF_DAY")?;
         }
         if let Some(v) = get("ARIOSO_TTS_VOICE") {
-            self.tts.voice = v;
+            self.tts.voice = (!v.is_empty()).then_some(v);
         }
         if let Some(v) = get("ARIOSO_STT_ENABLED") {
             self.stt.enabled = parse_bool(&v, "ARIOSO_STT_ENABLED")?;
@@ -715,6 +720,36 @@ impl Config {
             return directory.join("dictionary.json");
         }
         PathBuf::from("dictionary.json")
+    }
+
+    /// The voice this config speaks with: the one it names, or the engine's own default.
+    ///
+    /// A config that names no voice is not a config with a missing value. The two engines do
+    /// not share voice names, so the only sensible default is the one belonging to the
+    /// engine that will speak.
+    #[must_use]
+    pub fn voice_name(&self) -> &str {
+        self.tts
+            .voice
+            .as_deref()
+            .or_else(|| default_voice(&self.tts.engine))
+            .unwrap_or_default()
+    }
+
+    /// Bring a document written by an older build up to this one.
+    ///
+    /// Version 1 wrote `tts.voice: en_US-joe-medium` into every config, because there was
+    /// one engine and one default. That value was never a choice, and leaving it in place
+    /// would pin every upgraded config to a Piper voice it did not pick, so a version 1
+    /// document that still holds exactly the old default is cleared. Anything else in the
+    /// field is a choice and is kept.
+    fn migrate(&mut self) {
+        if self.schema_version == 1 {
+            if self.tts.voice.as_deref() == Some(PIPER_DEFAULT_VOICE) {
+                self.tts.voice = None;
+            }
+            self.schema_version = SCHEMA_VERSION;
+        }
     }
 
     /// Validate every field, naming the offending path.
@@ -939,6 +974,13 @@ mod tests {
         match value {
             serde_json::Value::Object(map) => {
                 for (key, child) in map {
+                    // A null in the example is a field with no value, and a field with no
+                    // value is what the defaults leave out: `tts.voice` is written null so
+                    // a reader learns it exists and is unset, and serializing the default
+                    // omits it entirely.
+                    if child.is_null() {
+                        continue;
+                    }
                     let path = if prefix.is_empty() {
                         key.clone()
                     } else {
@@ -955,6 +997,51 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn a_config_that_names_no_voice_speaks_with_its_engine_default() {
+        // The two engines do not share voice names, so a single stored default would be
+        // wrong for whichever engine did not choose it. The default belongs to the engine.
+        let mut config = Config::default();
+        assert_eq!(config.tts.voice, None);
+        assert_eq!(config.voice_name(), "en_US-joe-medium");
+
+        config.tts.engine = "kokoro".to_string();
+        assert_eq!(config.voice_name(), "af_heart");
+    }
+
+    #[test]
+    fn a_named_voice_is_used_as_written() {
+        let mut config = Config::default();
+        config.tts.voice = Some("en_US-lessac-medium".to_string());
+        assert_eq!(config.voice_name(), "en_US-lessac-medium");
+    }
+
+    #[test]
+    fn a_version_one_config_is_migrated_rather_than_refused() {
+        // Version 1 wrote the one default into every file, so an upgraded config would
+        // otherwise be pinned to a Piper voice it never picked.
+        let path = origin();
+        let config = Config::from_json(
+            r#"{"schema_version":1,"tts":{"engine":"kokoro","voice":"en_US-joe-medium"}}"#,
+            &path,
+        )
+        .expect("a version 1 document loads");
+        assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert_eq!(config.tts.voice, None);
+        assert_eq!(config.voice_name(), "af_heart");
+    }
+
+    #[test]
+    fn a_version_one_config_that_chose_a_voice_keeps_it() {
+        let path = origin();
+        let config = Config::from_json(
+            r#"{"schema_version":1,"tts":{"voice":"en_US-lessac-medium"}}"#,
+            &path,
+        )
+        .expect("a version 1 document loads");
+        assert_eq!(config.tts.voice.as_deref(), Some("en_US-lessac-medium"));
     }
 
     #[test]
@@ -1057,7 +1144,7 @@ mod tests {
         // A voice belongs to one engine, so the defaults cannot be the same string: the
         // one a change of engine falls back to has to be sayable by the engine it is for.
         let default = Config::default();
-        assert_eq!(default_voice("piper"), Some(default.tts.voice.as_str()));
+        assert_eq!(default_voice("piper"), Some(default.voice_name()));
         assert_eq!(default_voice("kokoro"), Some("af_heart"));
         assert_eq!(default_voice("espeak"), None, "an engine with no default");
         assert_ne!(default_voice("piper"), default_voice("kokoro"));

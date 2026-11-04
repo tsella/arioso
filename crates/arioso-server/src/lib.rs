@@ -573,16 +573,16 @@ impl AppState {
     /// `tts.voice` names a row inside its archive.
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
         let config = self.config();
-        let voice = &config.tts.voice;
+        let voice = config.voice_name().to_string();
         let found = if config.tts.engine == "kokoro" {
             self.manifest
                 .models
                 .iter()
                 .find(|model| model.engine == "kokoro" && model.kind == Kind::Tts)
         } else {
-            self.manifest.find_voice(voice)
+            self.manifest.find_voice(&voice)
         };
-        found.ok_or_else(|| ServerError::NoVoice(voice.clone()))
+        found.ok_or(ServerError::NoVoice(voice))
     }
 
     /// The voice readiness reports, and whether it can be spoken.
@@ -599,13 +599,14 @@ impl AppState {
         let Ok(spec) = self.voice_spec() else {
             // A voice the catalog does not hold is not installed, and naming it is what
             // tells the caller which value to change.
-            return Some((config.tts.voice.clone(), false));
+            return Some((config.voice_name().to_string(), false));
         };
         if config.tts.engine == "kokoro" {
+            let named = config.voice_name();
             let present = self.is_installed(spec)
                 && archive_names(&self.models_dir, spec)
-                    .is_some_and(|names| names.contains(&config.tts.voice));
-            return Some((config.tts.voice.clone(), present));
+                    .is_some_and(|names| names.contains(&named.to_string()));
+            return Some((named.to_string(), present));
         }
         Some((spec.id.clone(), self.is_installed(spec)))
     }
@@ -625,7 +626,7 @@ impl AppState {
             let symbols = self
                 .file_of(spec, "config.json")
                 .map_err(TtsFailure::Engine)?;
-            let voice = config.tts.voice.clone();
+            let voice = config.voice_name().to_string();
             let loaded =
                 KokoroVoice::load(&model, &voices, &symbols, &voice).map_err(
                     |error| match error {
@@ -2188,13 +2189,18 @@ impl ConfigPatch {
                 touched.voice = true;
             }
             if let Some(voice) = tts.voice {
-                config.tts.voice = voice;
+                // An empty string is how a caller clears a named voice and hands the
+                // choice back to the engine.
+                config.tts.voice = (!voice.is_empty()).then_some(voice);
                 touched.voice = true;
             }
-            if let (Some(engine), false) = (&changed_engine, named_voice) {
-                if let Some(default) = arioso_config::default_voice(engine) {
-                    let was = std::mem::replace(&mut config.tts.voice, default.to_string());
-                    touched.voice_defaulted = Some((was, default.to_string()));
+            // A new engine cannot say the old engine's voice, and the caller did not name
+            // one, so the field is cleared rather than filled: the engine's own default
+            // applies, and the config does not end up naming a voice nobody chose.
+            if let (Some(_), false) = (&changed_engine, named_voice) {
+                let was = config.tts.voice.take();
+                if let Some(was) = was {
+                    touched.voice_defaulted = Some((was, config.voice_name().to_string()));
                     touched.voice = true;
                 }
             }
@@ -2521,14 +2527,15 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             .iter()
             .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)
             .and_then(|model| archive_names(&state.models_dir, model));
-        archive.is_none_or(|names| names.contains(&config.tts.voice))
+        archive.is_none_or(|names| names.contains(&config.voice_name().to_string()))
     } else {
-        state.manifest.find_voice(&config.tts.voice).is_some()
+        state.manifest.find_voice(config.voice_name()).is_some()
     };
     if !voice_known {
         return Err(unprocessable(format!(
             "tts.voice {} is not one of the voices the {} engine has; GET /v1/voices lists what is",
-            config.tts.voice, config.tts.engine
+            config.voice_name(),
+            config.tts.engine
         )));
     }
     let model_known =
@@ -2574,7 +2581,7 @@ async fn list_voices(
     let active = state.voice_spec().ok().map(|spec| spec.id.clone());
     let config = state.config();
     let active_engine = config.tts.engine.clone();
-    let active_voice = config.tts.voice.clone();
+    let active_voice = config.voice_name().to_string();
     // Voice ids write en_GB and the catalog writes en-GB, so the separator must not
     // decide whether a client finds its language.
     let normalise = |language: &str| language.to_lowercase().replace('_', "-");
@@ -2650,7 +2657,7 @@ async fn list_voices(
                 num_speakers: 1,
                 speakers: None,
                 installed,
-                active: active_engine == "kokoro" && active_voice == name,
+                active: active_engine == "kokoro" && active_voice == *name,
             });
         }
     }
@@ -3983,23 +3990,45 @@ mod tests {
     #[tokio::test]
     async fn a_patch_that_changes_the_engine_brings_that_engine_a_voice() {
         // The two engines share no voice names, so a patch naming only the engine would
-        // leave `tts.voice` asking for something the new engine cannot say. It is set to
-        // the engine's default, and the response says so rather than changing it quietly.
+        // leave `tts.voice` asking for something the new engine cannot say. The field is
+        // cleared rather than filled: the new engine's own default answers for it, and the
+        // config does not end up naming a voice nobody chose. The response says what will
+        // be spoken rather than changing it quietly.
         let (state, _dir) = state();
-        assert_eq!(state.config().tts.voice, Config::default().tts.voice);
+
+        // A config that names no voice switches engines with nothing to say: the new
+        // engine's default was already the answer.
+        assert_eq!(state.config().tts.voice, None);
+        let (status, body) = patch(state.clone(), r#"{"tts":{"engine":"kokoro"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().voice_name(), "af_heart");
+        assert!(
+            body["notes"].as_array().is_none_or(Vec::is_empty),
+            "nothing was replaced, so nothing is owed: {body}"
+        );
+
+        // A config that named a Piper voice and is switched to Kokoro loses that voice, and
+        // that is worth a sentence: it says which voice went and which one speaks now.
+        let (status, _) = patch(state.clone(), r#"{"tts":{"engine":"piper"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = patch(state.clone(), r#"{"tts":{"voice":"en_US-lessac-medium"}}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.config().tts.voice.as_deref(),
+            Some("en_US-lessac-medium")
+        );
 
         let (status, body) = patch(state.clone(), r#"{"tts":{"engine":"kokoro"}}"#).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(state.config().tts.engine, "kokoro");
-        assert_eq!(state.config().tts.voice, "af_heart");
-        assert_eq!(body["tts"]["voice"], "af_heart");
+        assert!(
+            body["tts"]["voice"].is_null(),
+            "the stored field is cleared, not filled: {body}"
+        );
+        assert_eq!(state.config().voice_name(), "af_heart");
         let notes = body["notes"].as_array().expect("the change is said");
         let note = notes[0].as_str().unwrap();
         assert!(note.contains("af_heart"), "{note}");
-        assert!(
-            note.contains(Config::default().tts.voice.as_str()),
-            "{note}"
-        );
+        assert!(note.contains("en_US-lessac-medium"), "{note}");
     }
 
     #[tokio::test]
@@ -4013,7 +4042,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(state.config().tts.voice, "af_heart");
+        assert_eq!(state.config().voice_name(), "af_heart");
         assert!(body["notes"].is_null(), "{body}");
     }
 
@@ -4029,7 +4058,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(state.config().tts.engine, "kokoro");
-        assert_eq!(state.config().tts.voice, "af_heart");
+        assert_eq!(state.config().voice_name(), "af_heart");
     }
 
     #[tokio::test]
@@ -4283,7 +4312,7 @@ mod tests {
         let (state, _dir) = state();
         // Read from the config rather than naming the default, so changing the default is a
         // one line change and not a failure in a readiness test.
-        let expected = format!("piper-{}", state.config().tts.voice);
+        let expected = format!("piper-{}", state.config().voice_name());
         let (status, body) = call(
             router(state),
             Request::builder()
@@ -4356,7 +4385,7 @@ mod tests {
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
         config.tts.engine = "kokoro".to_owned();
-        config.tts.voice = "af_heart".to_owned();
+        config.tts.voice = Some("af_heart".to_owned());
         (
             Arc::new(AppState::new(config, manifest, None).unwrap()),
             dir,
@@ -4772,7 +4801,7 @@ mod tests {
         std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
-        config.tts.voice = "no-such-voice".into();
+        config.tts.voice = Some("no-such-voice".into());
         let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
         let state = Arc::new(AppState::new(config, manifest, None).unwrap());
 

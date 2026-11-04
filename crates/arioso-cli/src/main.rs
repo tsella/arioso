@@ -803,18 +803,31 @@ fn say(config: &Config, config_path: &Path, request: SayRequest<'_>) -> Result<(
 /// default stands in, and the note says which voice that is rather than leaving it to be
 /// found in the output.
 fn resolve_voice(config: &Config, engine: &str, voice: Option<&str>) -> (String, Option<String>) {
-    match voice {
-        Some(voice) => (voice.to_string(), None),
-        None if engine == config.tts.engine => (config.tts.voice.clone(), None),
-        None => match arioso_config::default_voice(engine) {
+    if let Some(voice) = voice {
+        return (voice.to_string(), None);
+    }
+    // The config already answers for its own engine: the voice it names, or that engine's
+    // default when it names none.
+    if engine == config.tts.engine {
+        return (config.voice_name().to_string(), None);
+    }
+    match config.tts.voice.as_deref() {
+        // Nothing was named, so nothing has to be replaced: the other engine simply uses
+        // its own default.
+        None => (
+            arioso_config::default_voice(engine)
+                .unwrap_or_default()
+                .to_string(),
+            None,
+        ),
+        Some(named) => match arioso_config::default_voice(engine) {
             Some(default) => (
                 default.to_string(),
                 Some(format!(
-                    "tts.voice is {}, which {engine} cannot say; speaking with its default voice {default}",
-                    config.tts.voice
+                    "tts.voice is {named}, which {engine} cannot say; speaking with its default voice {default}"
                 )),
             ),
-            None => (config.tts.voice.clone(), None),
+            None => (named.to_string(), None),
         },
     }
 }
@@ -1247,7 +1260,7 @@ fn doctor(config: &Config, config_path: &Path, strict: bool) -> Result<()> {
 fn voice_config_path(config: &Config, models: &Path) -> Option<PathBuf> {
     let manifest = load_manifest(config).ok()?;
     let file = manifest
-        .find_voice(&config.tts.voice)?
+        .find_voice(config.voice_name())?
         .files
         .iter()
         .find(|file| file.name.ends_with(".onnx.json"))?;
@@ -1341,7 +1354,7 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     let Some(inventory) = voice_inventory(config, models)? else {
         println!(
             "            voice {} is not installed, so entries were not checked",
-            config.tts.voice
+            config.voice_name()
         );
         return Ok(0);
     };
@@ -1388,7 +1401,7 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     if unusable.is_empty() {
         println!(
             "            every entry can be said by {}",
-            config.tts.voice
+            config.voice_name()
         );
         Ok(0)
     } else {
@@ -1816,7 +1829,7 @@ mod tests {
         std::fs::write(dir.path().join("manifest.json"), MANIFEST).unwrap();
         let mut config = Config::default();
         config.models.dir = Some(dir.path().to_path_buf());
-        config.tts.voice = "piper-en_US-lessac-medium".to_owned();
+        config.tts.voice = Some("piper-en_US-lessac-medium".to_owned());
         (dir, config)
     }
 
@@ -1824,7 +1837,7 @@ mod tests {
     fn a_voice_is_taken_from_the_flag_then_the_config_then_the_engine() {
         let (_dir, mut config) = fresh_install();
         config.tts.engine = "piper".to_owned();
-        config.tts.voice = "en_US-joe-medium".to_owned();
+        config.tts.voice = Some("en_US-joe-medium".to_owned());
 
         // The flag wins.
         let (voice, note) = resolve_voice(&config, "piper", Some("en_GB-alba-medium"));
@@ -1846,7 +1859,7 @@ mod tests {
 
         // And back: the Kokoro config's voice is not one Piper can say.
         config.tts.engine = "kokoro".to_owned();
-        config.tts.voice = "af_heart".to_owned();
+        config.tts.voice = Some("af_heart".to_owned());
         let (voice, note) = resolve_voice(&config, "piper", None);
         assert_eq!(voice, "en_US-joe-medium");
         assert!(note.is_some());
@@ -1953,7 +1966,7 @@ mod tests {
     #[test]
     fn a_voice_the_catalog_does_not_hold_has_no_config() {
         let (dir, mut config) = fresh_install();
-        config.tts.voice = "no-such-voice".to_owned();
+        config.tts.voice = Some("no-such-voice".to_owned());
         std::fs::write(dir.path().join("en_US-lessac-medium.onnx.json"), "{}").unwrap();
         assert_eq!(voice_config_path(&config, dir.path()), None);
     }

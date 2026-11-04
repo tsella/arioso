@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "server": {
     "bind": "127.0.0.1:10101",
     "auth": {
@@ -27,7 +27,7 @@
   "tts": {
     "enabled": true,
     "engine": "piper",
-    "voice": "en_US-joe-medium",
+    "voice": null,
     "speed": 1.0,
     "sid": 0,
     "format": "wav",

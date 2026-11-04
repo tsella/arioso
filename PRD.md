@@ -287,6 +287,17 @@ ready`, or `failed { reason }`.
   needs no espeak and no GPL code: `gpl-espeak` stays the only way to link espeak-ng,
   and it stays off by default. The cost is the one F3.2 already carries — names outside
   the dictionary are spelled by rule rather than by a phonemizer that knows them.
+- F3.3.2 The default voice belongs to the engine, not to the config. `tts.voice` is
+  optional: absent means the engine's own default (`en_US-joe-medium` for Piper,
+  `af_heart` for Kokoro), because the two engines share no voice names and a single
+  stored default would be wrong for whichever engine did not choose it. A voice the
+  config names is used as written and never replaced. Switching `tts.engine` without
+  naming a voice in the same patch clears the field, so the new engine's default
+  answers, and the response says which voice went and which one speaks now; when the
+  config named nothing there is nothing to say and no note is owed. Config documents
+  written by the previous schema are migrated: a version 1 file that still holds exactly
+  the old default is treated as having named nothing, because that value was never a
+  choice, and any other voice is kept.
 - F3.4 Controls: voice, speed (0.5 to 2.0), speaker (`sid`), and format (`wav`, `pcm`). `pcm` is raw
   16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
   `opus` are not implemented: the config refuses them rather than answering with WAV bytes

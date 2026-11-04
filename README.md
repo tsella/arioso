@@ -49,7 +49,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 381 tests
+- 385 tests
 
 Not built yet:
 
@@ -155,6 +155,10 @@ Five English voices, as a starting point:
 | `piper-en_US-joe-medium` | medium, the default | 22.05 kHz | CC0 | yes |
 | `piper-en_US-kathleen-low` | low | 16 kHz | CC0 | yes |
 | `piper-en_GB-alba-medium` | medium | 22.05 kHz | CC BY 4.0 | yes |
+
+The default voice belongs to the engine, so `tts.voice` may be left out: Piper answers with
+`en_US-joe-medium` and Kokoro with `af_heart`. A config that names a voice keeps it, and a
+config that names nothing follows whichever engine is loaded.
 
 Twenty-six voices are multi-speaker and take `--sid` or `"sid"` on the request; the names are in
 the catalog, so a picker does not have to ask for an integer. `piper-pt_PT-tugão-medium` is the
