@@ -614,21 +614,35 @@ impl AppState {
     ///
     /// One engine per process: the slot holds whichever `tts.engine` names, and a
     /// caller that changes it reloads rather than running both.
-    fn load_voice(&self) -> Result<Voice, String> {
-        let spec = self.voice_spec().map_err(|error| error.to_string())?;
+    fn load_voice(&self) -> Result<Voice, TtsFailure> {
+        let spec = self
+            .voice_spec()
+            .map_err(|error| TtsFailure::Client(error.to_string()))?;
         let config = self.config();
         if config.tts.engine == "kokoro" {
-            let model = self.file_of(spec, ".onnx")?;
-            let voices = self.file_of(spec, ".bin")?;
-            let symbols = self.file_of(spec, "config.json")?;
+            let model = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
+            let voices = self.file_of(spec, ".bin").map_err(TtsFailure::Engine)?;
+            let symbols = self
+                .file_of(spec, "config.json")
+                .map_err(TtsFailure::Engine)?;
             let voice = config.tts.voice.clone();
-            let loaded = KokoroVoice::load(&model, &voices, &symbols, &voice)
-                .map_err(|error| error.to_string())?;
+            let loaded =
+                KokoroVoice::load(&model, &voices, &symbols, &voice).map_err(
+                    |error| match error {
+                        // The archive does not hold the configured style. The model is fine;
+                        // the config names something that is not there.
+                        KokoroError::UnknownVoice { .. } => TtsFailure::Client(error.to_string()),
+                        other => TtsFailure::Engine(other.to_string()),
+                    },
+                )?;
             Ok(Voice::Kokoro(loaded))
         } else {
-            let onnx = self.file_of(spec, ".onnx")?;
-            let symbols = self.file_of(spec, ".onnx.json")?;
-            let loaded = PiperVoice::load(&onnx, &symbols).map_err(|error| error.to_string())?;
+            let onnx = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
+            let symbols = self
+                .file_of(spec, ".onnx.json")
+                .map_err(TtsFailure::Engine)?;
+            let loaded = PiperVoice::load(&onnx, &symbols)
+                .map_err(|error| TtsFailure::Engine(error.to_string()))?;
             Ok(Voice::Piper(loaded))
         }
     }
@@ -999,11 +1013,11 @@ impl AppState {
     ///
     /// The first synthesis pays for the model load; a caller that knows it is about to
     /// ask should be able to pay it earlier. Idempotent: a loaded voice is left alone.
-    pub(crate) fn warm_voice(&self) -> Result<(), String> {
+    pub(crate) fn warm_voice(&self) -> Result<(), TtsFailure> {
         let mut guard = self
             .voice
             .lock()
-            .map_err(|_| "the voice lock is poisoned".to_string())?;
+            .map_err(|_| TtsFailure::Engine("the voice lock is poisoned".to_string()))?;
         if guard.is_some() {
             return Ok(());
         }
@@ -1016,7 +1030,7 @@ impl AppState {
     /// A speaker the voice does not have is the caller's mistake, not an engine failure,
     /// so it is checked before the render and answered with a code a client can switch on.
     pub(crate) fn check_sid(&self, sid: i64) -> Result<(), String> {
-        self.warm_voice()?;
+        self.warm_voice().map_err(|error| error.to_string())?;
         let guard = self
             .voice
             .lock()
@@ -1050,7 +1064,7 @@ impl AppState {
             .lock()
             .map_err(|_| "the voice lock is poisoned".to_string())?;
         if guard.is_none() {
-            *guard = Some(self.load_voice()?);
+            *guard = Some(self.load_voice().map_err(|error| error.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
         let user = self.user_dictionary();
@@ -1244,6 +1258,22 @@ enum SttFailure {
     /// The model the config asks for is not downloaded.
     #[error("{0} is not installed")]
     NotInstalled(String),
+}
+
+/// Why the voice slot could not be filled.
+///
+/// The two are answered differently because they are different mistakes: a config naming
+/// a voice the engine cannot say is the caller's, and answers 422 so the caller can fix
+/// it; an engine that failed to load is the server's, and answers 500. Answered as one,
+/// a client is told to retry a request that can never succeed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TtsFailure {
+    /// The config names a voice, or a voice name, the engine cannot use.
+    #[error("{0}")]
+    Client(String),
+    /// The engine could not load or run.
+    #[error("{0}")]
+    Engine(String),
 }
 
 /// Request body for `POST /v1/tts`.
@@ -2807,7 +2837,8 @@ impl Drop for DeleteReservation {
     responses(
         (status = 200, description = "The model is loaded", body = serde_json::Value),
         (status = 404, description = "No such model", body = Problem),
-        (status = 409, description = "Not installed, or not a configured model", body = Problem)
+        (status = 409, description = "Not installed, or not a configured model", body = Problem),
+        (status = 422, description = "The configured voice is one the engine cannot say", body = Problem)
     )
 )]
 async fn warm_model(
@@ -2852,15 +2883,24 @@ async fn warm_model(
                 )
                     .into_response()
             }
-            Ok(Err(detail)) => {
-                tracing::error!(model = %id, %detail, "could not warm the voice");
-                ApiError::coded(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "load_failed",
-                    "the voice could not be loaded; the server log has the detail",
-                )
-                .into_response()
-            }
+            Ok(Err(failure)) => match failure {
+                // A config naming a voice the engine cannot say is the caller's mistake:
+                // it will fail the same way however many times it is retried.
+                TtsFailure::Client(detail) => {
+                    tracing::warn!(model = %id, %detail, "the configured voice cannot be spoken");
+                    ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", detail)
+                        .into_response()
+                }
+                TtsFailure::Engine(detail) => {
+                    tracing::error!(model = %id, %detail, "could not warm the voice");
+                    ApiError::coded(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "load_failed",
+                        "the voice could not be loaded; the server log has the detail",
+                    )
+                    .into_response()
+                }
+            },
             Err(join) => {
                 tracing::error!(model = %id, %join, "the warm task failed");
                 ApiError::coded(
@@ -4298,15 +4338,19 @@ mod tests {
         let archive = test_archive(voices);
         std::fs::write(dir.path().join("voices-v1.0.bin"), &archive).unwrap();
         std::fs::write(dir.path().join("kokoro-v1.0.onnx"), b"x").unwrap();
-        std::fs::write(dir.path().join("kokoro-config.json"), b"x").unwrap();
+        // A real symbol table, so a load reaches the archive before the graph: the graph
+        // itself is a byte and would fail as an ONNX session.
+        std::fs::write(
+            dir.path().join("kokoro-config.json"),
+            br#"{"vocab":{"a":1,".":4," ":16}}"#,
+        )
+        .unwrap();
         let mut manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
         for model in &mut manifest.models {
             for file in &mut model.files {
-                file.size = if file.name.ends_with(".bin") {
-                    archive.len() as u64
-                } else {
-                    1
-                };
+                file.size = std::fs::metadata(dir.path().join(&file.name))
+                    .unwrap()
+                    .len();
             }
         }
         let mut config = Config::default();
@@ -4357,6 +4401,32 @@ mod tests {
         assert_eq!(json["status"], "voice_missing");
         assert_eq!(json["voice"], "af_heart");
         assert_eq!(json["voice_installed"], false);
+    }
+
+    #[tokio::test]
+    async fn warming_a_voice_the_archive_does_not_hold_is_the_callers_error() {
+        // Every file is installed, so this is not a missing model, and no retry can make
+        // the style appear: the config names something the engine cannot say.
+        let (state, _dir) = kokoro_state(&[("am_michael", 2, 2)]);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/models/kokoro-82m/warm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "invalid_value");
+        let detail = json["detail"].as_str().unwrap();
+        assert!(detail.contains("af_heart"), "{detail}");
     }
 
     #[tokio::test]
