@@ -21,10 +21,11 @@ cargo build -p arioso-abi --profile c-abi --manifest-path "$root/Cargo.toml"
 
 # The C++ runtime is for the sherpa-onnx engine, which is C++ compiled to a static library
 # and carried inside the archive. The frameworks are what rustls and getrandom reach for on
-# macOS; a Linux build has no equivalent.
+# macOS, plus Foundation for the ONNX Runtime's own log sink, which calls NSLog. A Linux
+# build has no equivalent, and each framework named here is one the linker reported missing.
 case "$(uname -s)" in
     Linux) system="-lstdc++ -lpthread -ldl -lm" ;;
-    Darwin) system="-lc++ -framework Security -framework CoreFoundation" ;;
+    Darwin) system="-lc++ -framework Foundation -framework Security -framework CoreFoundation" ;;
     *)
         echo "abi/smoke.sh: no link line for $(uname -s)" >&2
         exit 1
