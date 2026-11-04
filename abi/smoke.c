@@ -15,6 +15,11 @@
  * Windows, where the C runtime has no such function and `cc` is not guaranteed to exist.
  */
 
+/* Darwin hides mkdtemp behind its own feature level even when the POSIX level is asked for,
+ * so the Apple build asks for the full C library. Both macros must come before any include. */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
