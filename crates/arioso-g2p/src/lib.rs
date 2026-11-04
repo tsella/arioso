@@ -5,12 +5,14 @@ pub mod cmudict;
 pub mod inflect;
 pub mod lts;
 pub mod reverse;
+pub mod text;
 
 use std::collections::HashMap;
 
 use thiserror::Error;
 
 pub use cmudict::CmuDict;
+pub use text::{Phonemes, is_arpabet, phonemes_for_form, phonemes_for_text};
 
 /// Why a phoneme table could not be built.
 #[derive(Debug, Error)]
