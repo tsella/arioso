@@ -52,7 +52,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 432 tests
+- 459 tests
 
 Not built yet:
 
@@ -67,10 +67,10 @@ Not built yet:
 
 - Rust 1.85 or newer, the floor the workspace declares. 1.91 is the only version this
   project builds and tests on
-- ONNX Runtime 1.22, unpacked into `vendor/onnxruntime`
+- ONNX Runtime 1.30.1, unpacked into `vendor/onnxruntime`
 - A Piper voice and the CMU dictionary, about 64 MiB together
 
-The Piper engine links against ONNX Runtime. Fetch the prebuilt 1.22.0 runtime once into
+The Piper engine links against ONNX Runtime. Fetch the prebuilt 1.30.1 runtime once into
 the workspace, where `.cargo/config.toml` and the linker both find it:
 
 ```bash
@@ -115,6 +115,28 @@ Then, from another shell:
 ```bash
 curl -s -X POST localhost:10101/v1/tts -H 'content-type: application/json' \
   -d '{"text": "hello world"}' -o out.wav
+```
+
+## The terminal front end
+
+`arioso-speaks` is a single window that speaks, shows the phonemes it is about to say, lets
+them be edited, and saves the audio as WAV or FLAC.
+
+```bash
+cargo run -p arioso-speaks            # reads the same config as the binary
+cargo run -p arioso-speaks -- --config /path/to/config.json
+```
+
+The left pane is the engine tabs and the voices; each row carries its size and its licence,
+and a voice that is not on disk offers a download instead of speech. The right pane is the
+text over the phonemes. An edited phoneme line is what gets spoken, and a symbol the voice
+cannot say is refused by name rather than quietly replaced.
+
+Playback is in process. On Linux that needs the ALSA development headers, which is one
+package:
+
+```bash
+sudo apt-get install libasound2-dev
 ```
 
 ## Commands

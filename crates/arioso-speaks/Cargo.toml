@@ -1,0 +1,29 @@
+[package]
+name = "arioso-speaks"
+description = "A terminal front end for arioso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "arioso-speaks"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+arioso-config.workspace = true
+arioso-core.workspace = true
+arioso-models.workspace = true
+arioso-server.workspace = true
+arioso-tts-piper.workspace = true
+arioso-tts-kokoro.workspace = true
+ratatui = "0.30"
+crossterm = "0.29"
+# Playback only: the decoders are off, because the samples come from the engine rather than
+# from a file. A terminal app that shipped a decoder would carry code no path reaches.
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+# Pure Rust, so the MIT licence of this workspace stays true of the binary.
+flacenc = "0.5"
