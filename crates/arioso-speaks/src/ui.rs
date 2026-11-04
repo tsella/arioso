@@ -34,7 +34,12 @@ const FAINT: Color = Color::Indexed(238);
 const CREAM: Color = Color::Indexed(223);
 
 /// How wide the wordmark is, including the two columns of margin before it.
-const MARK_WIDTH: u16 = 30;
+const MARK_WIDTH: u16 = 46;
+
+/// Below this width the mark is dropped and the signal takes the row.
+///
+/// A forty-three column mark in a sixty column window leaves a strip for everything else.
+const MARK_FLOOR: u16 = 70;
 
 /// Draw one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -66,11 +71,16 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .split(area);
 
-    // The mark on the left and the live signal on the right, sharing the rows.
-    let columns =
-        Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
-    draw_wordmark(frame, columns[0]);
-    draw_waveform(frame, columns[1], app);
+    // The mark on the left and the live signal on the right, sharing the rows. A window
+    // too narrow for both keeps the signal: it is the part that changes.
+    if area.width < MARK_FLOOR {
+        draw_waveform(frame, rows[0], app);
+    } else {
+        let columns =
+            Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
+        draw_wordmark(frame, columns[0]);
+        draw_waveform(frame, columns[1], app);
+    }
 
     // The rule carries the facts about the voice, right-aligned where the eye looks last.
     let voice = app.current_voice();
@@ -142,11 +152,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The rows fade downwards, cream to petrol to a darker shade, so the mark looks lit from
 /// above instead of stamped.
 fn draw_wordmark(frame: &mut Frame, area: Rect) {
+    // One glyph at a time, each padded to its own width, so the columns line up without
+    // the kerning the joined form of this font needs. The letters are a, r, i, o, s, o:
+    // six separate shapes, because a word that has to be guessed at is not a mark.
     const MARK: [&str; 4] = [
-        "  __ _ _ __(_)___  ___  ___",
-        " / _` | '__| / __|/ _ \\/ __|",
-        "| (_| | |  | \\__ \\ (_) \\__ \\",
-        " \\__,_|_|  |_|___/\\___/|___/",
+        "  __ _   _ __   (_)    ___    ___    ___   ",
+        " / _` | | '__|  | |   / _ \\  / __|  / _ \\  ",
+        "| (_| | | |     | |  | (_) | \\__ \\ | (_) | ",
+        " \\__,_| |_|     |_|   \\___/  |___/  \\___/  ",
     ];
     let lines: Vec<Line> = MARK
         .iter()
