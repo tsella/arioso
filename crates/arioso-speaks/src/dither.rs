@@ -15,6 +15,20 @@ pub const RAMP: [&str; 5] = [" ", "░", "▒", "▓", "█"];
 /// The level is scaled onto the ramp, and the matrix decides whether the fractional part
 /// rounds up for this cell. Two cells at the same level on the same row get the same glyph;
 /// the row above gets a different one, which is what makes the edge look halftoned.
+/// Whether this level puts a mark in the cell at all.
+///
+/// Silence draws nothing, so a caller that wants to know whether something is already in a
+/// cell asks this rather than comparing the glyph it got.
+#[must_use]
+pub fn has_ink(level: f32) -> bool {
+    level > 0.0
+}
+
+/// The glyph for one cell at `level` in `0.0..=1.0`.
+///
+/// The level is scaled onto the ramp, and the matrix decides whether the fractional part
+/// rounds up for this cell. Two cells at the same level on the same row get the same glyph;
+/// the row above gets a different one, which is what makes the edge look halftoned.
 #[must_use]
 pub fn cell(level: f32, row: usize, col: usize) -> &'static str {
     let scaled = level.clamp(0.0, 1.0) * (RAMP.len() - 1) as f32;

@@ -36,9 +36,8 @@ const CREAM: Color = Color::Indexed(223);
 /// How wide the wordmark is, including the two columns of margin before it.
 const MARK_WIDTH: u16 = 32;
 
-/// The word beside the mark, and the column it gets.
+/// The word that rides under the wave.
 const SPEAKS: &str = " s p e a k s";
-const SPEAKS_WIDTH: u16 = 13;
 
 /// Below this width the mark is dropped and the signal takes the row.
 ///
@@ -76,19 +75,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     .split(area);
 
     // The mark on the left and the live signal on the right, sharing the rows. A window
-    // too narrow for both keeps the signal: it is the part that changes.
+    // too narrow for both keeps the signal: it is the part that changes. The signal takes
+    // every column that is left, because a wave squeezed into a strip is a decoration.
     if area.width < MARK_FLOOR {
-        draw_waveform(frame, rows[0], app);
+        draw_signal(frame, rows[0], app);
     } else {
-        let columns = Layout::horizontal([
-            Constraint::Length(MARK_WIDTH),
-            Constraint::Length(SPEAKS_WIDTH),
-            Constraint::Min(8),
-        ])
-        .split(rows[0]);
+        let columns =
+            Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
         draw_wordmark(frame, columns[0]);
-        draw_speaks(frame, columns[1]);
-        draw_waveform(frame, columns[2], app);
+        draw_signal(frame, columns[1], app);
     }
 
     // The rule carries the facts about the voice, right-aligned where the eye looks last.
@@ -151,23 +146,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The word that says what the program is for, set beside the mark.
-///
-/// The mark is a name and a name alone does not say what it does. Tracked on the mark's third
-/// row, so the two read as one line rather than as a title with a subtitle under it.
-fn draw_speaks(frame: &mut Frame, area: Rect) {
-    let lines: Vec<Line> = (0..4)
-        .map(|row| {
-            if row == 2 {
-                Line::from(Span::styled(SPEAKS, Style::default().fg(PETROL)))
-            } else {
-                Line::from("")
-            }
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
 /// The mark.
 ///
 /// Letters made of block glyphs read as a fence at this size: an `a` and an `o` are both a
@@ -215,33 +193,57 @@ fn draw_wordmark(frame: &mut Frame, area: Rect) {
 /// middle. When nothing has been rendered yet it is a standby ripple: an idle screen with no
 /// motion reads as a hung program, and the ripple is labelled in the code as decoration so
 /// nobody later mistakes it for a level.
-fn draw_waveform(frame: &mut Frame, area: Rect, app: &App) {
+///
+/// The wave takes every column the header has left, and the word rides its bottom row. Where
+/// the word crosses a stroke the letter inverts — cream on petrol instead of petrol on the
+/// terminal — so it stays readable over a peak instead of dissolving into one.
+fn draw_signal(frame: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
+    let height = area.height.max(1) as usize;
     if width == 0 {
         return;
     }
     let live = app.player.playing();
-    let levels = if app.audio.is_none() && !live {
-        standby(width, app.frame)
-    } else {
+    let has_audio = live || app.audio.is_some();
+    let levels = if has_audio {
         app.player.levels(width)
+    } else {
+        standby(width, app.frame)
     };
-    let grid = dither::waveform_levels(&levels, area.height.max(1) as usize);
+    let grid = dither::waveform_levels(&levels, height);
     let playhead = if live { Some(width / 2) } else { None };
+
+    let caption_row = height - 1;
+    let caption: Vec<char> = SPEAKS.chars().collect();
 
     let lines: Vec<Line> = grid
         .iter()
         .enumerate()
         .map(|(row, cells)| {
-            let mut spans = Vec::with_capacity(cells.len() + 1);
+            let mut spans: Vec<Span> = Vec::with_capacity(cells.len());
             for (col, level) in cells.iter().enumerate() {
-                let glyph = dither::cell(*level, row, col);
+                if row == caption_row
+                    && let Some(letter) = caption.get(col)
+                    && *letter != ' '
+                {
+                    // A stroke is behind the letter: invert it rather than lose it.
+                    let style = if dither::has_ink(*level) {
+                        Style::default().fg(CREAM).bg(PETROL)
+                    } else {
+                        Style::default().fg(PETROL)
+                    };
+                    spans.push(Span::styled(letter.to_string(), style));
+                    continue;
+                }
                 let ink = if playhead == Some(col) {
                     CREAM
                 } else {
-                    waveform_ink(*level, live || app.audio.is_some())
+                    waveform_ink(*level, has_audio)
                 };
-                spans.push(Span::styled(glyph, Style::default().fg(ink)));
+                spans.push(Span::styled(
+                    dither::cell(*level, row, col),
+                    Style::default().fg(ink),
+                ));
             }
             Line::from(spans)
         })
