@@ -1,6 +1,6 @@
 //! Model manifest: what a model is, where its files come from, and how to trust them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,35 @@ impl Manifest {
     }
 }
 
+/// What a manifest load established about the document's signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureState {
+    /// No release public key is compiled into this build, so nothing could be checked.
+    Unsigned,
+    /// The detached signature verified against the compiled release key.
+    Verified,
+}
+
+/// A manifest, and the signature state that was proved while loading it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedManifest {
+    /// The parsed document.
+    pub manifest: Manifest,
+    /// Whether the signature was verified, or could not be checked at all.
+    pub signature: SignatureState,
+}
+
+/// Path of the detached signature belonging to a manifest file.
+///
+/// The sibling takes the manifest's whole file name and appends `.sig`, so
+/// `manifest.json` pairs with `manifest.json.sig`.
+#[must_use]
+pub fn signature_path(manifest: &Path) -> PathBuf {
+    let mut name = manifest.as_os_str().to_owned();
+    name.push(".sig");
+    PathBuf::from(name)
+}
+
 /// The catalog document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -142,17 +171,82 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Load a manifest from disk.
+    /// Load a manifest from disk, checking its detached signature.
+    ///
+    /// The signature is the sibling `<path>.sig`, read as lowercase hex, and the key is
+    /// [`RELEASE_PUBKEY_HEX`]. A build with no compiled key loads the manifest and cannot
+    /// tell whether it was signed, which is why [`Self::load_checked`] reports the state
+    /// it established.
     ///
     /// # Errors
     ///
-    /// Returns [`ManifestError::Io`] or [`ManifestError::Parse`].
+    /// Returns [`ManifestError::Io`], [`ManifestError::Parse`],
+    /// [`ManifestError::SignatureMissing`] or [`ManifestError::BadSignature`].
     pub fn load(path: &Path) -> Result<Self, ManifestError> {
+        Self::load_checked(path, &signature_path(path), RELEASE_PUBKEY_HEX)
+            .map(|checked| checked.manifest)
+    }
+
+    /// Load a manifest and enforce its detached signature.
+    ///
+    /// Three outcomes:
+    ///
+    /// - `pubkey_hex` is empty: the document is loaded and reported
+    ///   [`SignatureState::Unsigned`]. No release key is compiled into this build, so there
+    ///   is nothing to verify against.
+    /// - A key is supplied and `signature_path` does not exist: refused with
+    ///   [`ManifestError::SignatureMissing`], naming the file that was expected.
+    /// - A key is supplied and the signature does not verify: refused with
+    ///   [`ManifestError::BadSignature`], naming the file that was read.
+    ///
+    /// The bytes are verified before they are parsed, so a tampered document is reported as
+    /// a signature failure rather than as whatever field the tampering broke.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Io`] when the manifest cannot be read,
+    /// [`ManifestError::SignatureMissing`] when a key is present and no signature file is,
+    /// [`ManifestError::BadSignature`] when the signature does not match, and
+    /// [`ManifestError::Parse`] when the verified bytes are not a valid manifest.
+    pub fn load_checked(
+        path: &Path,
+        signature_path: &Path,
+        pubkey_hex: &str,
+    ) -> Result<CheckedManifest, ManifestError> {
         let bytes = std::fs::read(path).map_err(|source| ManifestError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        Self::parse(&bytes)
+        if pubkey_hex.trim().is_empty() {
+            return Ok(CheckedManifest {
+                manifest: Self::parse(&bytes)?,
+                signature: SignatureState::Unsigned,
+            });
+        }
+        let signature_hex = match std::fs::read_to_string(signature_path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ManifestError::SignatureMissing {
+                    path: signature_path.to_path_buf(),
+                });
+            }
+            Err(source) => {
+                return Err(ManifestError::Io {
+                    path: signature_path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        verify_manifest(&bytes, &signature_hex, pubkey_hex).map_err(|error| match error {
+            ManifestError::BadSignature { .. } => ManifestError::BadSignature {
+                path: Some(signature_path.to_path_buf()),
+            },
+            other => other,
+        })?;
+        Ok(CheckedManifest {
+            manifest: Self::parse(&bytes)?,
+            signature: SignatureState::Verified,
+        })
     }
 
     fn validate(&self) -> Result<(), ManifestError> {
@@ -237,8 +331,17 @@ pub enum ManifestError {
         found: u32,
     },
     /// The signature does not match the manifest bytes.
-    #[error("manifest signature does not verify")]
-    BadSignature,
+    #[error("manifest signature does not verify{}", signature_file(path))]
+    BadSignature {
+        /// Signature file that was read, when the check ran against one.
+        path: Option<PathBuf>,
+    },
+    /// A key is compiled in but the manifest's signature file is not there.
+    #[error("manifest signature is missing: {path}")]
+    SignatureMissing {
+        /// File that was expected.
+        path: PathBuf,
+    },
     /// The key or signature is not valid hex or not a valid curve point.
     #[error("malformed signature material: {0}")]
     Malformed(String),
@@ -280,7 +383,14 @@ pub fn verify_manifest(
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| ManifestError::Malformed(format!("signature: {e}")))?;
     key.verify_strict(manifest_bytes, &signature)
-        .map_err(|_| ManifestError::BadSignature)
+        .map_err(|_| ManifestError::BadSignature { path: None })
+}
+
+/// Render the signature file for an error message, or nothing when the check had no file.
+fn signature_file(path: &Option<PathBuf>) -> String {
+    path.as_ref()
+        .map(|path| format!(": {}", path.display()))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -383,7 +493,7 @@ mod tests {
         let sig = hex::encode(signing.sign(SAMPLE.as_bytes()).to_bytes());
         let tampered = SAMPLE.replace("63201294", "63201295");
         let err = verify_manifest(tampered.as_bytes(), &sig, &public).unwrap_err();
-        assert!(matches!(err, ManifestError::BadSignature));
+        assert!(matches!(err, ManifestError::BadSignature { .. }));
     }
 
     #[test]
@@ -418,5 +528,87 @@ mod tests {
     fn malformed_signature_material_is_reported() {
         let err = verify_manifest(b"x", "zz", "00").unwrap_err();
         assert!(matches!(err, ManifestError::Malformed(_)));
+    }
+
+    fn write_signed(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let (signing, public) = keypair();
+        let manifest_path = dir.join("manifest.json");
+        let signature_path = dir.join("manifest.json.sig");
+        std::fs::write(&manifest_path, SAMPLE).unwrap();
+        let signature = hex::encode(signing.sign(SAMPLE.as_bytes()).to_bytes());
+        std::fs::write(&signature_path, &signature).unwrap();
+        (manifest_path, signature_path, public)
+    }
+
+    #[test]
+    fn a_signed_manifest_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest_path, signature_path, public) = write_signed(dir.path());
+        let checked = Manifest::load_checked(&manifest_path, &signature_path, &public)
+            .expect("the signature verifies");
+        assert_eq!(checked.signature, SignatureState::Verified);
+        assert!(checked.manifest.find("piper-en_US-lessac-medium").is_some());
+    }
+
+    #[test]
+    fn one_flipped_byte_is_refused_and_names_the_signature_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest_path, signature_path, public) = write_signed(dir.path());
+        let tampered = SAMPLE.replace("63201294", "63201295");
+        std::fs::write(&manifest_path, tampered).unwrap();
+        let err = Manifest::load_checked(&manifest_path, &signature_path, &public).unwrap_err();
+        assert!(matches!(err, ManifestError::BadSignature { .. }), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains(&signature_path.display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_signature_file_is_refused_and_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let signature_path = dir.path().join("manifest.json.sig");
+        std::fs::write(&manifest_path, SAMPLE).unwrap();
+        let (_, public) = keypair();
+        let err = Manifest::load_checked(&manifest_path, &signature_path, &public).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::SignatureMissing { .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&signature_path.display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn no_key_loads_the_manifest_and_reports_unsigned() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let signature_path = dir.path().join("manifest.json.sig");
+        std::fs::write(&manifest_path, SAMPLE).unwrap();
+        let checked = Manifest::load_checked(&manifest_path, &signature_path, "").unwrap();
+        assert_eq!(checked.signature, SignatureState::Unsigned);
+        assert!(checked.manifest.find("piper-en_US-lessac-medium").is_some());
+    }
+
+    #[test]
+    fn load_uses_the_compiled_key_and_the_sibling_signature() {
+        // The compiled key is empty in this build, so `load` reads the sibling `.sig`
+        // without refusing, and reports nothing about it. When a release key exists this
+        // same call is the one that refuses a bad signature.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        std::fs::write(&manifest_path, SAMPLE).unwrap();
+        std::fs::write(dir.path().join("manifest.json.sig"), "00").unwrap();
+        let loaded = Manifest::load(&manifest_path).expect("no key is compiled in");
+        assert!(loaded.find("piper-en_US-lessac-medium").is_some());
+        assert_eq!(
+            signature_path(&manifest_path),
+            dir.path().join("manifest.json.sig")
+        );
     }
 }
