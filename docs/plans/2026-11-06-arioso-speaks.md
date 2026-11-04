@@ -85,3 +85,26 @@ list that can be filtered is one list that cannot disagree with itself.
   be spoken. Silently falling back to the generated line is the defect this app exists to
   avoid.
 - The waveform is drawn from the audio that was rendered, not from a plausible curve.
+
+## Second pass: what running it taught
+
+The app ran before it was trusted. Four things it showed:
+
+1. **A download ended at its first chunk.** The progress callback answers "stop", and the
+   app answered `true`. Every fetch left a `.part` file and nothing else. The answer is
+   `false`, and the contract is now written at the call site.
+2. **Playback was resampled by the mixer, not by us.** `rodio` converts every source to the
+   device rate with linear interpolation. A 22.05 kHz voice on a 48 kHz device is a 2.18×
+   upsample through that filter, which is audible on sibilants, and is why the same audio
+   from the command line sounded better. `resample.rs` converts first, with a Kaiser-windowed
+   sinc, so the mixer has nothing left to do.
+3. **A failure had nowhere to go.** The status row is one line and it goes at the next key.
+   The app now writes `arioso-speaks.log` beside its binary, rotating by size, and the path
+   is on screen.
+4. **A network with its own certificate authority could not download.** `models.ca_bundle`
+   names a PEM file of extra roots; `env` sets the variables a front end needs before it
+   starts. A variable already exported wins.
+
+And one rule the second pass added: **an unedited phoneme line is a preview, not an
+instruction.** The text goes through the engine's own path, so what is heard is what the
+command line produces; only an edited line is spoken as symbols.

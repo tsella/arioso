@@ -25,15 +25,17 @@ pub fn cell(level: f32, row: usize, col: usize) -> &'static str {
     RAMP[index]
 }
 
-/// A mirrored waveform, `rows` tall and one column per level.
+/// A mirrored waveform, `rows` tall and one column per level, as intensities.
 ///
 /// The centre line is the quiet one, and the envelope grows outwards from it, so a syllable
-/// reads as a shape rather than a number.
+/// reads as a shape rather than a number. Intensities rather than glyphs, because the caller
+/// colours a peak differently from the body: without the numbers it would have to guess the
+/// colour back out of the character.
 #[must_use]
-pub fn waveform(levels: &[f32], rows: usize) -> Vec<Vec<&'static str>> {
+pub fn waveform_levels(levels: &[f32], rows: usize) -> Vec<Vec<f32>> {
     let rows = rows.max(1);
     let middle = (rows as f32 - 1.0) / 2.0;
-    let mut grid = vec![vec![" "; levels.len()]; rows];
+    let mut grid = vec![vec![0.0f32; levels.len()]; rows];
     for (col, level) in levels.iter().enumerate() {
         // Half the height is the most a symmetric shape can use.
         let amplitude = level.clamp(0.0, 1.0) * middle;
@@ -42,26 +44,41 @@ pub fn waveform(levels: &[f32], rows: usize) -> Vec<Vec<&'static str>> {
             // Full density inside the envelope, nothing outside it, and the matrix softens
             // the boundary by one cell. Silence is no ink at all rather than a half-full
             // centre row, which is what the raw arithmetic would give.
-            let inside = if amplitude <= f32::EPSILON {
+            line[col] = if amplitude <= f32::EPSILON {
                 0.0
             } else {
                 (amplitude - distance + 0.5).clamp(0.0, 1.0)
             };
-            line[col] = cell(inside, row, col);
         }
     }
     grid
 }
 
-/// A left-to-right fill, for a progress bar of `width` columns.
+/// A left-to-right fill, for a progress bar of `width` columns, as intensities.
+///
+/// A ripple travels along it: a bar that fills smoothly is a bar nobody looks at.
+///
+/// A bar that fills smoothly is a bar nobody looks at. The ripple is decoration and it is
+/// inside the filled part only, so it never claims progress the download has not made; the
+/// head of the bar is drawn at full intensity so the edge stays sharp.
 #[must_use]
-pub fn bar(fraction: f32, width: usize) -> Vec<&'static str> {
+pub fn bar_levels(fraction: f32, width: usize, phase: usize) -> Vec<f32> {
     let width = width.max(1);
     let filled = fraction.clamp(0.0, 1.0) * width as f32;
+    let head = filled.floor() as usize;
     (0..width)
         .map(|col| {
-            let level = (filled - col as f32).clamp(0.0, 1.0);
-            cell(level, 1, col)
+            let base = (filled - col as f32).clamp(0.0, 1.0);
+            if base <= 0.0 {
+                return 0.0;
+            }
+            // The travelling part is a fraction of the cell, so the bar keeps its edge.
+            let ripple = 0.22 * (col as f32 * 0.7 - phase as f32 * 0.45).sin();
+            if col == head {
+                1.0
+            } else {
+                (base + ripple * base).clamp(0.0, 1.0)
+            }
         })
         .collect()
 }
@@ -94,16 +111,32 @@ mod tests {
 
     #[test]
     fn a_waveform_is_empty_at_zero_and_full_at_one() {
-        let quiet = waveform(&[0.0, 0.0], 3);
-        assert!(quiet.iter().all(|row| row.iter().all(|cell| *cell == " ")));
-        let loud = waveform(&[1.0, 1.0], 3);
+        let quiet = waveform_levels(&[0.0, 0.0], 3);
+        assert!(
+            quiet
+                .iter()
+                .all(|row| row.iter().all(|level| *level == 0.0))
+        );
+        let loud = waveform_levels(&[1.0, 1.0], 3);
         // The centre row of a full envelope is inked everywhere.
-        assert_eq!(loud[1], vec!["█", "█"]);
+        assert_eq!(loud[1], vec![1.0, 1.0]);
     }
 
     #[test]
     fn a_progress_bar_fills_from_the_left() {
-        let bar = bar(0.5, 4);
-        assert_eq!(bar, vec!["█", "█", " ", " "]);
+        let levels = bar_levels(0.5, 4, 0);
+        assert_eq!(levels[0], 1.0);
+        assert_eq!(levels[1], 1.0);
+        assert_eq!(levels[2], 0.0);
+        assert_eq!(levels[3], 0.0);
+    }
+
+    #[test]
+    fn the_ripple_stays_inside_the_filled_part() {
+        // The ripple must never claim progress: an empty bar has no ink at any phase.
+        for phase in 0..8 {
+            let levels = bar_levels(0.0, 6, phase);
+            assert!(levels.iter().all(|level| *level == 0.0), "phase {phase}");
+        }
     }
 }

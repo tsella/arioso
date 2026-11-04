@@ -37,7 +37,44 @@ impl Voice {
         self.license.eq_ignore_ascii_case("unknown") || !self.commercial
     }
 
-    /// The licence, with the reason it needs a look when it does.
+    /// The voice name without the engine in front of it.
+    ///
+    /// The list is already one engine's, so repeating it on every row spends six columns on
+    /// something the tab above has said once.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.id
+            .strip_prefix(&format!("{}-", self.engine))
+            .unwrap_or(&self.id)
+            .to_owned()
+    }
+
+    /// The licence in the few columns a list row can spare.
+    ///
+    /// A row is one line wide, and the full label is a sentence. The long form stays in the
+    /// header and in the download offer, where there is room to say what it means.
+    #[must_use]
+    pub fn licence_chip(&self) -> String {
+        if self.license.eq_ignore_ascii_case("unknown") {
+            return "unknown".to_owned();
+        }
+        let short = match self.license.as_str() {
+            "CC0-1.0" => "CC0",
+            "CC-BY-4.0" => "CC-BY",
+            "CC-BY-SA-4.0" => "CC-BY-SA",
+            "MIT" => "MIT",
+            other => other,
+        };
+        if self.commercial {
+            short.to_owned()
+        } else {
+            // The marker travels with the licence: a row that says CC-BY and nothing else
+            // would suggest a use the manifest refuses.
+            format!("{short}!")
+        }
+    }
+
+    /// The licence, spelled out.
     #[must_use]
     pub fn licence_label(&self) -> String {
         if self.license.eq_ignore_ascii_case("unknown") {
@@ -162,6 +199,25 @@ mod tests {
         assert_eq!(matching(&voices, "af_").len(), 1);
         assert_eq!(matching(&voices, "en-us").len(), 2);
         assert_eq!(matching(&voices, "").len(), 2);
+    }
+
+    #[test]
+    fn a_chip_is_short_and_keeps_the_warning() {
+        let mut voice = Voice {
+            id: "piper-x".to_owned(),
+            engine: "piper".to_owned(),
+            bytes: 1,
+            license: "CC-BY-4.0".to_owned(),
+            commercial: false,
+            speakers: Vec::new(),
+            languages: Vec::new(),
+            installed: false,
+        };
+        assert_eq!(voice.licence_chip(), "CC-BY!");
+        voice.commercial = true;
+        assert_eq!(voice.licence_chip(), "CC-BY");
+        voice.license = "unknown".to_owned();
+        assert_eq!(voice.licence_chip(), "unknown");
     }
 
     #[test]

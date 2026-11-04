@@ -7,7 +7,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
@@ -33,6 +33,9 @@ const FAINT: Color = Color::Indexed(238);
 /// The highlighted line.
 const CREAM: Color = Color::Indexed(223);
 
+/// How wide the block wordmark is, including the two columns of margin before it.
+const MARK_WIDTH: u16 = 25;
+
 /// Draw one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -57,43 +60,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// The wordmark, the waveform, and the line under them.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([
-        Constraint::Length(1),
         Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(area);
 
-    let wordmark = Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled("▚", Style::default().fg(PETROL)),
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            "a r i o s o",
-            Style::default().fg(CREAM).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled("local speech, in the terminal", Style::default().fg(MUTED)),
-    ]);
-    frame.render_widget(Paragraph::new(wordmark), rows[0]);
-
-    // The waveform is drawn from the audio that was rendered, not from a plausible curve.
-    let width = rows[1].width as usize;
-    let levels = app.player.levels(width.saturating_sub(2));
-    let grid = dither::waveform(&levels, 3);
-    let live = app.player.playing();
-    let colour = if live { PETROL } else { MUTED };
-    let lines: Vec<Line> = grid
-        .iter()
-        .map(|row| {
-            let mut spans = vec![Span::styled("  ", Style::default())];
-            spans.extend(
-                row.iter()
-                    .map(|cell| Span::styled(*cell, Style::default().fg(colour))),
-            );
-            Line::from(spans)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), rows[1]);
+    // The mark on the left and the live signal on the right, sharing the three rows.
+    let columns =
+        Layout::horizontal([Constraint::Length(MARK_WIDTH), Constraint::Min(8)]).split(rows[0]);
+    draw_wordmark(frame, columns[0]);
+    draw_waveform(frame, columns[1], app);
 
     // The rule carries the facts about the voice, right-aligned where the eye looks last.
     let voice = app.current_voice();
@@ -122,7 +99,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         }
         None => "no voice in this catalog ".to_owned(),
     };
-    let rule_width = rows[2].width as usize;
+    let rule_width = rows[1].width as usize;
     let facts_width = facts.chars().count();
     let rule: String = "─".repeat(rule_width.saturating_sub(facts_width + 2));
     let line = Line::from(vec![
@@ -136,7 +113,118 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             }),
         ),
     ]);
-    frame.render_widget(Paragraph::new(line), rows[2]);
+    frame.render_widget(Paragraph::new(line), rows[1]);
+
+    // The tagline, under the rule, in the quietest ink the terminal has.
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("local speech, in the terminal", Style::default().fg(FAINT)),
+            Span::styled(
+                app.log_file
+                    .as_ref()
+                    .map(|path| format!("   log {}", path.display()))
+                    .unwrap_or_default(),
+                Style::default().fg(Color::Indexed(240)),
+            ),
+        ])),
+        rows[2],
+    );
+}
+
+/// The mark, in block glyphs.
+///
+/// Three rows is the most a header can take before it is the whole window. The bottom row is
+/// drawn in a lighter shade, so the mark reads as lit from above rather than as a rectangle.
+fn draw_wordmark(frame: &mut Frame, area: Rect) {
+    const MARK: [&str; 3] = [
+        "█▀█ █▀▄ █   █▀█ █▀▀ █▀█",
+        "█▀█ █▀▄ █   █ █ ▀▀█ █ █",
+        "▀▀▀ ▀▀  ▀   ▀▀▀ ▀▀▀ ▀▀▀",
+    ];
+    let lines: Vec<Line> = MARK
+        .iter()
+        .enumerate()
+        .map(|(row, text)| {
+            let ink = match row {
+                0 => CREAM,
+                1 => PETROL,
+                _ => Color::Indexed(24),
+            };
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(*text, Style::default().fg(ink)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The live signal, drawn from the audio that was rendered.
+///
+/// While something plays it is a three-second window that scrolls, with a playhead down the
+/// middle. When nothing has been rendered yet it is a standby ripple: an idle screen with no
+/// motion reads as a hung program, and the ripple is labelled in the code as decoration so
+/// nobody later mistakes it for a level.
+fn draw_waveform(frame: &mut Frame, area: Rect, app: &App) {
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
+    let live = app.player.playing();
+    let levels = if app.audio.is_none() && !live {
+        standby(width, app.frame)
+    } else {
+        app.player.levels(width)
+    };
+    let grid = dither::waveform_levels(&levels, area.height.max(1) as usize);
+    let playhead = if live { Some(width / 2) } else { None };
+
+    let lines: Vec<Line> = grid
+        .iter()
+        .enumerate()
+        .map(|(row, cells)| {
+            let mut spans = Vec::with_capacity(cells.len() + 1);
+            for (col, level) in cells.iter().enumerate() {
+                let glyph = dither::cell(*level, row, col);
+                let ink = if playhead == Some(col) {
+                    CREAM
+                } else {
+                    waveform_ink(*level, live || app.audio.is_some())
+                };
+                spans.push(Span::styled(glyph, Style::default().fg(ink)));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A peak is warm, the body is the accent, and a still envelope is grey.
+fn waveform_ink(level: f32, has_audio: bool) -> Color {
+    if !has_audio {
+        return MUTED;
+    }
+    match level {
+        level if level > 0.92 => CREAM,
+        level if level > 0.6 => PLUM,
+        level if level > 0.0 => PETROL,
+        _ => FAINT,
+    }
+}
+
+/// A slow travelling ripple for a window with nothing to say yet.
+///
+/// This is decoration, not a signal: it never appears once audio exists, and its amplitude
+/// is kept low so it reads as an idle screen rather than as a level meter.
+fn standby(width: usize, frame: u64) -> Vec<f32> {
+    let phase = frame as f32 * 0.09;
+    (0..width)
+        .map(|col| {
+            let travel = col as f32 * 0.22 - phase;
+            0.16 + 0.14 * travel.sin().abs()
+        })
+        .collect()
 }
 
 /// The voice list, the text, and the phonemes.
@@ -184,7 +272,12 @@ fn draw_voices(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(tabs)), rows[0]);
 
     let list_height = rows[1].height as usize;
-    let first = app.selected.saturating_sub(list_height.saturating_sub(1));
+    // Centred rather than pinned to the bottom: the voices either side of the selection are
+    // what tells a person where they are in a list of two hundred.
+    let first = app
+        .selected
+        .saturating_sub(list_height / 2)
+        .min(app.visible.len().saturating_sub(list_height));
     let lines: Vec<Line> = app
         .visible
         .iter()
@@ -207,12 +300,12 @@ fn draw_voices(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Span::styled("  ", Style::default())
             };
-            let name = Span::styled(voice.id.clone(), style);
+            let name = Span::styled(voice.display_name(), style);
             let detail = Span::styled(
                 format!(
                     "  {} {}{}",
                     catalog::size(voice.bytes),
-                    voice.license,
+                    voice.licence_chip(),
                     if voice.installed { "" } else { " ↓" }
                 ),
                 if chosen {
@@ -325,11 +418,12 @@ fn draw_actions(frame: &mut Frame, area: Rect, app: &App) {
             format!("  {id}  "),
             Style::default().fg(CREAM),
         )];
-        spans.extend(
-            dither::bar(fraction, bar_width.max(1))
-                .into_iter()
-                .map(|cell| Span::styled(cell.to_owned(), Style::default().fg(PETROL))),
-        );
+        let cells = dither::bar_levels(fraction, bar_width.max(1), app.frame as usize);
+        let head = cells.iter().rposition(|level| *level > 0.0);
+        spans.extend(cells.iter().enumerate().map(|(col, level)| {
+            let ink = if Some(col) == head { CREAM } else { PETROL };
+            Span::styled(dither::cell(*level, 1, col), Style::default().fg(ink))
+        }));
         spans.push(Span::styled(
             format!(
                 "  {} / {}  {:.0}%",
@@ -379,15 +473,11 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Focus::Phonemes => "tab panes · edit the phonemes · ctrl-r reset · ctrl-enter say",
         Focus::Actions => "tab panes · ←→ choose · enter run · ctrl-q quit",
     };
-    let actions = match app.focus {
-        Focus::Voices => "",
-        _ => "",
-    };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("  {hint}"), Style::default().fg(FAINT)),
-            Span::styled(actions.to_owned(), Style::default().fg(FAINT)),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {hint}"),
+            Style::default().fg(FAINT),
+        )])),
         area,
     );
 }

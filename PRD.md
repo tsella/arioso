@@ -703,6 +703,17 @@ JSON, at roughly 33 percent size cost.
   is now present, because the terminal front end needed it and a callback is cheaper than a
   second download implementation.
 
+### F10.10 Configuration environment and trust anchors
+
+- F10.10.1 The config carries an `env` object of name/value pairs. A front end sets each one
+  before it does anything else, and never overrides a variable already exported, so the
+  person at the keyboard wins.
+- F10.10.2 `models.ca_bundle` names a PEM file of extra root certificates. A download client
+  trusts those as well as the bundled roots, and never instead of them: dropping the bundled
+  roots would break every other network.
+- F10.10.3 A `ca_bundle` path that is not a file is a validation error naming the field, not
+  a network failure at download time.
+
 ### F11. Concurrency, backpressure, and limits
 
 - F11.1 Each engine holds a semaphore. Default permits: TTS 2, STT 1 per streaming
@@ -1126,7 +1137,22 @@ and keep the audio, without a server, a socket, or a browser.
 - F22.7 Audio is saved as WAV or FLAC. The format is chosen at save time, not configured in
   advance.
 - F22.8 The wordmark carries a waveform of the audio being played, drawn from the rendered
-  samples. It is still when nothing plays.
+  samples. It is still when nothing plays, and shows a standby ripple before the first
+  utterance. The ripple is decoration: it never appears once audio exists, and it is not a
+  level.
+- F22.9 Playback converts the engine's samples to the device rate before they reach the
+  mixer. Leaving the conversion to the mixer's linear interpolation is audible on speech: a
+  22.05 kHz voice on a 48 kHz device is rough on sibilants, and the same audio written to a
+  file sounds clean because the system resamples properly.
+- F22.10 The app writes a log beside its own binary, `arioso-speaks.log`, and rotates it by
+  size keeping one previous file. A failure that ends up on the status row is also a record,
+  with the reason, because a one-line status is gone at the next key. The path is on screen,
+  and `ARIOSO_LOG` raises the level for one run.
+- F22.11 An unedited phoneme line is a preview, not an instruction: the text is spoken
+  through the engine's own path, so what is heard is what the command line produces. Only an
+  edited line is spoken as symbols.
+- F22.12 `examples/speaks.sh` runs the app from a source tree or from an installed binary,
+  and takes a config path.
 
 ## 9. Non-functional requirements
 
