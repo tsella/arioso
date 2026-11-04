@@ -1,0 +1,55 @@
+name: fuzz
+
+# A fuzz run is minutes of CPU per target, and a pull request does not need it.
+# The pull request check is a build only (see ci.yml); this workflow runs the
+# targets themselves, nightly and on demand.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [config_json, dictionary, manifest, wav_header]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # fuzz/ is its own workspace with its own target directory.
+          workspaces: "fuzz -> target"
+      # The wav_header target links arioso-tts-piper, which links a native ONNX
+      # Runtime, and the vendored copy is gitignored. Same release as ci.yml.
+      - name: onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.22.0
+          archive="onnxruntime-linux-x64-$version"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz"
+          mkdir -p vendor
+          curl -sSL "$url" | tar -xz -C vendor
+          mv "vendor/$archive" vendor/onnxruntime
+      - name: cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=120 -rss_limit_mb=4096
+      # A crash that is not kept is a crash that happens again. cargo-fuzz copies
+      # the input libFuzzer wrote out of the corpus into artifacts/<target>/.
+      - name: upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

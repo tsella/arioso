@@ -1023,7 +1023,10 @@ A caller that can start a server should be able to end it without a process tabl
   a ceiling per clip, not an average that hides one bad file.
 - Property tests on the resampler and the sentence chunker: no sample loss, no
   duplicated audio at boundaries.
-- Fuzz the config loader and the model manifest parser.
+- Fuzz the config loader and the model manifest parser, plus the user dictionary
+  and the WAV reader. Four targets (`config_json`, `dictionary`, `manifest`,
+  `wav_header`) run nightly for two minutes each under a 4 GB RSS cap, and every
+  pull request builds them, so a target that stops compiling fails before merge.
 - Load test: 8 concurrent TTS requests and 4 STT sessions for 10 minutes, asserting
   no queue overflow beyond the configured depth and no memory growth above 5 percent.
 - Cancellation test: cancel mid-stream on both WebSockets and assert the permit is

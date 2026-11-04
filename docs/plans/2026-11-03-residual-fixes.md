@@ -53,5 +53,8 @@ codes read.
 
 Carried from the first review, unchanged by this pass: `GET /v1/models/events` (SSE
 progress), the plain-socket connection cap, TLS and certificate reporting in `doctor`, the
-fuzz targets, the Windows PID ownership path, Kokoro, the Silero backend, Zipformer
-streaming, per-session language, manifest signing, and the C ABI the transcriber needs.
+Windows PID ownership path, Kokoro, the Silero backend, Zipformer streaming, per-session
+language, manifest signing, and the C ABI the transcriber needs.
+
+The fuzz targets left this list: `.github/workflows/fuzz.yml` runs `config_json`, `dictionary`,
+`manifest` and `wav_header` nightly, and `ci.yml` builds them on every pull request.

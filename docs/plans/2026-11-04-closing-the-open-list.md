@@ -175,6 +175,12 @@ dates and the verdict; paste it.
 <branch>`, wait for the run, and report the conclusion of all four jobs. A workflow that has
 never executed is a guess.
 
+**Status:** done. `.github/workflows/fuzz.yml` runs the four targets nightly at 03:17 UTC and
+on dispatch; `ci.yml` builds them on every pull request. The YAML parses, `actionlint` passes,
+and `cargo +nightly fuzz build` compiles all four targets locally. The dispatch itself is the
+controller's, because a workflow can only be dispatched from a branch that exists on the
+remote.
+
 ---
 
 ## T5 — Kokoro as a second speech engine
