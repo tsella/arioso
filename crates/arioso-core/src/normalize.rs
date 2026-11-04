@@ -546,7 +546,7 @@ fn scan_unit(chars: &[char], start: usize) -> Option<(&'static Unit, usize)> {
     }
     // One space is allowed before an unambiguous token: `190 cm` is a length, while
     // `5 in the morning` and `2 m of rope` are the same shape and are not. A token of
-    // three characters or more that is not also a word carries no such doubt.
+    // two characters or more that is not also a word carries no such doubt.
     if chars.get(start) == Some(&' ') {
         if let Some((unit, length)) = scan_unit_attached(chars, start + 1) {
             if unit.token.len() >= 2 && !matches!(unit.token, "in" | "gal") {
