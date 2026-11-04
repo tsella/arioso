@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "tts": {
+    "enabled": true,
+    "engine": "piper",
+    "voice": "en_US-joe-medium",
+    "speed": 1.0,
+    "format": "wav"
+  },
+  "stt": {
+    "enabled": true,
+    "language": "auto",
+    "max_audio_s": 600
+  },
+  "vad": {
+    "engine": "energy",
+    "threshold": 0.01,
+    "frame_ms": 32
+  },
+  "models": {
+    "max_concurrent_downloads": 2,
+    "auto_download": []
+  },
+  "log": {
+    "level": "error",
+    "format": "pretty",
+    "retention_days": 7
+  }
+}

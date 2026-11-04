@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "term": "arioso",
+      "spoken": [
+        "ah ree oh so"
+      ]
+    },
+    {
+      "term": "SQL",
+      "spoken": [
+        "sequel"
+      ],
+      "case_sensitive": true
+    }
+  ]
+}

@@ -1,4 +1,7 @@
 target
-corpus
+# The corpus is the fuzzer's working set: the committed seeds are what a run
+# starts from, and every input it adds beside them is scratch.
+/corpus/*/*
+!/corpus/*/seed-*
 artifacts
 coverage
