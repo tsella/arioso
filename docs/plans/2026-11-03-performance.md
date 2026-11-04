@@ -156,3 +156,46 @@ Every figure is measured, not estimated, and every bound in `crates/arioso-g2p/t
 was checked against the tree before its commit: the new bound fails there. The two-word and
 one-word rows fall across the first two commits, 28 -> 12 -> 7 and 49 -> 31 -> 7; the
 derived-word and reverse rows are measured against the commit this pass started from.
+
+## A fourth pass: the dictionary
+
+The memory a parse leaves behind was four allocations and 198 bytes per entry for a 24-byte
+line. Three of the four were avoidable: a `String` key that was built per line and thrown
+away for an alternate pronunciation, a `Vec` per word that grew to four slots on the first
+push and was shrunk back afterwards, and the copy of the line the key was lowercased into.
+
+`CmuDict` now holds `HashMap<Box<str>, Pronunciations>`, where `Pronunciations` is
+`One(Box<str>)` or `Many(Box<[Box<str>]>)`, so the 93% of words with one pronunciation hold
+no vector at all and nothing is shrunk after the fact. The base is lowercased into one
+buffer reused across lines, and the map is looked up with `get_mut` before it is grown, so an
+alternate line costs no key.
+
+`lookup` still returns `Option<&[Box<str>]>` — `std::slice::from_ref` for the single case —
+so no call site in `text.rs`, `reverse.rs`, the server or the CLI changed.
+
+| measure | before | after |
+|---|---|---|
+| allocations, parse of 126,052 entries | 504,221 | 252,113 |
+| bytes requested, same parse | 24,961,309 | 12,779,781 |
+| release parse, median of 31, one process | 45.3 ms | 20.5 ms |
+| peak RSS, separate process holding the table | 34.3 MB | 22.5 MB |
+| bound in `tests/allocations.rs`, per entry | 4 allocations | 2 allocations, 102 bytes |
+
+The old bound is what the test allowed; the tightened one was run against the tree before
+the change and failed there on both halves — 4 allocations and 198 bytes per entry, each
+assertion panicking on its own line. The timing pair is one harness on the two trees, a
+release build parsing the same 126,052-word string; the RSS pair is `/usr/bin/time -v` on a
+process that reads that string, parses it and holds the table.
+
+The parse was also checked for producing the same table, not only a cheaper one. A generated
+dictionary of 20,000 words with alternates, a five-form word, a repeated word, a `;;;` and a
+`#` comment, a blank line, a word with no pronunciation, `O'CLOCK`, `ÉTUDE` and `İSTANBUL`
+was parsed on both trees, and every lookup for a 24,024-word list — lowercase, uppercase,
+mixed case and unknown words — was dumped and compared: 24,026 lines, identical, sha256
+`def48cc919df11efe79f21d79fec59a33204bc3f5c67fe62cc93d943705f9af3` on both.
+
+That comparison is what caught the one mistake in the first draft: the alternate path looked
+the existing key up, and every other line inserted, so a word written twice without an index
+overwrote its first pronunciation instead of appending. No test covered it; the corpus did,
+on its `DUP` line. The test that pins it now is `a_word_written_twice_without_an_index_keeps_both`,
+which passes on both trees.
