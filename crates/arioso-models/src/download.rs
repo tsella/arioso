@@ -76,7 +76,7 @@ pub enum DownloadError {
         file: String,
         /// Size from the manifest.
         expected: u64,
-        /// Size on disk.
+        /// Bytes that arrived, or bytes on disk for a file that was already complete.
         actual: u64,
     },
 }
@@ -137,7 +137,7 @@ impl Downloader {
     /// # Errors
     ///
     /// Returns [`DownloadError`] on network failure, a bad status, a size
-    /// mismatch, or a hash mismatch. A hash mismatch deletes the partial file.
+    /// mismatch, or a hash mismatch. A hash or size mismatch deletes the partial file.
     pub async fn ensure_model<F>(
         &self,
         spec: &ModelSpec,
@@ -245,6 +245,18 @@ impl Downloader {
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
+                // The manifest is the only thing that says how big this file is, and the
+                // space check ran against that number. A mirror that keeps streaming past
+                // it fills the disk before the hash is ever computed.
+                if chunk.len() as u64 > file.size - offset {
+                    drop(writer);
+                    let _ = std::fs::remove_file(&part_path);
+                    return Err(DownloadError::Size {
+                        file: file.name.clone(),
+                        expected: file.size,
+                        actual: offset + chunk.len() as u64,
+                    });
+                }
                 writer.write_all(&chunk).await?;
                 if let Some(hasher) = hasher.as_mut() {
                     hasher.update(&chunk);
@@ -275,6 +287,9 @@ impl Downloader {
         }
         let actual_size = std::fs::metadata(&part_path)?.len();
         if actual_size != file.size {
+            // Left in place, this file would be resumed from on every later attempt and
+            // fail the same way each time. The next run starts from zero instead.
+            let _ = std::fs::remove_file(&part_path);
             return Err(DownloadError::Size {
                 file: file.name.clone(),
                 expected: file.size,
@@ -480,6 +495,98 @@ mod tests {
         assert!(matches!(err, DownloadError::Integrity { .. }), "{err:?}");
         assert!(!dir.path().join("voice.bin.part").exists());
         assert!(!dir.path().join("voice.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn refuses_a_body_longer_than_the_manifest_size() {
+        // A mirror that streams past the declared size would fill the disk before the hash
+        // is ever computed, so the write stops at the size the manifest promises.
+        let server = MockServer::start().await;
+        let declared = payload();
+        let mut longer = declared.clone();
+        longer.resize(declared.len() + 512, 0);
+        Mock::given(method("GET"))
+            .and(path("/voice.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(longer.clone()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let model = spec(format!("{}/voice.bin", server.uri()), &declared);
+        let err = Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, DownloadError::Size { expected, .. } if expected == declared.len() as u64),
+            "{err:?}"
+        );
+        assert!(
+            !dir.path().join("voice.bin.part").exists(),
+            "the oversize partial file must not survive"
+        );
+        assert!(!dir.path().join("voice.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn a_size_mismatch_removes_the_partial_file() {
+        // The manifest promises the whole file, the source delivers less of it, and the
+        // hash it delivers is the one the manifest names. Only the size check can catch
+        // that, and what it leaves behind decides whether the next run can ever start.
+        let server = MockServer::start().await;
+        let data = payload();
+        let short = data[..1000].to_vec();
+        // A resumed request means a partial file survived. Answer it with a status the
+        // downloader refuses, so the failure is the assertion.
+        Mock::given(method("GET"))
+            .and(path("/voice.bin"))
+            .and(header_exists("range"))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/voice.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(short.clone()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut model = spec(format!("{}/voice.bin", server.uri()), &short);
+        model.files[0].size = data.len() as u64;
+        let err = Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                DownloadError::Size {
+                    expected,
+                    actual: 1000,
+                    ..
+                } if expected == data.len() as u64
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !dir.path().join("voice.bin.part").exists(),
+            "the short partial file must not survive"
+        );
+
+        // The next run starts from zero, which the server can tell: no range header, so
+        // the refusing mock is not consulted.
+        model.files[0].size = short.len() as u64;
+        let paths = Downloader::new()
+            .unwrap()
+            .ensure_model(&model, dir.path(), &mut |_| {})
+            .await
+            .expect("a second run starts over");
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), short);
     }
 
     #[test]
