@@ -38,6 +38,14 @@ pub enum DownloadError {
     /// The HTTP request failed.
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+    /// The configured certificate bundle could not be used.
+    #[error("{}: {detail}", path.display())]
+    Certificate {
+        /// The bundle named in the configuration.
+        path: PathBuf,
+        /// Why it could not be read.
+        detail: String,
+    },
     /// Writing to the cache failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -122,11 +130,50 @@ impl Downloader {
     ///
     /// Returns [`DownloadError::Http`] when the client cannot be built.
     pub fn with_mirror(mirror: Option<String>) -> Result<Self, DownloadError> {
-        let client = reqwest::Client::builder()
+        Self::with_options(mirror, None)
+    }
+
+    /// The same, trusting the root certificates in `ca_bundle` as well as the bundled ones.
+    ///
+    /// A network that inspects TLS presents a certificate from its own authority. Adding
+    /// that authority is the whole of the fix; dropping the bundled roots would make the
+    /// program fail everywhere else instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DownloadError::Http`] when the client cannot be built, and
+    /// [`DownloadError::Certificate`] when the bundle cannot be read or holds no
+    /// certificate.
+    pub fn with_options(
+        mirror: Option<String>,
+        ca_bundle: Option<&Path>,
+    ) -> Result<Self, DownloadError> {
+        let mut builder = reqwest::Client::builder()
             .user_agent(concat!("arioso/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(60))
-            .build()?;
+            .read_timeout(Duration::from_secs(60));
+        if let Some(bundle) = ca_bundle {
+            let pem = std::fs::read(bundle).map_err(|error| DownloadError::Certificate {
+                path: bundle.to_path_buf(),
+                detail: error.to_string(),
+            })?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|error| {
+                DownloadError::Certificate {
+                    path: bundle.to_path_buf(),
+                    detail: error.to_string(),
+                }
+            })?;
+            if certificates.is_empty() {
+                return Err(DownloadError::Certificate {
+                    path: bundle.to_path_buf(),
+                    detail: "no certificate in the bundle".to_owned(),
+                });
+            }
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        let client = builder.build()?;
         Ok(Self { client, mirror })
     }
 

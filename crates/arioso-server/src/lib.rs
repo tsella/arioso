@@ -392,8 +392,10 @@ impl AppState {
             // Wait for a slot before touching the network. The catalog shows this model as
             // downloading while it waits, which is true: the request was accepted.
             let slot = Arc::clone(&state.download_slots).acquire_owned().await;
-            let downloader =
-                arioso_models::Downloader::with_mirror(state.config().models.mirror.clone());
+            let downloader = arioso_models::Downloader::with_options(
+                state.config().models.mirror.clone(),
+                state.config().models.ca_bundle.as_deref(),
+            );
             let result = match downloader {
                 Ok(downloader) => {
                     let reporting = Arc::clone(&state);
@@ -490,9 +492,11 @@ impl AppState {
             .enable_all()
             .build()
             .map_err(|error| format!("could not start a runtime for the download: {error}"))?;
-        let downloader =
-            arioso_models::Downloader::with_mirror(self.config().models.mirror.clone())
-                .map_err(|error| error.to_string())?;
+        let downloader = arioso_models::Downloader::with_options(
+            self.config().models.mirror.clone(),
+            self.config().models.ca_bundle.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
         let id = spec.id.clone();
         let spec = spec.clone();
         let dir = dir.to_path_buf();

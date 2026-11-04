@@ -3,6 +3,7 @@
 //! Precedence, lowest to highest: compiled defaults, the JSON file, environment
 //! variables with the `ARIOSO_` prefix.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +73,12 @@ pub struct Config {
     pub models: Models,
     /// Logging.
     pub log: Log,
+    /// Environment variables this process sets before it does anything else.
+    ///
+    /// A front end that has to honour a proxy, or a certificate path a library reads from
+    /// the environment, would otherwise need a shell wrapper. Keys are set only when they
+    /// are absent, so a variable exported by the person running the program still wins.
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -85,6 +92,7 @@ impl Default for Config {
             audio: Audio::default(),
             models: Models::default(),
             log: Log::default(),
+            env: BTreeMap::new(),
         }
     }
 }
@@ -448,6 +456,12 @@ pub struct Models {
     pub mirror: Option<String>,
     /// Download concurrency cap.
     pub max_concurrent_downloads: u32,
+    /// PEM file of extra root certificates, for a network with its own authority.
+    ///
+    /// A machine behind an inspection proxy sees a certificate its own trust store knows and
+    /// the bundled roots do not. Naming the authority here is what lets a download finish
+    /// instead of failing every request with a verification error.
+    pub ca_bundle: Option<PathBuf>,
 }
 
 impl Default for Models {
@@ -457,6 +471,7 @@ impl Default for Models {
             auto_download: Vec::new(),
             mirror: None,
             max_concurrent_downloads: 2,
+            ca_bundle: None,
         }
     }
 }
@@ -765,6 +780,20 @@ impl Config {
         // here so nobody ships the one while believing they have the other.
         // Resolved once, so every rule below answers for the address the socket will
         // actually take rather than for the string a person typed.
+        // A path that does not resolve is a download that fails later with a message about
+        // the network, which is the wrong place to look. Say it while it is a config error.
+        if let Some(bundle) = &self.models.ca_bundle
+            && !bundle.is_file()
+        {
+            return Err(ConfigError::Invalid {
+                path: "models.ca_bundle".into(),
+                message: format!(
+                    "models.ca_bundle is {}, which is not a file. Name a PEM bundle of the \
+                     root certificates this network needs.",
+                    bundle.display()
+                ),
+            });
+        }
         let bind = bind_address(&self.server.bind)?;
         if self.server.sidecar && !bind.ip().is_loopback() {
             return Err(ConfigError::Invalid {
@@ -966,6 +995,29 @@ mod tests {
 
     fn origin() -> PathBuf {
         PathBuf::from("<test>")
+    }
+
+    #[test]
+    fn a_ca_bundle_that_is_not_a_file_is_refused() {
+        let mut config = Config::default();
+        config.models.ca_bundle = Some(PathBuf::from("/no/such/bundle.pem"));
+        let error = config
+            .validate()
+            .expect_err("a missing bundle is a config error");
+        assert!(error.to_string().contains("models.ca_bundle"), "{error}");
+    }
+
+    #[test]
+    fn the_environment_block_is_read() {
+        let document = r#"{"schema_version": 2, "env": {"SSL_CERT_FILE": "/etc/ca.pem"}}"#;
+        let config: Config = serde_json::from_str(document).expect("parse");
+        assert_eq!(
+            config.env.get("SSL_CERT_FILE").map(String::as_str),
+            Some("/etc/ca.pem")
+        );
+        // And an absent block is an empty map, not a parse failure.
+        let plain: Config = serde_json::from_str(r#"{"schema_version": 2}"#).expect("parse");
+        assert!(plain.env.is_empty());
     }
 
     /// Every key path in a JSON document, so a key the example omits shows up as a

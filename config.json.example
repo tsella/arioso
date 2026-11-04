@@ -71,7 +71,8 @@
     "dir": null,
     "mirror": null,
     "max_concurrent_downloads": 2,
-    "auto_download": []
+    "auto_download": [],
+    "ca_bundle": null
   },
   "log": {
     "level": "error",
@@ -79,5 +80,6 @@
     "file": null,
     "retention_days": 7,
     "log_text": false
-  }
+  },
+  "env": {}
 }
