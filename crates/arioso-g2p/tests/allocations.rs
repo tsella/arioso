@@ -4,8 +4,10 @@
 //! word or per dictionary entry fails here and says what it now costs.
 
 use arioso_core::NormalizeOptions;
+use arioso_core::UserDictionary;
 use arioso_core::alloc_count::{Counting, measure, measure_warm};
 use arioso_g2p::cmudict::CmuDict;
+use arioso_g2p::reverse::ReverseIndex;
 use arioso_g2p::{lts, phonemes_for_text};
 
 #[global_allocator]
@@ -77,6 +79,39 @@ fn a_derived_inflection_costs_a_bounded_number_of_allocations() {
     assert!(
         stats.allocations <= 8,
         "a derived word costs {} allocations: {stats:?}",
+        stats.allocations
+    );
+}
+
+/// A dictionary with the words a short transcript needs.
+const CORRECTION_DICT: &str = "\
+TOM  T AA1 M
+SELLER  S EH1 L ER0
+MET  M EH1 T
+I  AY1
+YESTERDAY  Y EH1 S T ER0 D EY2
+";
+
+const CORRECTION_USER: &str = r#"{"version":1,"entries":[
+    {"term":"Tom Sella","spoken":["tom seller"]},
+    {"term":"Sella","spoken":["sell a"]}
+]}"#;
+
+#[test]
+fn a_correction_reuses_a_compiled_dictionary() {
+    // The forms depend only on the dictionary, so they are pronounced and ordered once.
+    // `correct` re-did both for every utterance, which is what this bound is about.
+    let parsed = CmuDict::parse(CORRECTION_DICT);
+    let user = UserDictionary::parse(CORRECTION_USER).unwrap();
+    let index = ReverseIndex::build(&user, &parsed);
+    assert_eq!(index.len(), 2, "both forms are long enough to match");
+    let text = "I met tom seller yesterday";
+    let (out, stats) = measure_warm(|| index.apply(&parsed, text));
+    eprintln!("correct: {stats:?} out={out}");
+    assert_eq!(out, "I met Tom Sella yesterday");
+    assert!(
+        stats.allocations <= 15,
+        "a correction costs {} allocations: {stats:?}",
         stats.allocations
     );
 }
