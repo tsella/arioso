@@ -992,6 +992,21 @@ A caller that can start a server should be able to end it without a process tabl
 - F20.4 SIGTERM and Ctrl-C take the graceful path. A service manager that stops the
   process and a caller that posts `/v1/stop` get the same behaviour.
 
+### F21. Mobile builds
+
+The library reaches a phone in stages, and CI says which stage is real instead of implying
+the whole product is there.
+
+- F21.1 The five crates that need no prebuilt native library — `arioso-config`,
+  `arioso-models`, `arioso-g2p`, `arioso-core`, `arioso-vad` — compile for
+  `aarch64-apple-ios` and `aarch64-linux-android` on every pull request and every push to
+  `main`. A crate that stops compiling for a phone fails the job; there is no allow-failure.
+- F21.2 `arioso-tts-piper` and `arioso-stt-sherpa` are not part of that check. Each links a
+  prebuilt native library, ONNX Runtime and sherpa-onnx respectively, that needs a build for
+  the target, and this repository does not wire one for either mobile target. The workflow
+  names the gap in a comment and this requirement names it here, so the exclusion reads as a
+  decision rather than an oversight.
+
 ## 9. Non-functional requirements
 
 | Area | Target |
@@ -1035,7 +1050,8 @@ A caller that can start a server should be able to end it without a process tabl
   one on a virtual render device, asserting both transcripts arrive and drift stays
   under 20 ms.
 - CI matrix: macOS arm64 and x86_64, Linux x86_64 and aarch64, Windows x86_64,
-  plus build-only jobs for iOS and Android.
+  plus build-only jobs for `aarch64-apple-ios` and `aarch64-linux-android` over the crates
+  F21.1 names.
 
 ## 11. Licensing and compliance
 
