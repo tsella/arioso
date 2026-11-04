@@ -34,8 +34,12 @@ enum Command {
         #[command(subcommand)]
         command: ModelsCommand,
     },
-    /// Check the install: config, cache directory, manifest.
-    Doctor,
+    /// Check the install: config, cache directory, manifest, certificate.
+    Doctor {
+        /// Treat warnings as failures, such as a certificate with fewer than thirty days left.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Serve the HTTP API.
     Serve,
     /// Stop a sidecar started with `server.sidecar` on.
@@ -124,7 +128,7 @@ fn main() -> Result<()> {
             ),
             ModelsCommand::Download { id } => download(&config, &id),
         },
-        Command::Doctor => doctor(&config, &config_path),
+        Command::Doctor { strict } => doctor(&config, &config_path, strict),
         Command::Say {
             text,
             out,
@@ -856,8 +860,172 @@ fn say(
     Ok(())
 }
 
-fn doctor(config: &Config, config_path: &Path) -> Result<()> {
+/// The facts `doctor` reports about the configured certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CertificateFacts {
+    /// The subject common name, when the certificate carries one.
+    common_name: Option<String>,
+    /// The first and last instant the certificate is valid, as absolute UTC dates.
+    not_before: String,
+    not_after: String,
+    /// Seconds between the not-after instant and the moment `doctor` ran.
+    seconds_remaining: i64,
+}
+
+/// How much life a certificate has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CertVerdict {
+    /// Thirty days or more.
+    Valid,
+    /// Fewer than thirty days, but not yet past the not-after date.
+    Expiring,
+    /// Past the not-after date.
+    Expired,
+}
+
+/// A certificate closer than this to its not-after date is a warning.
+const CERT_WARNING_DAYS: i64 = 30;
+
+impl CertificateFacts {
+    /// Whole days left, truncated toward zero. The sign is the verdict; the verdict itself
+    /// is decided from seconds, so a certificate that lapsed an hour ago is still expired.
+    fn days_remaining(&self) -> i64 {
+        self.seconds_remaining / SECONDS_PER_DAY as i64
+    }
+
+    fn verdict(&self) -> CertVerdict {
+        if self.seconds_remaining < 0 {
+            CertVerdict::Expired
+        } else if self.seconds_remaining < CERT_WARNING_DAYS * SECONDS_PER_DAY as i64 {
+            CertVerdict::Expiring
+        } else {
+            CertVerdict::Valid
+        }
+    }
+}
+
+/// Read the certificate at `path`, judged against `now` in seconds since the Unix epoch.
+///
+/// The error names the path: an operator with several certificates on disk needs to know
+/// which one `doctor` could not read.
+fn read_certificate(path: &Path, now: i64) -> std::result::Result<CertificateFacts, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+    let not_a_certificate =
+        |error: &dyn std::fmt::Display| format!("{} is not a certificate: {error}", path.display());
+    // PEM is what the server is configured with, but a DER file is a certificate too and
+    // refusing it would make `doctor` disagree with a server that starts.
+    let (not_before, not_after, common_name) = match x509_parser::pem::parse_x509_pem(&bytes) {
+        Ok((_, pem)) => {
+            let certificate = pem
+                .parse_x509()
+                .map_err(|error| not_a_certificate(&error))?;
+            certificate_times(&certificate)
+        }
+        Err(_) => {
+            let (_, certificate) = x509_parser::parse_x509_certificate(&bytes)
+                .map_err(|error| not_a_certificate(&error))?;
+            certificate_times(&certificate)
+        }
+    };
+    Ok(CertificateFacts {
+        common_name,
+        not_before: format_certificate_time(not_before),
+        not_after: format_certificate_time(not_after),
+        seconds_remaining: not_after.timestamp() - now,
+    })
+}
+
+/// The validity bounds and subject common name, copied out of a parsed certificate.
+///
+/// Copied rather than returned as references: the parsed certificate borrows the buffer
+/// that held the PEM, which does not outlive the parse.
+fn certificate_times(
+    certificate: &x509_parser::certificate::X509Certificate<'_>,
+) -> (
+    x509_parser::time::ASN1Time,
+    x509_parser::time::ASN1Time,
+    Option<String>,
+) {
+    let common_name = certificate
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|name| name.as_str().ok())
+        .map(str::to_owned);
+    (
+        certificate.validity().not_before,
+        certificate.validity().not_after,
+        common_name,
+    )
+}
+
+/// An ASN.1 time as an absolute UTC instant, to the minute.
+///
+/// The date is what an operator reading a log months later needs; the seconds are noise
+/// and would make two reports of the same certificate differ for no reason.
+fn format_certificate_time(time: x509_parser::time::ASN1Time) -> String {
+    let datetime = time.to_datetime();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute()
+    )
+}
+
+/// Report the configured certificate. Returns `(problems, warnings)` for `doctor`.
+fn report_certificate(path: &Path, now: i64) -> (usize, usize) {
+    let facts = match read_certificate(path, now) {
+        Ok(facts) => facts,
+        Err(error) => {
+            println!("tls cert    {error}");
+            return (1, 0);
+        }
+    };
+    println!("tls cert    {}", path.display());
+    println!(
+        "  subject   {}",
+        facts.common_name.as_deref().unwrap_or("(no common name)")
+    );
+    println!("  valid     {} to {}", facts.not_before, facts.not_after);
+    let days = facts.days_remaining();
+    match facts.verdict() {
+        CertVerdict::Valid => {
+            println!("  expires   in {days} day(s)");
+            (0, 0)
+        }
+        CertVerdict::Expiring => {
+            if days <= 0 {
+                println!("  WARNING: expires today");
+            } else {
+                println!("  WARNING: expires in {days} day(s)");
+            }
+            (0, 1)
+        }
+        CertVerdict::Expired => {
+            if days == 0 {
+                println!("  EXPIRED today");
+            } else {
+                println!("  EXPIRED {} day(s) ago", -days);
+            }
+            (1, 0)
+        }
+    }
+}
+
+/// Seconds since the Unix epoch, for judging a certificate against the wall clock.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+fn doctor(config: &Config, config_path: &Path, strict: bool) -> Result<()> {
     let mut problems = 0usize;
+    let mut warnings = 0usize;
     println!("config      {}", config_path.display());
     match config.validate() {
         Ok(()) => println!("  valid"),
@@ -865,6 +1033,12 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
             problems += 1;
             println!("  INVALID: {e}");
         }
+    }
+
+    if let Some(cert) = &config.server.tls.cert {
+        let (cert_problems, cert_warnings) = report_certificate(cert, unix_now());
+        problems += cert_problems;
+        warnings += cert_warnings;
     }
 
     let dir = models_dir(config);
@@ -904,6 +1078,9 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
 
     if problems > 0 {
         bail!("{problems} problem(s) found");
+    }
+    if strict && warnings > 0 {
+        bail!("{warnings} warning(s) found and --strict was passed");
     }
     println!("ok");
     Ok(())
@@ -1490,5 +1667,96 @@ mod tests {
         config.tts.voice = "no-such-voice".to_owned();
         std::fs::write(dir.path().join("en_US-lessac-medium.onnx.json"), "{}").unwrap();
         assert_eq!(voice_config_path(&config, dir.path()), None);
+    }
+
+    /// The instant the certificate tests judge from: 2027-01-15 08:00 UTC.
+    ///
+    /// Fixed rather than `now()`, so a certificate that is ten days from expiry today is
+    /// ten days from expiry whenever the suite runs.
+    const CERT_NOW: i64 = 1_800_000_000;
+
+    fn cert_now() -> time::OffsetDateTime {
+        time::OffsetDateTime::from_unix_timestamp(CERT_NOW).unwrap()
+    }
+
+    /// A self-signed certificate for `name`, valid from one day before [`cert_now`] until
+    /// `valid_until_days` after it. A negative value makes the certificate already expired.
+    fn write_certificate(dir: &tempfile::TempDir, name: &str, valid_until_days: i64) -> PathBuf {
+        let now = cert_now();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, name);
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::days(valid_until_days);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        let path = dir.path().join(format!("{name}.pem"));
+        std::fs::write(&path, pem).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_certificate_with_a_year_left_is_valid_and_reports_absolute_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_certificate(&dir, "localhost", 365);
+        let facts = read_certificate(&path, CERT_NOW).unwrap();
+
+        assert_eq!(facts.common_name.as_deref(), Some("localhost"));
+        assert_eq!(facts.verdict(), CertVerdict::Valid);
+        assert_eq!(facts.days_remaining(), 365);
+        // Both dates, so an operator reading a log in six months knows when it lapses.
+        assert_eq!(facts.not_before, "2027-01-14 08:00 UTC");
+        assert_eq!(facts.not_after, "2028-01-15 08:00 UTC");
+    }
+
+    #[test]
+    fn a_certificate_inside_thirty_days_is_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_certificate(&dir, "localhost", 10);
+        let facts = read_certificate(&path, CERT_NOW).unwrap();
+
+        assert_eq!(facts.verdict(), CertVerdict::Expiring);
+        assert_eq!(facts.days_remaining(), 10);
+        assert_eq!(facts.not_after, "2027-01-25 08:00 UTC");
+        // A warning is not a failure, so `doctor` counts no problem for it.
+        assert_eq!(report_certificate(&path, CERT_NOW), (0, 1));
+    }
+
+    #[test]
+    fn an_expired_certificate_is_a_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_certificate(&dir, "localhost", -1);
+        let facts = read_certificate(&path, CERT_NOW).unwrap();
+
+        assert_eq!(facts.verdict(), CertVerdict::Expired);
+        assert_eq!(facts.days_remaining(), -1);
+        assert_eq!(facts.not_after, "2027-01-14 08:00 UTC");
+        assert_eq!(report_certificate(&path, CERT_NOW), (1, 0));
+
+        // An hour past the not-after date is expired even though no whole day has passed,
+        // and the printed count must not round that hour up to a day.
+        let mut lapsed = facts;
+        lapsed.seconds_remaining = -3_600;
+        assert_eq!(lapsed.verdict(), CertVerdict::Expired);
+        assert_eq!(lapsed.days_remaining(), 0);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_certificate_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cert.pem");
+        std::fs::write(&path, "this is not a certificate\n").unwrap();
+
+        let error = read_certificate(&path, CERT_NOW).map(|_| ()).unwrap_err();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(report_certificate(&path, CERT_NOW), (1, 0));
+
+        // A path that is not there is the same verdict, and also names the file.
+        let missing = dir.path().join("absent.pem");
+        let error = read_certificate(&missing, CERT_NOW)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
     }
 }

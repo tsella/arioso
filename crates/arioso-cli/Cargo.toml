@@ -29,6 +29,9 @@ hyper-util.workspace = true
 tokio = { workspace = true, features = ["net", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Reads the certificate `doctor` reports on. Pure Rust, no OpenSSL and no C toolchain, so
+# the Windows build needs no headers the runner image does not have.
+x509-parser = { version = "0.18", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Signal 0 asks whether a process exists, SIGTERM asks it to stop. Both are one call, and
@@ -37,6 +40,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Fixture certificates with chosen validity windows, so the three verdicts are exercised
+# without a checked-in certificate that expires.
+rcgen = "0.14"
+time = "0.3"
 
 [lints]
 workspace = true
