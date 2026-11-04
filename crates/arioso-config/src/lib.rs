@@ -303,7 +303,10 @@ impl Default for Stt {
             // whisper-base speed, so it is the default. Whisper base stays in the catalog
             // as the small download. See docs/models.md.
             batch_model: "sherpa-parakeet-tdt-0.6b-v2-en".into(),
-            stream_model: "sherpa-zipformer-en".into(),
+            // Empty means the socket uses `batch_model`, which is what every config
+            // written before streaming existed does. Naming a streaming model here moves
+            // the socket onto that model without touching the file route.
+            stream_model: String::new(),
             language: "auto".into(),
             partials: true,
             partial_interval_ms: 300,

@@ -37,7 +37,7 @@
     "enabled": true,
     "engine": "sherpa",
     "batch_model": "sherpa-parakeet-tdt-0.6b-v2-en",
-    "stream_model": "sherpa-zipformer-en",
+    "stream_model": "",
     "language": "auto",
     "partials": true,
     "partial_interval_ms": 300,
