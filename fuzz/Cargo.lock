@@ -10,7 +10,7 @@ checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
 name = "arioso-config"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "schemars",
  "serde",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-core"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-g2p"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "arioso-core",
  "serde_json",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-models"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "arioso-config",
  "ed25519-dalek",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-tts-piper"
-version = "0.1.1"
+version = "0.1.7"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
