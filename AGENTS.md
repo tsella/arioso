@@ -101,6 +101,7 @@ Loopback by default. `GET /healthz` needs no token; everything else follows
 | GET | `/v1/info`, `/v1/engines`, `/v1/voices` | what this server has |
 | GET, PATCH | `/v1/config` | read and change settings |
 | GET | `/v1/models` | catalog with install state |
+| GET | `/v1/models/events` | the same state as it changes, as server-sent events |
 | POST | `/v1/models/{id}/download` | fetch a model, 202, in a task |
 | POST | `/v1/models/{id}/warm` | load it before the first request |
 | DELETE | `/v1/models/{id}` | remove its files |
