@@ -587,10 +587,26 @@ mod tests {
                 )
             })
             .collect();
+        // The family decides which graph loads, and a graph handed the wrong family does not
+        // fail: sherpa aborts the process inside C++, which Rust cannot catch. So the type is
+        // an input, and a directory that looks like a streaming export is refused by name
+        // rather than handed to the batch loader.
+        let model_type = std::env::var("ARIOSO_STT_MODEL_TYPE")
+            .unwrap_or_else(|_| "nemo_transducer".to_string());
+        let looks_streaming = files.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("encoder-") && name.contains("chunk-"))
+        });
+        assert!(
+            !looks_streaming || is_streaming(Some(&model_type)),
+            "this directory holds a streaming export; run again with \
+             ARIOSO_STT_MODEL_TYPE={STREAMING_MODEL_TYPE}"
+        );
         let engine = Engine::from_manifest_files(
             std::path::Path::new(&dir),
             &files,
-            Some("nemo_transducer"),
+            Some(&model_type),
             None,
             4,
         )
