@@ -4,7 +4,12 @@ name: win-diag
 # and what does it expect? A recorded defect says the two disagree about the C API version
 # and the mismatch aborts the process inside C++, which no test can catch.
 #
-# This runs by hand only. It is a measurement, not a gate.
+# First run answered the first half: the vendored runtime is 1.22 (C API 22) and the runner
+# also carries C:\Windows\System32\onnxruntime.dll at 1.17 (C API 17), which is what the
+# abort names. This run asks the second half: if the vendored runtime is placed beside the
+# test binaries, does the loader take it, and is 22 enough?
+#
+# It runs by hand only. It is a measurement, not a gate.
 
 on:
   workflow_dispatch:
@@ -34,9 +39,7 @@ jobs:
         run: |
           Write-Host "== onnxruntime.dll anywhere under the checkout =="
           Get-ChildItem -Path . -Recurse -Filter onnxruntime.dll -ErrorAction SilentlyContinue |
-            ForEach-Object {
-              "{0,-90} {1}" -f $_.FullName, $_.VersionInfo.FileVersion
-            }
+            ForEach-Object { "{0,-90} {1}" -f $_.FullName, $_.VersionInfo.FileVersion }
           Write-Host "== the system copy, if any =="
           $system = "$env:SystemRoot\System32\onnxruntime.dll"
           if (Test-Path $system) {
@@ -44,25 +47,36 @@ jobs:
           } else {
             "no $system"
           }
-          Write-Host "== PATH entries that mention onnx =="
-          $env:PATH -split ';' | Where-Object { $_ -match 'onnx' } | ForEach-Object { $_ }
       - name: what the speech library asks for
         shell: pwsh
         run: |
-          Write-Host "== the libraries sherpa extracted =="
+          Write-Host "== libraries the build extracted =="
           Get-ChildItem -Path target -Recurse -Include *.dll -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match 'sherpa' } |
             ForEach-Object { "{0,-90} {1}" -f $_.FullName, $_.Length }
-          Write-Host "== import names found in those libraries =="
-          python - <<'PY'
-          import pathlib
-          for path in pathlib.Path("target").rglob("*.dll"):
-              if "sherpa" not in str(path).lower():
-                  continue
-              data = path.read_bytes()
-              names = [n for n in (b"onnxruntime.dll", b"onnxruntime_providers_shared.dll") if n in data]
-              print(f"{path}: {[n.decode() for n in names]}")
-          PY
-      - name: run the one test that opens a graph
+          Write-Host "== import names inside them =="
+          Get-ChildItem -Path target -Recurse -Include *.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'sherpa' } |
+            ForEach-Object {
+              $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+              $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+              $hit = $text -match 'onnxruntime\.dll'
+              "{0}: imports onnxruntime.dll = {1}" -f $_.Name, $hit
+            }
+      - name: the test, before anything is moved
         continue-on-error: true
-        run: cargo test -p arioso-stt-sherpa --lib -- --nocapture --test-threads=1
+        run: cargo test -p arioso-stt-sherpa --lib -- --nocapture --test-threads=1 2>&1 | Select-Object -Last 25
+        shell: pwsh
+      - name: put the vendored runtime beside the test binaries, then run it again
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path target/debug/deps -Filter arioso_stt_sherpa*.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { "test binary: $($_.FullName)" }
+          Copy-Item vendor/onnxruntime/lib/*.dll target/debug/ -Force -ErrorAction SilentlyContinue
+          Copy-Item vendor/onnxruntime/lib/*.dll target/debug/deps/ -Force -ErrorAction SilentlyContinue
+          Write-Host "== after copying, what sits beside the binaries =="
+          Get-ChildItem -Path target/debug/deps -Filter onnxruntime.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { "{0} {1}" -f $_.FullName, $_.VersionInfo.FileVersion }
+          Write-Host "== the run =="
+          cargo test -p arioso-stt-sherpa --lib -- --nocapture --test-threads=1 2>&1 | Select-Object -Last 25
