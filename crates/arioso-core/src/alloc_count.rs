@@ -6,6 +6,11 @@
 //! eighty allocations fails when the count rises, so the number is the regression test
 //! rather than a note in a document.
 //!
+//! The count is per thread. Tests in one binary run on several threads, and the harness,
+//! the other tests and their printing allocate while one of them is measuring; a
+//! process-wide count charges that work to whichever measurement was open, which is a
+//! bound that fails on a busy machine and passes on a quiet one.
+//!
 //! Always compiled, because a test that is not run is not a measurement. The binary
 //! declares the allocator once:
 //!
@@ -15,24 +20,30 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
-/// A pass-through allocator that counts what the process asks for.
+/// A pass-through allocator that counts what each thread asks for.
 #[derive(Debug, Default)]
 pub struct Counting;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
-
-/// Tests in one binary run on several threads, so a measurement takes this lock: without
-/// it two tests count each other's allocations and both numbers are wrong.
-static LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    /// What this thread has asked for since it started.
+    ///
+    /// A measurement is one thread's work, and the counter has to say so. The tests in a
+    /// binary run on several threads, and the harness, the other tests and their printing
+    /// allocate while one of them is measuring: a process-wide counter charged that to
+    /// whichever measurement was open, which made a bound of seventeen fail at eighteen
+    /// about a quarter of the time. These are `const`-initialised `Cell`s with no
+    /// destructor, so reading them from the allocator is a plain thread-local load and
+    /// cannot allocate, recurse or fail.
+    static THREAD_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static THREAD_BYTES: Cell<usize> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        THREAD_BYTES.with(|count| count.set(count.get() + layout.size()));
         unsafe { System.alloc(layout) }
     }
 
@@ -41,14 +52,14 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(size, Ordering::Relaxed);
+        THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        THREAD_BYTES.with(|count| count.set(count.get() + size));
         unsafe { System.realloc(ptr, layout, size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        THREAD_BYTES.with(|count| count.set(count.get() + layout.size()));
         unsafe { System.alloc_zeroed(layout) }
     }
 }
@@ -63,12 +74,12 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// The counters as they stand, without measuring anything.
+    /// This thread's counters as they stand, without measuring anything.
     #[must_use]
     pub fn now() -> Self {
         Self {
-            allocations: ALLOCATIONS.load(Ordering::Relaxed),
-            bytes: BYTES.load(Ordering::Relaxed),
+            allocations: THREAD_ALLOCATIONS.with(Cell::get),
+            bytes: THREAD_BYTES.with(Cell::get),
         }
     }
 
@@ -82,13 +93,12 @@ impl Stats {
     }
 }
 
-/// Run `f` and report what it allocated.
+/// Run `f` and report what it allocated on this thread.
 ///
 /// The value is returned so a test can keep asserting on the output while measuring it.
+/// Two tests may measure at once: the counters are per thread, so one cannot charge its
+/// allocations to the other.
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Stats) {
-    let _guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = Stats::now();
     let value = f();
     let after = Stats::now();
