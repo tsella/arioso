@@ -1,6 +1,6 @@
 //! HTTP surface for arioso.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arioso_config::{AUDIO_FORMATS, Config};
@@ -585,25 +585,64 @@ impl AppState {
         found.ok_or_else(|| ServerError::NoVoice(voice.clone()))
     }
 
+    /// The voice readiness reports, and whether it can be spoken.
+    ///
+    /// A Piper voice is a catalog id, so presence is its files on disk. A Kokoro voice is
+    /// a style inside the archive, so presence is the archive indexing that name: the
+    /// model can be installed and the configured style absent, and a server in that state
+    /// cannot speak. The name reported is the one that was checked.
+    fn ready_voice(&self) -> Option<(String, bool)> {
+        let config = self.config();
+        if !config.tts.enabled {
+            return None;
+        }
+        let Ok(spec) = self.voice_spec() else {
+            // A voice the catalog does not hold is not installed, and naming it is what
+            // tells the caller which value to change.
+            return Some((config.tts.voice.clone(), false));
+        };
+        if config.tts.engine == "kokoro" {
+            let present = self.is_installed(spec)
+                && archive_names(&self.models_dir, spec)
+                    .is_some_and(|names| names.contains(&config.tts.voice));
+            return Some((config.tts.voice.clone(), present));
+        }
+        Some((spec.id.clone(), self.is_installed(spec)))
+    }
+
     /// Load the configured engine into the one voice slot.
     ///
     /// One engine per process: the slot holds whichever `tts.engine` names, and a
     /// caller that changes it reloads rather than running both.
-    fn load_voice(&self) -> Result<Voice, String> {
-        let spec = self.voice_spec().map_err(|error| error.to_string())?;
+    fn load_voice(&self) -> Result<Voice, TtsFailure> {
+        let spec = self
+            .voice_spec()
+            .map_err(|error| TtsFailure::Client(error.to_string()))?;
         let config = self.config();
         if config.tts.engine == "kokoro" {
-            let model = self.file_of(spec, ".onnx")?;
-            let voices = self.file_of(spec, ".bin")?;
-            let symbols = self.file_of(spec, "config.json")?;
+            let model = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
+            let voices = self.file_of(spec, ".bin").map_err(TtsFailure::Engine)?;
+            let symbols = self
+                .file_of(spec, "config.json")
+                .map_err(TtsFailure::Engine)?;
             let voice = config.tts.voice.clone();
-            let loaded = KokoroVoice::load(&model, &voices, &symbols, &voice)
-                .map_err(|error| error.to_string())?;
+            let loaded =
+                KokoroVoice::load(&model, &voices, &symbols, &voice).map_err(
+                    |error| match error {
+                        // The archive does not hold the configured style. The model is fine;
+                        // the config names something that is not there.
+                        KokoroError::UnknownVoice { .. } => TtsFailure::Client(error.to_string()),
+                        other => TtsFailure::Engine(other.to_string()),
+                    },
+                )?;
             Ok(Voice::Kokoro(loaded))
         } else {
-            let onnx = self.file_of(spec, ".onnx")?;
-            let symbols = self.file_of(spec, ".onnx.json")?;
-            let loaded = PiperVoice::load(&onnx, &symbols).map_err(|error| error.to_string())?;
+            let onnx = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
+            let symbols = self
+                .file_of(spec, ".onnx.json")
+                .map_err(TtsFailure::Engine)?;
+            let loaded = PiperVoice::load(&onnx, &symbols)
+                .map_err(|error| TtsFailure::Engine(error.to_string()))?;
             Ok(Voice::Piper(loaded))
         }
     }
@@ -974,11 +1013,11 @@ impl AppState {
     ///
     /// The first synthesis pays for the model load; a caller that knows it is about to
     /// ask should be able to pay it earlier. Idempotent: a loaded voice is left alone.
-    pub(crate) fn warm_voice(&self) -> Result<(), String> {
+    pub(crate) fn warm_voice(&self) -> Result<(), TtsFailure> {
         let mut guard = self
             .voice
             .lock()
-            .map_err(|_| "the voice lock is poisoned".to_string())?;
+            .map_err(|_| TtsFailure::Engine("the voice lock is poisoned".to_string()))?;
         if guard.is_some() {
             return Ok(());
         }
@@ -991,7 +1030,7 @@ impl AppState {
     /// A speaker the voice does not have is the caller's mistake, not an engine failure,
     /// so it is checked before the render and answered with a code a client can switch on.
     pub(crate) fn check_sid(&self, sid: i64) -> Result<(), String> {
-        self.warm_voice()?;
+        self.warm_voice().map_err(|error| error.to_string())?;
         let guard = self
             .voice
             .lock()
@@ -1025,7 +1064,7 @@ impl AppState {
             .lock()
             .map_err(|_| "the voice lock is poisoned".to_string())?;
         if guard.is_none() {
-            *guard = Some(self.load_voice()?);
+            *guard = Some(self.load_voice().map_err(|error| error.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
         let user = self.user_dictionary();
@@ -1219,6 +1258,22 @@ enum SttFailure {
     /// The model the config asks for is not downloaded.
     #[error("{0} is not installed")]
     NotInstalled(String),
+}
+
+/// Why the voice slot could not be filled.
+///
+/// The two are answered differently because they are different mistakes: a config naming
+/// a voice the engine cannot say is the caller's, and answers 422 so the caller can fix
+/// it; an engine that failed to load is the server's, and answers 500. Answered as one,
+/// a client is told to retry a request that can never succeed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TtsFailure {
+    /// The config names a voice, or a voice name, the engine cannot use.
+    #[error("{0}")]
+    Client(String),
+    /// The engine could not load or run.
+    #[error("{0}")]
+    Engine(String),
 }
 
 /// Request body for `POST /v1/tts`.
@@ -1767,9 +1822,11 @@ pub struct ReadyView {
     pub status: String,
     /// The user dictionary.
     pub dictionary: DictionaryView,
-    /// Voice the server will load, when text to speech is enabled.
+    /// Voice the server will load, when text to speech is enabled. For Kokoro this is
+    /// the style name, which is the value that was checked against the archive.
     pub voice: Option<String>,
-    /// Whether that voice is on disk.
+    /// Whether that voice can be spoken: its model is on disk, and for Kokoro the
+    /// archive holds the style.
     pub voice_installed: bool,
     /// Whether it is loaded right now.
     pub voice_loaded: bool,
@@ -1873,12 +1930,28 @@ pub struct ModelListView {
     pub models: Vec<ModelView>,
 }
 
+/// The voice names a Kokoro model's archive holds, when the archive is on disk.
+///
+/// The catalog entry holds every style, so a style is present only if the archive indexes
+/// it. Absent means the archive is not there to ask, which is a model that is not
+/// installed rather than a voice that is missing.
+fn archive_names(models_dir: &Path, spec: &ModelSpec) -> Option<Vec<String>> {
+    spec.files
+        .iter()
+        .find(|file| file.name.ends_with(".bin"))
+        .map(|file| models_dir.join(&file.name))
+        .filter(|path| path.is_file())
+        .and_then(|path| KokoroVoice::voice_names(&path).ok())
+}
+
 #[utoipa::path(
     get,
     path = "/readyz",
     tag = "system",
     summary = "Readiness",
-    description = "Ready means every enabled engine has its model installed, not that some model is. A missing model is 503.",
+    description = "Ready means every enabled engine can serve, not that some model is. A \
+        missing model is 503, and so is a configured voice the engine cannot speak: for \
+        Kokoro the named style has to be in the archive.",
     responses(
         (status = 200, body = ReadyView),
         (status = 503, description = "An enabled engine's model is not installed", body = ReadyView)
@@ -1892,18 +1965,14 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
         .iter()
         .filter(|model| state.is_installed(model))
         .count();
-    // Readiness is about the models this server will actually load, and only about the
+    // Readiness is about the voice this server will actually load, and only about the
     // engines that are on. A server with speech to text off is not unready because no
     // speech model is installed.
-    let voice = config
-        .tts
-        .enabled
-        .then(|| state.voice_spec().ok().map(|spec| spec.id.clone()))
-        .flatten();
-    let voice_installed = !config.tts.enabled
-        || state
-            .voice_spec()
-            .is_ok_and(|spec| state.is_installed(spec));
+    let (voice, voice_installed) = match state.ready_voice() {
+        Some((name, installed)) => (Some(name), installed),
+        // Speech to text is off, so no voice is reported and nothing is missing.
+        None => (None, true),
+    };
     let voice_loaded = state
         .voice
         .lock()
@@ -2091,6 +2160,9 @@ pub struct ServerPatch {
 struct Touched {
     voice: bool,
     stt: bool,
+    /// The voice a patch of the engine had to change, as (was, is). Reported in the
+    /// response, because the caller asked for one change and got two.
+    voice_defaulted: Option<(String, String)>,
 }
 
 impl ConfigPatch {
@@ -2101,6 +2173,16 @@ impl ConfigPatch {
             if let Some(enabled) = tts.enabled {
                 config.tts.enabled = enabled;
             }
+            // A voice belongs to one engine and the two share no names, so a patch that
+            // changes the engine without naming a voice would leave the config asking
+            // for something the new engine cannot say. The engine's own default stands
+            // in, and the response says so.
+            let changed_engine = tts
+                .engine
+                .as_ref()
+                .filter(|engine| **engine != config.tts.engine)
+                .cloned();
+            let named_voice = tts.voice.is_some();
             if let Some(engine) = tts.engine {
                 config.tts.engine = engine;
                 touched.voice = true;
@@ -2108,6 +2190,13 @@ impl ConfigPatch {
             if let Some(voice) = tts.voice {
                 config.tts.voice = voice;
                 touched.voice = true;
+            }
+            if let (Some(engine), false) = (&changed_engine, named_voice) {
+                if let Some(default) = arioso_config::default_voice(engine) {
+                    let was = std::mem::replace(&mut config.tts.voice, default.to_string());
+                    touched.voice_defaulted = Some((was, default.to_string()));
+                    touched.voice = true;
+                }
             }
             if let Some(speed) = tts.speed {
                 config.tts.speed = speed;
@@ -2298,7 +2387,9 @@ async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
     summary = "Change the config without a restart",
     description = "Only the fields present in the body change. An unknown field is refused, \
         so a typo does not look like a successful change. Validation runs before anything \
-        is applied, so a refused patch changes nothing.",
+        is applied, so a refused patch changes nothing. A patch that changes `tts.engine` \
+        without naming a voice gets that engine's default voice, and the response carries \
+        a `notes` array saying which.",
     request_body = ConfigPatch,
     responses(
         (status = 200, body = serde_json::Value),
@@ -2332,7 +2423,21 @@ async fn patch_config(
         })?;
     }
 
-    let body = config_json(&next);
+    let mut body = config_json(&next);
+    if let Some((was, is)) = &touched.voice_defaulted {
+        // Said, not silent: the caller named an engine and got a voice with it. The note
+        // sits beside the config document rather than inside it, so every field a client
+        // already reads stays where it was.
+        if let Some(document) = body.as_object_mut() {
+            document.insert(
+                "notes".to_string(),
+                serde_json::json!([format!(
+                    "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
+                    next.tts.engine
+                )]),
+            );
+        }
+    }
     state.set_config(next);
     if touched.voice {
         state.drop_voice();
@@ -2415,10 +2520,7 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             .models
             .iter()
             .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)
-            .and_then(|model| model.files.iter().find(|file| file.name.ends_with(".bin")))
-            .map(|file| state.models_dir.join(&file.name))
-            .filter(|path| path.is_file())
-            .and_then(|path| KokoroVoice::voice_names(&path).ok());
+            .and_then(|model| archive_names(&state.models_dir, model));
         archive.is_none_or(|names| names.contains(&config.tts.voice))
     } else {
         state.manifest.find_voice(&config.tts.voice).is_some()
@@ -2503,13 +2605,7 @@ async fn list_voices(
         // the rows a picker can choose. Until the archive is on disk there is nothing to
         // name, and the catalog row stands in for it rather than a list of guesses.
         let styles = if model.engine == "kokoro" && installed {
-            model
-                .files
-                .iter()
-                .find(|file| file.name.ends_with(".bin"))
-                .map(|file| state.models_dir.join(&file.name))
-                .and_then(|path| KokoroVoice::voice_names(&path).ok())
-                .unwrap_or_default()
+            archive_names(&state.models_dir, model).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -2741,7 +2837,8 @@ impl Drop for DeleteReservation {
     responses(
         (status = 200, description = "The model is loaded", body = serde_json::Value),
         (status = 404, description = "No such model", body = Problem),
-        (status = 409, description = "Not installed, or not a configured model", body = Problem)
+        (status = 409, description = "Not installed, or not a configured model", body = Problem),
+        (status = 422, description = "The configured voice is one the engine cannot say", body = Problem)
     )
 )]
 async fn warm_model(
@@ -2786,15 +2883,24 @@ async fn warm_model(
                 )
                     .into_response()
             }
-            Ok(Err(detail)) => {
-                tracing::error!(model = %id, %detail, "could not warm the voice");
-                ApiError::coded(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "load_failed",
-                    "the voice could not be loaded; the server log has the detail",
-                )
-                .into_response()
-            }
+            Ok(Err(failure)) => match failure {
+                // A config naming a voice the engine cannot say is the caller's mistake:
+                // it will fail the same way however many times it is retried.
+                TtsFailure::Client(detail) => {
+                    tracing::warn!(model = %id, %detail, "the configured voice cannot be spoken");
+                    ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid_value", detail)
+                        .into_response()
+                }
+                TtsFailure::Engine(detail) => {
+                    tracing::error!(model = %id, %detail, "could not warm the voice");
+                    ApiError::coded(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "load_failed",
+                        "the voice could not be loaded; the server log has the detail",
+                    )
+                    .into_response()
+                }
+            },
             Err(join) => {
                 tracing::error!(model = %id, %join, "the warm task failed");
                 ApiError::coded(
@@ -3875,6 +3981,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_patch_that_changes_the_engine_brings_that_engine_a_voice() {
+        // The two engines share no voice names, so a patch naming only the engine would
+        // leave `tts.voice` asking for something the new engine cannot say. It is set to
+        // the engine's default, and the response says so rather than changing it quietly.
+        let (state, _dir) = state();
+        assert_eq!(state.config().tts.voice, Config::default().tts.voice);
+
+        let (status, body) = patch(state.clone(), r#"{"tts":{"engine":"kokoro"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().tts.engine, "kokoro");
+        assert_eq!(state.config().tts.voice, "af_heart");
+        assert_eq!(body["tts"]["voice"], "af_heart");
+        let notes = body["notes"].as_array().expect("the change is said");
+        let note = notes[0].as_str().unwrap();
+        assert!(note.contains("af_heart"), "{note}");
+        assert!(
+            note.contains(Config::default().tts.voice.as_str()),
+            "{note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_names_the_voice_keeps_it() {
+        // A caller that names both is not second-guessed, and no note is owed: nothing
+        // was changed that was not asked for.
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            state.clone(),
+            r#"{"tts":{"engine":"kokoro","voice":"af_heart"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().tts.voice, "af_heart");
+        assert!(body["notes"].is_null(), "{body}");
+    }
+
+    #[tokio::test]
     async fn switching_the_engine_is_accepted_and_drops_the_loaded_voice() {
         // The slot holds one engine, so a patch that changes it must not leave a Piper
         // voice answering for Kokoro.
@@ -4182,6 +4325,108 @@ mod tests {
         assert_eq!(entry["state"], "downloading");
         assert_eq!(entry["downloaded"], 40);
         assert_eq!(entry["commercial_use"], false, "lessac is not commercial");
+    }
+
+    /// A server whose Kokoro model is installed, holding `voices` in its archive.
+    ///
+    /// The graph and the symbol table are one byte each: nothing here loads a session,
+    /// and the catalog's sizes are set to what was written so the model reads as
+    /// installed.
+    fn kokoro_state(voices: &[(&str, usize, usize)]) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let archive = test_archive(voices);
+        std::fs::write(dir.path().join("voices-v1.0.bin"), &archive).unwrap();
+        std::fs::write(dir.path().join("kokoro-v1.0.onnx"), b"x").unwrap();
+        // A real symbol table, so a load reaches the archive before the graph: the graph
+        // itself is a byte and would fail as an ONNX session.
+        std::fs::write(
+            dir.path().join("kokoro-config.json"),
+            br#"{"vocab":{"a":1,".":4," ":16}}"#,
+        )
+        .unwrap();
+        let mut manifest = Manifest::parse(KOKORO_MANIFEST.as_bytes()).unwrap();
+        for model in &mut manifest.models {
+            for file in &mut model.files {
+                file.size = std::fs::metadata(dir.path().join(&file.name))
+                    .unwrap()
+                    .len();
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = "af_heart".to_owned();
+        (
+            Arc::new(AppState::new(config, manifest, None).unwrap()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn readiness_checks_that_the_kokoro_voice_is_in_the_archive() {
+        // Installed files are not enough: the style has to be one the archive holds, or
+        // the first request fails to load it.
+        let (state, _dir) = kokoro_state(&[("af_heart", 2, 2)]);
+        let (_, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["voice"], "af_heart",
+            "the style that was checked is named"
+        );
+        assert_eq!(json["voice_installed"], true);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_not_ready_when_the_kokoro_voice_is_absent() {
+        // The same model, installed, holding a different style: nothing can be spoken.
+        let (state, _dir) = kokoro_state(&[("am_michael", 2, 2)]);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "voice_missing");
+        assert_eq!(json["voice"], "af_heart");
+        assert_eq!(json["voice_installed"], false);
+    }
+
+    #[tokio::test]
+    async fn warming_a_voice_the_archive_does_not_hold_is_the_callers_error() {
+        // Every file is installed, so this is not a missing model, and no retry can make
+        // the style appear: the config names something the engine cannot say.
+        let (state, _dir) = kokoro_state(&[("am_michael", 2, 2)]);
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/models/kokoro-82m/warm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "invalid_value");
+        let detail = json["detail"].as_str().unwrap();
+        assert!(detail.contains("af_heart"), "{detail}");
     }
 
     #[tokio::test]

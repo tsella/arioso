@@ -76,7 +76,7 @@ impl VoiceFile {
             .len();
         let mut entries = BTreeMap::new();
         let mut position = 0u64;
-        while position + 30 <= length {
+        while position.checked_add(30).is_some_and(|end| end <= length) {
             file.seek(SeekFrom::Start(position))
                 .map_err(|source| KokoroError::Io {
                     path: path.to_path_buf(),
@@ -112,7 +112,24 @@ impl VoiceFile {
                     "{name} is compressed; this loader reads the stored archive the model ships"
                 )));
             }
-            let offset = position + 30 + name_len as u64 + extra_len as u64;
+            let offset = position
+                .checked_add(30)
+                .and_then(|at| at.checked_add(name_len as u64))
+                .and_then(|at| at.checked_add(extra_len as u64))
+                .ok_or_else(|| {
+                    KokoroError::Voices(format!("{name}: entry offset does not fit in 64 bits"))
+                })?;
+            let size = compressed.min(uncompressed);
+            // The declared size is the header's claim, and the header is the part a
+            // corrupt file gets wrong. Reading it unexamined lets an archive ask for
+            // gigabytes: the buffer is allocated to the claim before any read can fail.
+            // The claim is checked against the file once, here, for every entry.
+            if offset.checked_add(size).is_none_or(|end| end > length) {
+                return Err(KokoroError::Voices(format!(
+                    "{name} claims {size} bytes at offset {offset}, past the end of the \
+                     {length} byte file"
+                )));
+            }
             let stem = name
                 .strip_suffix(".npy")
                 .unwrap_or(&name)
@@ -120,14 +137,8 @@ impl VoiceFile {
                 .next()
                 .unwrap_or(&name)
                 .to_string();
-            entries.insert(
-                stem,
-                Entry {
-                    offset,
-                    size: compressed.min(uncompressed),
-                },
-            );
-            position = offset + compressed.max(uncompressed);
+            entries.insert(stem, Entry { offset, size });
+            position = offset + size;
         }
         if entries.is_empty() {
             return Err(KokoroError::Voices(format!(
@@ -286,10 +297,28 @@ fn parse_npy(bytes: &[u8]) -> Result<Style, KokoroError> {
             )));
         }
     };
+    // A table with no rows is a table with no style. `Style::row` would index it and
+    // slice past the end, so the shape is refused where it is read rather than where it
+    // is used.
+    if rows == 0 {
+        return Err(KokoroError::Voices(
+            "style array has no rows, so it holds no style to speak with".into(),
+        ));
+    }
     let start = prefix + header_len;
-    let expected = rows * width * 4;
+    let expected = rows
+        .checked_mul(width)
+        .and_then(|cells| cells.checked_mul(4))
+        .ok_or_else(|| {
+            KokoroError::Voices(format!(
+                "style array shape ({rows}, 1, {width}) is larger than this loader can address"
+            ))
+        })?;
+    let end = start.checked_add(expected).ok_or_else(|| {
+        KokoroError::Voices("style array starts past the end of the entry".to_string())
+    })?;
     let data = bytes
-        .get(start..start + expected)
+        .get(start..end)
         .ok_or_else(|| KokoroError::Voices("style array is shorter than its shape".into()))?;
     let data = data
         .chunks_exact(4)
@@ -408,6 +437,27 @@ mod tests {
         let error = voices.style("xx_nobody").unwrap_err().to_string();
         assert!(error.contains("af_heart"), "{error}");
         assert!(error.contains("am_michael"), "{error}");
+    }
+
+    #[test]
+    fn a_style_array_with_no_rows_is_refused() {
+        let (_dir, path) = written(&archive(&[("af_heart", &[], 0, 2)]));
+        let voices = VoiceFile::open(&path).unwrap();
+        let error = voices.style("af_heart").unwrap_err().to_string();
+        assert!(error.contains("no rows"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_that_claims_more_bytes_than_the_file_holds_is_refused() {
+        let data = vec![0.0f32; 2];
+        let mut bytes = archive(&[("af_heart", data.as_slice(), 1, 2)]);
+        // The two size fields of the first local header, claiming a megabyte of style
+        // out of a file that holds a few dozen bytes.
+        bytes[18..22].copy_from_slice(&1_048_576u32.to_le_bytes());
+        bytes[22..26].copy_from_slice(&1_048_576u32.to_le_bytes());
+        let (_dir, path) = written(&bytes);
+        let error = VoiceFile::open(&path).unwrap_err().to_string();
+        assert!(error.contains("past the end"), "{error}");
     }
 
     #[test]

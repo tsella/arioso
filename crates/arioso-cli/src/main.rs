@@ -63,6 +63,10 @@ enum Command {
         /// Speech engine to speak with. Defaults to tts.engine.
         #[arg(long)]
         engine: Option<String>,
+        /// Voice to speak with. Defaults to tts.voice, or to the engine's own default when
+        /// --engine names the other engine.
+        #[arg(long)]
+        voice: Option<String>,
         /// Pronunciation dictionary. Defaults to cmudict.dict in the models directory.
         #[arg(long)]
         dict: Option<PathBuf>,
@@ -140,16 +144,20 @@ fn main() -> Result<()> {
             text,
             out,
             engine,
+            voice,
             dict,
             sid,
         } => say(
             &config,
             &config_path,
-            &text,
-            out,
-            dict,
-            sid,
-            engine.as_deref(),
+            SayRequest {
+                text: &text,
+                out,
+                dict,
+                sid,
+                engine: engine.as_deref(),
+                voice: voice.as_deref(),
+            },
         ),
         Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
@@ -751,28 +759,63 @@ fn request_stop(pid: u32) -> Result<()> {
     Ok(())
 }
 
-fn say(
-    config: &Config,
-    config_path: &Path,
-    text: &str,
+/// What `arioso say` was asked to speak, and where the audio goes.
+struct SayRequest<'a> {
+    /// Text to speak.
+    text: &'a str,
+    /// Where the WAV goes. Defaults to out.wav.
     out: Option<PathBuf>,
+    /// Pronunciation dictionary, or the models directory's.
     dict: Option<PathBuf>,
+    /// Speaker number, for a voice that has more than one.
     sid: Option<i64>,
-    engine: Option<&str>,
-) -> Result<()> {
-    // The flag wins over the file, so one command can speak in the other engine without
+    /// Engine, when the flag overrides the config.
+    engine: Option<&'a str>,
+    /// Voice, when the flag overrides the config.
+    voice: Option<&'a str>,
+}
+
+fn say(config: &Config, config_path: &Path, request: SayRequest<'_>) -> Result<()> {
+    // The flags win over the file, so one command can speak in the other engine without
     // editing a config that the server is also reading.
-    let engine = engine.unwrap_or(&config.tts.engine);
-    if engine == "kokoro" && sid.unwrap_or(0) != 0 {
+    let engine = request.engine.unwrap_or(&config.tts.engine);
+    let (voice, note) = resolve_voice(config, engine, request.voice);
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
+    if engine == "kokoro" && request.sid.unwrap_or(0) != 0 {
         bail!("the kokoro engine has one speaker per voice, so --sid has nothing to choose");
     }
-    let (dictionary, user) = dictionaries(config, config_path, dict)?;
+    let (dictionary, user) = dictionaries(config, config_path, request.dict.as_deref())?;
     match engine {
-        "kokoro" => say_kokoro(config, text, out, &dictionary, &user),
-        "piper" => say_piper(config, text, out, sid, &dictionary, &user),
+        "kokoro" => say_kokoro(config, &request, &voice, &dictionary, &user),
+        "piper" => say_piper(config, &request, &voice, &dictionary, &user),
         other => bail!(
             "tts.engine {other} is not built into this binary; the engines here are piper, kokoro"
         ),
+    }
+}
+
+/// The voice this `say` will use, and what to tell the caller when it is not the config's.
+///
+/// A voice belongs to one engine, and the two engines share no names, so speaking with the
+/// other engine while the config names this one's voice cannot work. The engine's own
+/// default stands in, and the note says which voice that is rather than leaving it to be
+/// found in the output.
+fn resolve_voice(config: &Config, engine: &str, voice: Option<&str>) -> (String, Option<String>) {
+    match voice {
+        Some(voice) => (voice.to_string(), None),
+        None if engine == config.tts.engine => (config.tts.voice.clone(), None),
+        None => match arioso_config::default_voice(engine) {
+            Some(default) => (
+                default.to_string(),
+                Some(format!(
+                    "tts.voice is {}, which {engine} cannot say; speaking with its default voice {default}",
+                    config.tts.voice
+                )),
+            ),
+            None => (config.tts.voice.clone(), None),
+        },
     }
 }
 
@@ -780,10 +823,10 @@ fn say(
 fn dictionaries(
     config: &Config,
     config_path: &Path,
-    dict: Option<PathBuf>,
+    dict: Option<&Path>,
 ) -> Result<(CmuDict, arioso_core::UserDictionary)> {
     let dir = models_dir(config);
-    let dict_path = dict.unwrap_or_else(|| dir.join("cmudict.dict"));
+    let dict_path = dict.map_or_else(|| dir.join("cmudict.dict"), Path::to_path_buf);
     let dict_text = std::fs::read_to_string(&dict_path)
         .with_context(|| format!("reading {}", dict_path.display()))?;
     let dictionary = CmuDict::parse(&dict_text);
@@ -802,9 +845,8 @@ fn dictionaries(
 /// Speak through Piper: one model per voice.
 fn say_piper(
     config: &Config,
-    text: &str,
-    out: Option<PathBuf>,
-    sid: Option<i64>,
+    request: &SayRequest<'_>,
+    voice: &str,
     dictionary: &CmuDict,
     user: &arioso_core::UserDictionary,
 ) -> Result<()> {
@@ -815,16 +857,13 @@ fn say_piper(
         .iter()
         .filter(|m| m.kind == arioso_models::Kind::Tts && m.engine == "piper")
         .collect();
-    let model = manifest.find_voice(&config.tts.voice).with_context(|| {
+    let model = manifest.find_voice(voice).with_context(|| {
         let available = voices
             .iter()
             .map(|m| m.id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "no piper voice matches tts.voice {:?}; available: {available}",
-            config.tts.voice
-        )
+        format!("no piper voice matches {voice:?}; available: {available}")
     })?;
     let file = |suffix: &str| {
         model
@@ -846,9 +885,9 @@ fn say_piper(
         normalize: arioso_core::NormalizeOptions {
             time_of_day: config.tts.time_of_day,
         },
-        sid: sid.unwrap_or(config.tts.sid),
+        sid: request.sid.unwrap_or(config.tts.sid),
     };
-    let report = voice.render(text, dictionary, user, options, |audio, _| {
+    let report = voice.render(request.text, dictionary, user, options, |audio, _| {
         arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
         Ok(())
     })?;
@@ -856,7 +895,7 @@ fn say_piper(
     if pcm.is_empty() {
         bail!("nothing to say: none of the words are in the dictionary");
     }
-    write_output(out, &pcm, voice.sample_rate())?;
+    write_output(request.out.clone(), &pcm, voice.sample_rate())?;
     report_problems(&report.missing, &report.guessed, &report.unusable);
     Ok(())
 }
@@ -864,8 +903,8 @@ fn say_piper(
 /// Speak through Kokoro: one model and a voice style.
 fn say_kokoro(
     config: &Config,
-    text: &str,
-    out: Option<PathBuf>,
+    request: &SayRequest<'_>,
+    voice: &str,
     dictionary: &CmuDict,
     user: &arioso_core::UserDictionary,
 ) -> Result<()> {
@@ -890,7 +929,7 @@ fn say_kokoro(
     let voices = file(".bin")?;
     let symbols = file("config.json")?;
 
-    let mut voice = KokoroVoice::load(&onnx, &voices, &symbols, &config.tts.voice)?;
+    let mut voice = KokoroVoice::load(&onnx, &voices, &symbols, voice)?;
     let mut pcm: Vec<u8> = Vec::new();
     let options = arioso_tts_kokoro::RenderOptions {
         speed: config.tts.speed,
@@ -898,7 +937,7 @@ fn say_kokoro(
             time_of_day: config.tts.time_of_day,
         },
     };
-    let report = voice.render(text, dictionary, user, options, |audio, _| {
+    let report = voice.render(request.text, dictionary, user, options, |audio, _| {
         arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
         Ok(())
     })?;
@@ -906,7 +945,7 @@ fn say_kokoro(
     if pcm.is_empty() {
         bail!("nothing to say: none of the words are in the dictionary");
     }
-    write_output(out, &pcm, voice.sample_rate())?;
+    write_output(request.out.clone(), &pcm, voice.sample_rate())?;
     report_problems(&report.missing, &report.guessed, &report.unusable);
     Ok(())
 }
@@ -1779,6 +1818,38 @@ mod tests {
         config.models.dir = Some(dir.path().to_path_buf());
         config.tts.voice = "piper-en_US-lessac-medium".to_owned();
         (dir, config)
+    }
+
+    #[test]
+    fn a_voice_is_taken_from_the_flag_then_the_config_then_the_engine() {
+        let (_dir, mut config) = fresh_install();
+        config.tts.engine = "piper".to_owned();
+        config.tts.voice = "en_US-joe-medium".to_owned();
+
+        // The flag wins.
+        let (voice, note) = resolve_voice(&config, "piper", Some("en_GB-alba-medium"));
+        assert_eq!(voice, "en_GB-alba-medium");
+        assert_eq!(note, None);
+
+        // Same engine, no flag: the config's voice.
+        let (voice, note) = resolve_voice(&config, "piper", None);
+        assert_eq!(voice, "en_US-joe-medium");
+        assert_eq!(note, None);
+
+        // Another engine, no flag: that engine's default, said out loud rather than
+        // left to be discovered from the output.
+        let (voice, note) = resolve_voice(&config, "kokoro", None);
+        assert_eq!(voice, "af_heart");
+        let note = note.expect("a change of voice is said, not silent");
+        assert!(note.contains("af_heart"), "{note}");
+        assert!(note.contains("en_US-joe-medium"), "{note}");
+
+        // And back: the Kokoro config's voice is not one Piper can say.
+        config.tts.engine = "kokoro".to_owned();
+        config.tts.voice = "af_heart".to_owned();
+        let (voice, note) = resolve_voice(&config, "piper", None);
+        assert_eq!(voice, "en_US-joe-medium");
+        assert!(note.is_some());
     }
 
     #[test]

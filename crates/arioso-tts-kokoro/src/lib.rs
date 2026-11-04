@@ -36,6 +36,13 @@ pub const MAX_TOKENS: usize = 510;
 /// Longest piece of text handed to the model, in characters.
 pub const SYNTHESIS_CHUNK: usize = 300;
 
+/// The token the model expects at both ends of an utterance.
+///
+/// `0` is not a symbol: the table starts at 1, and `0` is the frame the graph reads as
+/// silence. A run fed without one has no boundary frame, so where speech starts and stops
+/// is left for the graph to infer from the first and last phoneme.
+const PAD: i64 = 0;
+
 /// Why a voice could not be loaded or used.
 #[derive(Debug, Error)]
 pub enum KokoroError {
@@ -234,7 +241,9 @@ impl KokoroVoice {
     /// Synthesize one run of tokens into mono samples.
     ///
     /// The style row is the one for this token count: the model was trained with a style
-    /// per utterance length, and the last row covers anything longer.
+    /// per utterance length, and the last row covers anything longer. The count is the
+    /// run's own, before the pad frames, because the archive is indexed by what was said
+    /// rather than by the length of the tensor.
     ///
     /// # Errors
     ///
@@ -242,7 +251,8 @@ impl KokoroVoice {
     pub fn synthesize(&mut self, tokens: &[i64], speed: f32) -> Result<Vec<f32>, KokoroError> {
         let style = self.style.row(tokens.len()).to_vec();
         let width = self.style.width as i64;
-        let length = tokens.len() as i64;
+        let padded = padded(tokens);
+        let length = padded.len() as i64;
 
         let speed_value: ort::session::SessionInputValue<'_> = if self.speed_is_integer {
             Tensor::from_array(([1i64], vec![i64::from(speed.round() as i32)]))?.into()
@@ -252,7 +262,7 @@ impl KokoroVoice {
         let feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
             (
                 "tokens",
-                Tensor::from_array(([1i64, length], tokens.to_vec()))?.into(),
+                Tensor::from_array(([1i64, length], padded))?.into(),
             ),
             ("style", Tensor::from_array(([1i64, width], style))?.into()),
             ("speed", speed_value),
@@ -335,12 +345,7 @@ impl KokoroVoice {
                             true,
                         );
                         collect(&phonemes, report);
-                        groups.push(arioso_g2p::phonemes_for_form(
-                            &entry.term,
-                            dictionary,
-                            options.normalize,
-                            true,
-                        ));
+                        groups.push(phonemes.symbols);
                     }
                 }
                 Piece::Text(segment) => {
@@ -359,35 +364,88 @@ impl KokoroVoice {
             }
             symbols.extend(group);
         }
-        if !symbols.is_empty() && self.vocab.id('.').is_some() {
-            // One stop per utterance: the model was trained on punctuated phonemes, and
-            // a run that ends without one stops in the middle of a breath.
-            symbols.push(".");
+        if let Some(stop) = closing_stop(text, &self.vocab).filter(|_| !symbols.is_empty()) {
+            // One stop per utterance: the model was trained on punctuated phonemes, and a
+            // run that ends without one stops in the middle of a breath. A run that
+            // already ends in a mark keeps its own, because a period on `Hello?` makes it
+            // a statement.
+            symbols.push(stop);
         }
         symbols
     }
 
     /// Symbols for a dictionary entry, trying its forms in order.
+    ///
+    /// A form is used only when the model can say every character of it. Taking the first
+    /// form that phonemizes to anything would choose a respelling this table cannot say
+    /// and then have its unknown characters dropped, which is a different word from the
+    /// one the next form would have given. `arioso doctor` asks the same question of the
+    /// same forms, and the two answers have to agree.
     fn entry_symbols(
         &self,
         entry: &Entry,
         dictionary: &CmuDict,
         options: RenderOptions,
     ) -> Option<Vec<&'static str>> {
-        entry.forms().into_iter().find_map(|form| {
-            let symbols = arioso_g2p::phonemes_for_form(form, dictionary, options.normalize, true);
-            if symbols.is_empty() {
-                None
-            } else {
-                Some(symbols)
-            }
-        })
+        first_sayable(&entry.forms(), dictionary, options.normalize, &self.vocab)
     }
+}
+
+/// The first form the table can say in full, in the order the entry lists them.
+fn first_sayable(
+    forms: &[&str],
+    dictionary: &CmuDict,
+    normalize: arioso_core::NormalizeOptions,
+    vocab: &Vocab,
+) -> Option<Vec<&'static str>> {
+    forms.iter().find_map(|form| {
+        let symbols = arioso_g2p::phonemes_for_form(form, dictionary, normalize, true);
+        sayable(&symbols, vocab).then_some(symbols)
+    })
+}
+
+/// Whether every character of a run of symbols is in the model's table.
+fn sayable(symbols: &[&str], vocab: &Vocab) -> bool {
+    !symbols.is_empty()
+        && symbols
+            .iter()
+            .flat_map(|symbol| symbol.chars())
+            .all(|character| vocab.id(character).is_some())
 }
 
 fn collect(phonemes: &arioso_g2p::Phonemes, report: &mut RenderReport) {
     report.guessed.extend(phonemes.guessed.iter().cloned());
     report.missing.extend(phonemes.missing.iter().cloned());
+}
+
+/// The stop to end a run with, when the table has one.
+///
+/// Phonemization drops punctuation, so `Hello?` and `Hello.` reach the graph as the same
+/// symbols. The mark is taken from the text before that happens: the table's own `?` and
+/// `!` are used when the sentence ended with one, because the graph was trained with them
+/// and a period in their place turns a question into a statement. Anything else, and a
+/// sentence with no mark at all, gets a period.
+fn closing_stop(text: &str, vocab: &Vocab) -> Option<&'static str> {
+    let mark = match text.trim_end().chars().next_back() {
+        Some('!') => "!",
+        Some('?') => "?",
+        _ => ".",
+    };
+    if vocab.id(mark.chars().next()?).is_some() {
+        return Some(mark);
+    }
+    // A table without the mark the sentence ended with still gets a stop rather than
+    // none: a run with no stop at all is what this is here to avoid.
+    vocab.id('.').is_some().then_some(".")
+}
+
+/// A run with the pad frame at each end, which is the shape the graph was exported for.
+fn padded(tokens: &[i64]) -> Vec<i64> {
+    let mut run = Vec::with_capacity(tokens.len() + 2);
+    run.push(PAD);
+    run.extend_from_slice(tokens);
+    run.push(PAD);
+    run
 }
 
 /// Split a run of tokens at a word boundary, so no call is longer than the model's
@@ -455,6 +513,77 @@ mod tests {
         assert_eq!(runs[0].len(), MAX_TOKENS - 5);
         assert!(!runs[1].contains(&SPACE), "the boundary is in neither run");
         assert_eq!(runs[0].len() + runs[1].len(), tokens.len() - 1);
+    }
+
+    #[test]
+    fn a_run_is_padded_at_both_ends() {
+        assert_eq!(padded(&[4, 5, 6]), vec![0, 4, 5, 6, 0]);
+        assert_eq!(padded(&[]), vec![0, 0], "an empty run is still two frames");
+    }
+
+    #[test]
+    fn a_form_the_table_cannot_say_falls_through_to_the_next() {
+        let dictionary = CmuDict::parse("hello HH AH0 L OW1\nworld W ER1 L D\n");
+        let options = arioso_core::NormalizeOptions::default();
+        // A table holding exactly the characters `world` needs, so the first form is
+        // refused for a character it cannot say rather than for an empty result.
+        let wanted = arioso_g2p::phonemes_for_form("W ER1 L D", &dictionary, options, true);
+        let characters: Vec<char> = wanted
+            .iter()
+            .flat_map(|symbol| symbol.chars())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let table = characters
+            .iter()
+            .enumerate()
+            .map(|(index, character)| format!("\"{character}\":{}", index + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let vocab = Vocab::from_config(&format!("{{\"vocab\":{{{table}}}}}")).unwrap();
+
+        let forms = ["HH AH0 L OW1", "W ER1 L D"];
+        assert!(!sayable(
+            &arioso_g2p::phonemes_for_form(forms[0], &dictionary, options, true),
+            &vocab
+        ));
+        assert_eq!(
+            first_sayable(&forms, &dictionary, options, &vocab),
+            Some(wanted),
+            "the first form the table can say is the one used"
+        );
+    }
+
+    #[test]
+    fn a_sentence_keeps_the_mark_it_ends_with() {
+        let vocab = Vocab::from_config(r#"{"vocab":{"a":1,".":4,"!":5,"?":6," ":16}}"#).unwrap();
+        assert_eq!(closing_stop("Hello.", &vocab), Some("."));
+        assert_eq!(closing_stop("Hello!", &vocab), Some("!"));
+        assert_eq!(
+            closing_stop("Hello?", &vocab),
+            Some("?"),
+            "a question stays a question"
+        );
+        assert_eq!(
+            closing_stop("Hello", &vocab),
+            Some("."),
+            "a run with no mark gets a period"
+        );
+        assert_eq!(
+            closing_stop("Hello?  ", &vocab),
+            Some("?"),
+            "trailing space hides nothing"
+        );
+    }
+
+    #[test]
+    fn a_table_without_the_mark_falls_back_to_a_period() {
+        // A stripped table may have no `?`. The run still ends in something: no stop at
+        // all is the failure the period is there to prevent.
+        let partial = Vocab::from_config(r#"{"vocab":{"a":1,".":4}}"#).unwrap();
+        assert_eq!(closing_stop("Hello?", &partial), Some("."));
+        let bare = Vocab::from_config(r#"{"vocab":{"a":1}}"#).unwrap();
+        assert_eq!(closing_stop("Hello.", &bare), None);
     }
 
     #[test]

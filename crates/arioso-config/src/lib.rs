@@ -27,6 +27,31 @@ pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 /// names both, not so a config can use both.
 pub const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
 
+/// The Piper voice a config starts with.
+///
+/// CC0, so the default voice can be used in a shipped product. lessac is Blizzard-2013,
+/// research only, and was the default until it was noticed that the one voice you cannot
+/// ship was the one everybody got.
+const PIPER_DEFAULT_VOICE: &str = "en_US-joe-medium";
+
+/// The Kokoro style a config is given when it changes to that engine.
+const KOKORO_DEFAULT_VOICE: &str = "af_heart";
+
+/// The voice an engine speaks with when the config names none it can say.
+///
+/// `tts.voice` is one field and the two engines do not share names: `en_US-joe-medium` is
+/// a Piper voice and `af_heart` is a style inside the Kokoro archive, and neither engine
+/// can say the other's. A change of engine therefore has to bring a voice with it, or the
+/// config names something the new engine cannot load.
+#[must_use]
+pub fn default_voice(engine: &str) -> Option<&'static str> {
+    match engine {
+        "piper" => Some(PIPER_DEFAULT_VOICE),
+        "kokoro" => Some(KOKORO_DEFAULT_VOICE),
+        _ => None,
+    }
+}
+
 /// Everything arioso reads at startup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -256,10 +281,9 @@ impl Default for Tts {
         Self {
             enabled: true,
             engine: "piper".into(),
-            // CC0, so the default voice can be used in a shipped product. lessac is
-            // Blizzard-2013, research only, and was the default until it was noticed that
-            // the one voice you cannot ship was the one everybody got.
-            voice: "en_US-joe-medium".into(),
+            // The same voice `default_voice("piper")` names, so a config that switches
+            // engines and one that starts fresh land on the same default.
+            voice: PIPER_DEFAULT_VOICE.into(),
             speed: 1.0,
             sid: 0,
             format: "wav".into(),
@@ -1026,6 +1050,17 @@ mod tests {
     #[test]
     fn default_bind_is_loopback_on_10101() {
         assert_eq!(Config::default().server.bind, "127.0.0.1:10101");
+    }
+
+    #[test]
+    fn each_engine_has_a_default_voice() {
+        // A voice belongs to one engine, so the defaults cannot be the same string: the
+        // one a change of engine falls back to has to be sayable by the engine it is for.
+        let default = Config::default();
+        assert_eq!(default_voice("piper"), Some(default.tts.voice.as_str()));
+        assert_eq!(default_voice("kokoro"), Some("af_heart"));
+        assert_eq!(default_voice("espeak"), None, "an engine with no default");
+        assert_ne!(default_voice("piper"), default_voice("kokoro"));
     }
 
     #[test]
