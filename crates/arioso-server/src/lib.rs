@@ -2025,7 +2025,7 @@ pub struct ConfigPatch {
 pub struct TtsPatch {
     /// Whether the speech routes are served.
     pub enabled: Option<bool>,
-    /// Engine id. Only `piper` is built into this binary.
+    /// Engine id. `piper` or `kokoro`.
     pub engine: Option<String>,
     /// Voice id, or the bare voice name.
     pub voice: Option<String>,
@@ -2091,6 +2091,9 @@ pub struct ServerPatch {
 struct Touched {
     voice: bool,
     stt: bool,
+    /// The voice a patch of the engine had to change, as (was, is). Reported in the
+    /// response, because the caller asked for one change and got two.
+    voice_defaulted: Option<(String, String)>,
 }
 
 impl ConfigPatch {
@@ -2101,6 +2104,16 @@ impl ConfigPatch {
             if let Some(enabled) = tts.enabled {
                 config.tts.enabled = enabled;
             }
+            // A voice belongs to one engine and the two share no names, so a patch that
+            // changes the engine without naming a voice would leave the config asking
+            // for something the new engine cannot say. The engine's own default stands
+            // in, and the response says so.
+            let changed_engine = tts
+                .engine
+                .as_ref()
+                .filter(|engine| **engine != config.tts.engine)
+                .cloned();
+            let named_voice = tts.voice.is_some();
             if let Some(engine) = tts.engine {
                 config.tts.engine = engine;
                 touched.voice = true;
@@ -2108,6 +2121,13 @@ impl ConfigPatch {
             if let Some(voice) = tts.voice {
                 config.tts.voice = voice;
                 touched.voice = true;
+            }
+            if let (Some(engine), false) = (&changed_engine, named_voice) {
+                if let Some(default) = arioso_config::default_voice(engine) {
+                    let was = std::mem::replace(&mut config.tts.voice, default.to_string());
+                    touched.voice_defaulted = Some((was, default.to_string()));
+                    touched.voice = true;
+                }
             }
             if let Some(speed) = tts.speed {
                 config.tts.speed = speed;
@@ -2298,7 +2318,9 @@ async fn abort_server(State(state): State<Arc<AppState>>) -> Response {
     summary = "Change the config without a restart",
     description = "Only the fields present in the body change. An unknown field is refused, \
         so a typo does not look like a successful change. Validation runs before anything \
-        is applied, so a refused patch changes nothing.",
+        is applied, so a refused patch changes nothing. A patch that changes `tts.engine` \
+        without naming a voice gets that engine's default voice, and the response carries \
+        a `notes` array saying which.",
     request_body = ConfigPatch,
     responses(
         (status = 200, body = serde_json::Value),
@@ -2332,7 +2354,21 @@ async fn patch_config(
         })?;
     }
 
-    let body = config_json(&next);
+    let mut body = config_json(&next);
+    if let Some((was, is)) = &touched.voice_defaulted {
+        // Said, not silent: the caller named an engine and got a voice with it. The note
+        // sits beside the config document rather than inside it, so every field a client
+        // already reads stays where it was.
+        if let Some(document) = body.as_object_mut() {
+            document.insert(
+                "notes".to_string(),
+                serde_json::json!([format!(
+                    "tts.engine is {}, so tts.voice was set to that engine's default {is}; it was {was}",
+                    next.tts.engine
+                )]),
+            );
+        }
+    }
     state.set_config(next);
     if touched.voice {
         state.drop_voice();
@@ -3872,6 +3908,43 @@ mod tests {
             detail.contains("piper") && detail.contains("kokoro"),
             "the refusal names what works: {detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_changes_the_engine_brings_that_engine_a_voice() {
+        // The two engines share no voice names, so a patch naming only the engine would
+        // leave `tts.voice` asking for something the new engine cannot say. It is set to
+        // the engine's default, and the response says so rather than changing it quietly.
+        let (state, _dir) = state();
+        assert_eq!(state.config().tts.voice, Config::default().tts.voice);
+
+        let (status, body) = patch(state.clone(), r#"{"tts":{"engine":"kokoro"}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().tts.engine, "kokoro");
+        assert_eq!(state.config().tts.voice, "af_heart");
+        assert_eq!(body["tts"]["voice"], "af_heart");
+        let notes = body["notes"].as_array().expect("the change is said");
+        let note = notes[0].as_str().unwrap();
+        assert!(note.contains("af_heart"), "{note}");
+        assert!(
+            note.contains(Config::default().tts.voice.as_str()),
+            "{note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_names_the_voice_keeps_it() {
+        // A caller that names both is not second-guessed, and no note is owed: nothing
+        // was changed that was not asked for.
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            state.clone(),
+            r#"{"tts":{"engine":"kokoro","voice":"af_heart"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(state.config().tts.voice, "af_heart");
+        assert!(body["notes"].is_null(), "{body}");
     }
 
     #[tokio::test]

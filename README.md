@@ -286,7 +286,18 @@ the engines here are piper, kokoro","status":422,...}
 ```
 
 `piper` and `kokoro` are both built in. One engine loads per process: a patch that changes
-`tts.engine` drops the loaded voice, so the next request speaks with the other engine.
+`tts.engine` drops the loaded voice, so the next request speaks with the other engine. A
+voice belongs to one engine and the two share no names, so a patch that changes the engine
+and names no voice gets that engine's default (`af_heart` for Kokoro), and the response
+carries a `notes` array saying which voice was set:
+
+```console
+$ curl -sS -X PATCH http://127.0.0.1:10101/v1/config \
+    -H 'content-type: application/json' -d '{"tts": {"engine": "kokoro"}}' | \
+    jq -r '.notes[], .tts.voice'
+tts.engine is kokoro, so tts.voice was set to that engine's default af_heart; it was en_US-joe-medium
+af_heart
+```
 
 The WebSocket stream sends a `start` frame with the sample rate and the sample format
 (`pcm_s16le`), one binary frame per sentence, and an `end` frame with the chunk and sample
