@@ -10,7 +10,8 @@ use arioso_models::{
     Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX, SignatureState,
     models_dir, signature_path,
 };
-use arioso_tts_piper::PiperVoice;
+use arioso_tts_kokoro::KokoroVoice;
+use arioso_tts_piper::{PiperVoice, form_symbols};
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -59,6 +60,9 @@ enum Command {
         /// Output file. Defaults to out.wav.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Speech engine to speak with. Defaults to tts.engine.
+        #[arg(long)]
+        engine: Option<String>,
         /// Pronunciation dictionary. Defaults to cmudict.dict in the models directory.
         #[arg(long)]
         dict: Option<PathBuf>,
@@ -135,9 +139,18 @@ fn main() -> Result<()> {
         Command::Say {
             text,
             out,
+            engine,
             dict,
             sid,
-        } => say(&config, &config_path, &text, out, dict, sid),
+        } => say(
+            &config,
+            &config_path,
+            &text,
+            out,
+            dict,
+            sid,
+            engine.as_deref(),
+        ),
         Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
         Command::Stop => stop(&config_path),
@@ -745,6 +758,55 @@ fn say(
     out: Option<PathBuf>,
     dict: Option<PathBuf>,
     sid: Option<i64>,
+    engine: Option<&str>,
+) -> Result<()> {
+    // The flag wins over the file, so one command can speak in the other engine without
+    // editing a config that the server is also reading.
+    let engine = engine.unwrap_or(&config.tts.engine);
+    if engine == "kokoro" && sid.unwrap_or(0) != 0 {
+        bail!("the kokoro engine has one speaker per voice, so --sid has nothing to choose");
+    }
+    let (dictionary, user) = dictionaries(config, config_path, dict)?;
+    match engine {
+        "kokoro" => say_kokoro(config, text, out, &dictionary, &user),
+        "piper" => say_piper(config, text, out, sid, &dictionary, &user),
+        other => bail!(
+            "tts.engine {other} is not built into this binary; the engines here are piper, kokoro"
+        ),
+    }
+}
+
+/// The shipped dictionary and the user's entries, read once for either engine.
+fn dictionaries(
+    config: &Config,
+    config_path: &Path,
+    dict: Option<PathBuf>,
+) -> Result<(CmuDict, arioso_core::UserDictionary)> {
+    let dir = models_dir(config);
+    let dict_path = dict.unwrap_or_else(|| dir.join("cmudict.dict"));
+    let dict_text = std::fs::read_to_string(&dict_path)
+        .with_context(|| format!("reading {}", dict_path.display()))?;
+    let dictionary = CmuDict::parse(&dict_text);
+
+    let user_path = config.dictionary_path(Some(config_path));
+    let user = match arioso_core::UserDictionary::load(&user_path) {
+        Ok(dictionary) => dictionary,
+        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::shipped(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", user_path.display()));
+        }
+    };
+    Ok((dictionary, user))
+}
+
+/// Speak through Piper: one model per voice.
+fn say_piper(
+    config: &Config,
+    text: &str,
+    out: Option<PathBuf>,
+    sid: Option<i64>,
+    dictionary: &CmuDict,
+    user: &arioso_core::UserDictionary,
 ) -> Result<()> {
     let manifest = load_manifest(config)?;
     let dir = models_dir(config);
@@ -775,20 +837,6 @@ fn say(
     let onnx = file(".onnx")?;
     let voice_config = file(".onnx.json")?;
 
-    let dict_path = dict.unwrap_or_else(|| dir.join("cmudict.dict"));
-    let dict_text = std::fs::read_to_string(&dict_path)
-        .with_context(|| format!("reading {}", dict_path.display()))?;
-    let dictionary = CmuDict::parse(&dict_text);
-
-    let user_path = config.dictionary_path(Some(config_path));
-    let user = match arioso_core::UserDictionary::load(&user_path) {
-        Ok(dictionary) => dictionary,
-        Err(arioso_core::DictError::Io { .. }) => arioso_core::UserDictionary::shipped(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", user_path.display()));
-        }
-    };
-
     let mut voice = PiperVoice::load(&onnx, &voice_config)?;
     // Converted as it arrives: holding the audio as floats and again as bytes costs six
     // bytes a sample for a document that can run for minutes.
@@ -800,7 +848,7 @@ fn say(
         },
         sid: sid.unwrap_or(config.tts.sid),
     };
-    let report = voice.render(text, &dictionary, &user, options, |audio, _| {
+    let report = voice.render(text, dictionary, user, options, |audio, _| {
         arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
         Ok(())
     })?;
@@ -808,59 +856,104 @@ fn say(
     if pcm.is_empty() {
         bail!("nothing to say: none of the words are in the dictionary");
     }
+    write_output(out, &pcm, voice.sample_rate())?;
+    report_problems(&report.missing, &report.guessed, &report.unusable);
+    Ok(())
+}
 
+/// Speak through Kokoro: one model and a voice style.
+fn say_kokoro(
+    config: &Config,
+    text: &str,
+    out: Option<PathBuf>,
+    dictionary: &CmuDict,
+    user: &arioso_core::UserDictionary,
+) -> Result<()> {
+    let manifest = load_manifest(config)?;
+    let dir = models_dir(config);
+    let model = manifest
+        .models
+        .iter()
+        .find(|m| m.kind == arioso_models::Kind::Tts && m.engine == "kokoro")
+        .with_context(
+            || "no kokoro model in the catalog; run `arioso models download kokoro-82m`",
+        )?;
+    let file = |suffix: &str| {
+        model
+            .files
+            .iter()
+            .find(|f| f.name.ends_with(suffix))
+            .map(|f| dir.join(&f.name))
+            .with_context(|| format!("model {} has no {suffix} file", model.id))
+    };
+    let onnx = file(".onnx")?;
+    let voices = file(".bin")?;
+    let symbols = file("config.json")?;
+
+    let mut voice = KokoroVoice::load(&onnx, &voices, &symbols, &config.tts.voice)?;
+    let mut pcm: Vec<u8> = Vec::new();
+    let options = arioso_tts_kokoro::RenderOptions {
+        speed: config.tts.speed,
+        normalize: arioso_core::NormalizeOptions {
+            time_of_day: config.tts.time_of_day,
+        },
+    };
+    let report = voice.render(text, dictionary, user, options, |audio, _| {
+        arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
+        Ok(())
+    })?;
+
+    if pcm.is_empty() {
+        bail!("nothing to say: none of the words are in the dictionary");
+    }
+    write_output(out, &pcm, voice.sample_rate())?;
+    report_problems(&report.missing, &report.guessed, &report.unusable);
+    Ok(())
+}
+
+/// Write the PCM to a WAV and say how long it is.
+fn write_output(out: Option<PathBuf>, pcm: &[u8], rate: u32) -> Result<()> {
     let out = out.unwrap_or_else(|| PathBuf::from("out.wav"));
-    let rate = voice.sample_rate();
-    arioso_tts_piper::wav::write_wav_pcm(&out, &pcm, rate)?;
+    arioso_tts_piper::wav::write_wav_pcm(&out, pcm, rate)?;
     println!(
         "wrote {} ({:.2} s at {rate} Hz)",
         out.display(),
         (pcm.len() / 2) as f32 / rate as f32
     );
-    if !report.missing.is_empty() {
-        let shown = report
-            .missing
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = if report.missing.len() > 5 {
-            ", ..."
-        } else {
-            ""
-        };
+    Ok(())
+}
+
+/// Say what the render could not pronounce, in the words the caller understands.
+///
+/// Three lists rather than a report, because each engine has its own report type and
+/// the three names are all the printing needs.
+fn report_problems(missing: &[String], guessed: &[String], unusable: &[String]) {
+    let sample = |words: &[String]| {
+        let shown = words.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = if words.len() > 5 { ", ..." } else { "" };
+        format!("{shown}{more}")
+    };
+    if !missing.is_empty() {
         eprintln!(
-            "{} word(s) not in the dictionary and skipped: {shown}{more}",
-            report.missing.len()
+            "{} word(s) not in the dictionary and skipped: {}",
+            missing.len(),
+            sample(missing)
         );
     }
-    if !report.guessed.is_empty() {
-        let shown = report
-            .guessed
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = if report.guessed.len() > 5 {
-            ", ..."
-        } else {
-            ""
-        };
+    if !guessed.is_empty() {
         eprintln!(
-            "{} word(s) not in the dictionary, spoken by spelling rules: {shown}{more}",
-            report.guessed.len()
+            "{} word(s) not in the dictionary, spoken by spelling rules: {}",
+            guessed.len(),
+            sample(guessed)
         );
     }
-    if !report.unusable.is_empty() {
+    if !unusable.is_empty() {
         eprintln!(
             "{} entr(y/ies) the voice cannot say: {}",
-            report.unusable.len(),
-            report.unusable.join(", ")
+            unusable.len(),
+            unusable.join(", ")
         );
     }
-    Ok(())
 }
 
 /// The facts `doctor` reports about the configured certificate.
@@ -1123,6 +1216,70 @@ fn voice_config_path(config: &Config, models: &Path) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The config of the configured Kokoro model, when it is on disk.
+fn kokoro_config_path(config: &Config, models: &Path) -> Option<PathBuf> {
+    let manifest = load_manifest(config).ok()?;
+    let file = manifest
+        .models
+        .iter()
+        .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)?
+        .files
+        .iter()
+        .find(|file| file.name.ends_with("config.json"))?;
+    let path = models.join(&file.name);
+    path.is_file().then_some(path)
+}
+
+/// What a voice can say, in the form its engine checks a spelling against.
+enum Inventory {
+    /// A Piper voice's phoneme table.
+    Piper(arioso_g2p::PhonemeMap),
+    /// Kokoro's symbol table.
+    Kokoro(arioso_tts_kokoro::Vocab),
+}
+
+impl Inventory {
+    /// Whether this voice can say `form`, spelling it by rule only when asked.
+    fn can_say(
+        &self,
+        form: &str,
+        dictionary: &CmuDict,
+        options: arioso_core::NormalizeOptions,
+        rules: bool,
+    ) -> bool {
+        match self {
+            Self::Piper(map) => form_symbols(form, map, dictionary, options, rules).is_some(),
+            Self::Kokoro(vocab) => {
+                let symbols = arioso_g2p::phonemes_for_form(form, dictionary, options, rules);
+                !symbols.is_empty()
+                    && symbols.iter().all(|symbol| {
+                        symbol
+                            .chars()
+                            .all(|character| vocab.id(character).is_some())
+                    })
+            }
+        }
+    }
+}
+
+/// The inventory of the configured voice, or `None` when its files are not installed.
+fn voice_inventory(config: &Config, models: &Path) -> Result<Option<Inventory>> {
+    if config.tts.engine == "kokoro" {
+        let Some(path) = kokoro_config_path(config, models) else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(&path)?;
+        return Ok(Some(Inventory::Kokoro(
+            arioso_tts_kokoro::Vocab::from_config(&text)?,
+        )));
+    }
+    let Some(path) = voice_config_path(config, models) else {
+        return Ok(None);
+    };
+    let map = arioso_g2p::PhonemeMap::from_voice_config(&std::fs::read_to_string(&path)?)?;
+    Ok(Some(Inventory::Piper(map)))
+}
+
 /// Report the user dictionary, and the entries the configured voice cannot say.
 fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Result<usize> {
     let path = config.dictionary_path(Some(config_path));
@@ -1142,7 +1299,7 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     // The voice's symbol inventory lives in its config, so no model is loaded. The catalog
     // names the file: a directory scan matched nothing when `tts.voice` was a catalog id
     // rather than the bare name, and reported a voice that was installed as missing.
-    let Some(voice_config) = voice_config_path(config, models) else {
+    let Some(inventory) = voice_inventory(config, models)? else {
         println!(
             "            voice {} is not installed, so entries were not checked",
             config.tts.voice
@@ -1150,7 +1307,6 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
         return Ok(0);
     };
 
-    let map = arioso_g2p::PhonemeMap::from_voice_config(&std::fs::read_to_string(&voice_config)?)?;
     let dict_path = models.join("cmudict.dict");
     let pronunciations = match std::fs::read_to_string(&dict_path) {
         Ok(text) => CmuDict::parse(&text),
@@ -1171,10 +1327,10 @@ fn report_dictionary(config: &Config, config_path: &Path, models: &Path) -> Resu
     let mut by_rule: Vec<&str> = Vec::new();
     for entry in user.entries() {
         let sayable = |rules: bool| {
-            entry.forms().iter().any(|form| {
-                arioso_tts_piper::form_symbols(form, &map, &pronunciations, options, rules)
-                    .is_some()
-            })
+            entry
+                .forms()
+                .iter()
+                .any(|form| inventory.can_say(form, &pronunciations, options, rules))
         };
         if !sayable(true) {
             unusable.push(&entry.term);

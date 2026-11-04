@@ -16,6 +16,7 @@ arioso-models.workspace = true
 arioso-stt-sherpa.workspace = true
 arioso-vad.workspace = true
 arioso-tts-piper.workspace = true
+arioso-tts-kokoro.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
