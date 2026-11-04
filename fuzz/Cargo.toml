@@ -24,6 +24,12 @@ path = "../crates/arioso-models"
 [dependencies.arioso-tts-piper]
 path = "../crates/arioso-tts-piper"
 
+[dependencies.arioso-tts-kokoro]
+path = "../crates/arioso-tts-kokoro"
+
+[dependencies.arioso-g2p]
+path = "../crates/arioso-g2p"
+
 [[bin]]
 name = "config_json"
 path = "fuzz_targets/config_json.rs"
@@ -48,6 +54,34 @@ bench = false
 [[bin]]
 name = "wav_header"
 path = "fuzz_targets/wav_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "normalize"
+path = "fuzz_targets/normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk"
+path = "fuzz_targets/chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "g2p"
+path = "fuzz_targets/g2p.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kokoro_voice"
+path = "fuzz_targets/kokoro_voice.rs"
 test = false
 doc = false
 bench = false

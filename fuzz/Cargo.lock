@@ -33,7 +33,9 @@ version = "0.0.0"
 dependencies = [
  "arioso-config",
  "arioso-core",
+ "arioso-g2p",
  "arioso-models",
+ "arioso-tts-kokoro",
  "arioso-tts-piper",
  "libfuzzer-sys",
 ]
@@ -56,6 +58,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "hex",
+ "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
@@ -63,6 +66,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "arioso-tts-kokoro"
+version = "0.1.7"
+dependencies = [
+ "arioso-core",
+ "arioso-g2p",
+ "ort",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
