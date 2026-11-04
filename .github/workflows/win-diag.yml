@@ -68,6 +68,23 @@ jobs:
         shell: pwsh
         run: |
           cargo test -p arioso-stt-sherpa --lib a_transducer_entry_without_a_family_is_read_as_whisper -- --ignored --nocapture 2>&1 | Select-Object -Last 20
+      - name: try the newest runtime instead
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.30.1
+          archive="onnxruntime-win-x64-$version"
+          curl -sSL -o "$RUNNER_TEMP/new.zip" "https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.zip"
+          unzip -q "$RUNNER_TEMP/new.zip" -d "$RUNNER_TEMP/new"
+          cp "$RUNNER_TEMP/new/$archive/lib/"*.dll target/debug/deps/
+          cp "$RUNNER_TEMP/new/$archive/lib/"*.dll target/debug/
+          ls -l target/debug/deps/onnxruntime.dll
+      - name: the same test against the newest runtime
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo test -p arioso-stt-sherpa --lib a_transducer_entry_without_a_family_is_read_as_whisper -- --ignored --nocapture 2>&1 | Select-Object -Last 20
       - name: put the vendored runtime beside the test binaries, then run it again
         continue-on-error: true
         shell: pwsh
