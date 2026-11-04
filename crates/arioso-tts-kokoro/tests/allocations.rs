@@ -61,12 +61,15 @@ fn reading_one_style_holds_one_table() {
     eprintln!("one style: {stats:?} table={TABLE_BYTES}");
     assert_eq!((style.rows, style.width), (ROWS, WIDTH));
     assert_eq!(style.data.len(), ROWS * WIDTH);
-    assert_eq!(
-        stats.allocations, 1,
-        "the table is one allocation: {stats:?}"
+    // The claim is the bytes, not the count: the read must hold the table and nothing
+    // else. Windows spends one small extra allocation opening the file, because it hands
+    // the path over as UTF-16, so a count of exactly one is a fact about Linux and macOS.
+    assert!(
+        stats.allocations <= 2,
+        "the read is the table plus at most the handle: {stats:?}"
     );
     assert!(
-        stats.bytes <= TABLE_BYTES,
+        stats.bytes <= TABLE_BYTES + 1024,
         "the read held {} bytes for a {TABLE_BYTES} byte table: {stats:?}",
         stats.bytes
     );
