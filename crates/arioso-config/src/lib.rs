@@ -609,12 +609,6 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Load a file and then apply `ARIOSO_*` environment overrides.
-    ///
-    /// # Errors
-    ///
-    /// As [`Config::load`], plus [`ConfigError::Invalid`] for a malformed
-    /// environment value.
     /// Write the document to `path`, atomically.
     ///
     /// The text goes to a sibling file first and is renamed into place, so a crash
@@ -640,6 +634,12 @@ impl Config {
         })
     }
 
+    /// Load a file and then apply `ARIOSO_*` environment overrides.
+    ///
+    /// # Errors
+    ///
+    /// As [`Config::load`], plus [`ConfigError::Invalid`] for a malformed
+    /// environment value.
     pub fn load_with_env(path: &Path) -> Result<Self, ConfigError> {
         let mut cfg = Self::load(path)?;
         cfg.apply_env(|key| std::env::var(key).ok())?;
