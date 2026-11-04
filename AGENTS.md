@@ -32,6 +32,9 @@ cargo build --release
 A build needs a native ONNX Runtime. Put release 1.30.1 at `vendor/onnxruntime`. CI does
 the same. Without it, `arioso-tts-piper` fails to link.
 
+On Linux the terminal front end also links ALSA, which is `libasound2-dev`. The other two
+platforms use their own system frameworks and need nothing.
+
 ## Crates
 
 | crate | owns |
@@ -45,7 +48,8 @@ the same. Without it, `arioso-tts-piper` fails to link.
 | `arioso-stt-sherpa` | the sherpa-onnx engine, transcription |
 | `arioso-vad` | voice activity detection for streaming |
 | `arioso-server` | the HTTP and WebSocket routes, auth, TLS, limits |
-| `arioso-abi` | the C surface: eleven exported functions, and the header generated from them |
+| `arioso-abi` | the C surface: sixteen exported functions, and the header generated from them |
+| `arioso-speaks` | the terminal front end: voices, phonemes, playback, saving |
 | `arioso-cli` | the binary: commands, sidecar, PID files, logging setup |
 
 Dependency direction is downward: `arioso-cli`, `arioso-server` and `arioso-abi` at the
