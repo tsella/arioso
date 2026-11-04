@@ -34,7 +34,7 @@ const FAINT: Color = Color::Indexed(238);
 const CREAM: Color = Color::Indexed(223);
 
 /// How wide the wordmark is, including the two columns of margin before it.
-const MARK_WIDTH: u16 = 46;
+const MARK_WIDTH: u16 = 40;
 
 /// Below this width the mark is dropped and the signal takes the row.
 ///
@@ -152,14 +152,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The rows fade downwards, cream to petrol to a darker shade, so the mark looks lit from
 /// above instead of stamped.
 fn draw_wordmark(frame: &mut Frame, area: Rect) {
-    // One glyph at a time, each padded to its own width, so the columns line up without
-    // the kerning the joined form of this font needs. The letters are a, r, i, o, s, o:
-    // six separate shapes, because a word that has to be guessed at is not a mark.
+    // One glyph at a time, each padded to its own width and set against its neighbour with
+    // no gap, so the word reads as one mark rather than six letters in a row. The glyphs are
+    // a, r, i, o, s, o: six separate shapes, because a word that has to be guessed at is not
+    // a mark.
     const MARK: [&str; 4] = [
-        "  __ _   _ __   (_)    ___    ___    ___   ",
-        " / _` | | '__|  | |   / _ \\  / __|  / _ \\  ",
-        "| (_| | | |     | |  | (_) | \\__ \\ | (_) | ",
-        " \\__,_| |_|     |_|   \\___/  |___/  \\___/  ",
+        "  __ _  _ __  (_)   ___   ___   ___",
+        " / _` || '__| | |  / _ \\ / __| / _ \\",
+        "| (_| || |    | | | (_) |\\__ \\| (_) ||",
+        " \\__,_||_|    |_|  \\___/ |___/ \\___/",
     ];
     let lines: Vec<Line> = MARK
         .iter()
