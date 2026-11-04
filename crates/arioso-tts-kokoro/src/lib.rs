@@ -36,6 +36,13 @@ pub const MAX_TOKENS: usize = 510;
 /// Longest piece of text handed to the model, in characters.
 pub const SYNTHESIS_CHUNK: usize = 300;
 
+/// The token the model expects at both ends of an utterance.
+///
+/// `0` is not a symbol: the table starts at 1, and `0` is the frame the graph reads as
+/// silence. A run fed without one has no boundary frame, so where speech starts and stops
+/// is left for the graph to infer from the first and last phoneme.
+const PAD: i64 = 0;
+
 /// Why a voice could not be loaded or used.
 #[derive(Debug, Error)]
 pub enum KokoroError {
@@ -234,7 +241,9 @@ impl KokoroVoice {
     /// Synthesize one run of tokens into mono samples.
     ///
     /// The style row is the one for this token count: the model was trained with a style
-    /// per utterance length, and the last row covers anything longer.
+    /// per utterance length, and the last row covers anything longer. The count is the
+    /// run's own, before the pad frames, because the archive is indexed by what was said
+    /// rather than by the length of the tensor.
     ///
     /// # Errors
     ///
@@ -242,7 +251,8 @@ impl KokoroVoice {
     pub fn synthesize(&mut self, tokens: &[i64], speed: f32) -> Result<Vec<f32>, KokoroError> {
         let style = self.style.row(tokens.len()).to_vec();
         let width = self.style.width as i64;
-        let length = tokens.len() as i64;
+        let padded = padded(tokens);
+        let length = padded.len() as i64;
 
         let speed_value: ort::session::SessionInputValue<'_> = if self.speed_is_integer {
             Tensor::from_array(([1i64], vec![i64::from(speed.round() as i32)]))?.into()
@@ -252,7 +262,7 @@ impl KokoroVoice {
         let feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
             (
                 "tokens",
-                Tensor::from_array(([1i64, length], tokens.to_vec()))?.into(),
+                Tensor::from_array(([1i64, length], padded))?.into(),
             ),
             ("style", Tensor::from_array(([1i64, width], style))?.into()),
             ("speed", speed_value),
@@ -390,6 +400,15 @@ fn collect(phonemes: &arioso_g2p::Phonemes, report: &mut RenderReport) {
     report.missing.extend(phonemes.missing.iter().cloned());
 }
 
+/// A run with the pad frame at each end, which is the shape the graph was exported for.
+fn padded(tokens: &[i64]) -> Vec<i64> {
+    let mut run = Vec::with_capacity(tokens.len() + 2);
+    run.push(PAD);
+    run.extend_from_slice(tokens);
+    run.push(PAD);
+    run
+}
+
 /// Split a run of tokens at a word boundary, so no call is longer than the model's
 /// table. A run with no boundary in reach is cut at the limit.
 fn split_tokens(tokens: &[i64], space: Option<i64>) -> Vec<Vec<i64>> {
@@ -455,6 +474,12 @@ mod tests {
         assert_eq!(runs[0].len(), MAX_TOKENS - 5);
         assert!(!runs[1].contains(&SPACE), "the boundary is in neither run");
         assert_eq!(runs[0].len() + runs[1].len(), tokens.len() - 1);
+    }
+
+    #[test]
+    fn a_run_is_padded_at_both_ends() {
+        assert_eq!(padded(&[4, 5, 6]), vec![0, 4, 5, 6, 0]);
+        assert_eq!(padded(&[]), vec![0, 0], "an empty run is still two frames");
     }
 
     #[test]

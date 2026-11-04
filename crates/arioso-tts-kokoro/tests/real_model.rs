@@ -80,8 +80,13 @@ fn a_sentence_renders_at_a_plausible_length() {
         .expect("rendering");
 
     let seconds = samples.len() as f32 / SAMPLE_RATE as f32;
+    // Level as well as length: a graph that runs on the wrong input still returns a
+    // duration, and a run whose boundary frames are missing comes back quieter and
+    // rounder than one that has them.
+    let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
     println!(
-        "rendered {:.2} s at {SAMPLE_RATE} Hz, {} samples, report {report:?}",
+        "rendered {:.2} s at {SAMPLE_RATE} Hz, {} samples, peak {peak:.4}, rms {rms:.4}, report {report:?}",
         seconds,
         samples.len()
     );
