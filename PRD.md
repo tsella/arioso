@@ -222,7 +222,11 @@ Requirements:
 - F1.9 Concurrent downloads are serialized per model and capped globally (default 2).
 - F1.10 The manifest itself is signed. One detached signature over the manifest,
   verified against a public key compiled into the binary. Per file SHA-256 stops
-  corruption; the signature stops a hostile mirror.
+  corruption; the signature stops a hostile mirror. The check runs wherever the
+  manifest is loaded, not only in a standalone helper. A build with no compiled
+  key loads the document and reports it unsigned; a build with a key refuses a
+  document whose sibling `<name>.sig` is absent or does not verify, and the
+  refusal names the signature file.
 - F1.11 Model upgrades do not interrupt service. A new version downloads alongside
   the old one, both appear in `GET /v1/models`, and the switch happens on the next
   load or restart. The old version is deleted only after a successful load of the

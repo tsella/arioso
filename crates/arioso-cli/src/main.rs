@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use arioso_config::Config;
 use arioso_g2p::CmuDict;
-use arioso_models::{Downloader, Manifest, ModelSpec, Progress, models_dir};
+use arioso_models::{
+    Downloader, Manifest, ManifestError, ModelSpec, Progress, RELEASE_PUBKEY_HEX, SignatureState,
+    models_dir, signature_path,
+};
 use arioso_tts_piper::PiperVoice;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
@@ -878,17 +881,34 @@ fn doctor(config: &Config, config_path: &Path) -> Result<()> {
 
     let manifest = manifest_path(config);
     if manifest.exists() {
-        match Manifest::load(&manifest) {
-            Ok(m) => {
-                let installed = m
+        let signature = signature_path(&manifest);
+        match Manifest::load_checked(&manifest, &signature, RELEASE_PUBKEY_HEX) {
+            Ok(checked) => {
+                let installed = checked
+                    .manifest
                     .models
                     .iter()
                     .filter(|spec| model_installed(spec, &dir))
                     .count();
                 println!(
                     "manifest    {} models, {installed} installed",
-                    m.models.len()
+                    checked.manifest.models.len()
                 );
+                match checked.signature {
+                    SignatureState::Verified => {
+                        println!("signature   verified against the compiled release key");
+                    }
+                    SignatureState::Unsigned => {
+                        println!(
+                            "signature   unsigned: no release key is compiled into this build"
+                        );
+                    }
+                }
+            }
+            Err(ManifestError::SignatureMissing { path }) => {
+                problems += 1;
+                println!("signature   MISSING: {}", path.display());
+                println!("            a release build refuses a manifest it cannot verify");
             }
             Err(e) => {
                 problems += 1;
@@ -1021,8 +1041,8 @@ fn load_engine(
     threads: usize,
 ) -> Result<arioso_stt_sherpa::Engine> {
     let manifest_path = dir.join("manifest.json");
-    if let Ok(text) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(manifest) = arioso_models::Manifest::parse(text.as_bytes()) {
+    if manifest_path.exists() {
+        if let Ok(manifest) = Manifest::load(&manifest_path) {
             if let Some(spec) = manifest.models.iter().find(|spec| spec.id == model) {
                 let paths: Vec<std::path::PathBuf> =
                     spec.files.iter().map(|f| dir.join(&f.name)).collect();
