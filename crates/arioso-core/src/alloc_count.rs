@@ -15,24 +15,36 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
-/// A pass-through allocator that counts what the process asks for.
+/// A pass-through allocator that counts what the calling thread asks for.
 #[derive(Debug, Default)]
 pub struct Counting;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// What this thread has allocated.
+    ///
+    /// The counters are per thread because the tests in one binary run on several threads.
+    /// A single global count charged each measurement for whatever the tests beside it
+    /// allocated, so a bound depended on the runner's scheduling and the suite passed only
+    /// with `--test-threads=1`. `const` init matters here: the first access allocates
+    /// nothing, so the allocator cannot call itself.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+}
 
-/// Tests in one binary run on several threads, so a measurement takes this lock: without
-/// it two tests count each other's allocations and both numbers are wrong.
-static LOCK: Mutex<()> = Mutex::new(());
+/// Count one allocation of `bytes` on this thread.
+///
+/// `try_with` rather than `with`: a thread in teardown has lost its slot, and an allocator
+/// that panicked there would abort the process.
+fn count(bytes: usize) {
+    let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+    let _ = BYTES.try_with(|count| count.set(count.get() + bytes));
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -41,14 +53,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(size, Ordering::Relaxed);
+        count(size);
         unsafe { System.realloc(ptr, layout, size) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 }
@@ -63,12 +73,12 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// The counters as they stand, without measuring anything.
+    /// The counters as they stand for this thread, without measuring anything.
     #[must_use]
     pub fn now() -> Self {
         Self {
-            allocations: ALLOCATIONS.load(Ordering::Relaxed),
-            bytes: BYTES.load(Ordering::Relaxed),
+            allocations: ALLOCATIONS.with(Cell::get),
+            bytes: BYTES.with(Cell::get),
         }
     }
 
@@ -82,11 +92,12 @@ impl Stats {
     }
 }
 
-/// Run `f` and report what it allocated.
+/// Run `f` and report what it allocated on this thread.
 ///
 /// The value is returned so a test can keep asserting on the output while measuring it.
+/// Work the closure hands to another thread is not counted: the number is what this call
+/// asked the allocator for.
 pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Stats) {
-    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = Stats::now();
     let value = f();
     let after = Stats::now();

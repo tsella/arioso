@@ -3,6 +3,8 @@
 //! English only. Every other language returns its input unchanged until it has
 //! rules of its own.
 
+use std::borrow::Cow;
+
 const ONES: [&str; 20] = [
     "zero",
     "one",
@@ -354,7 +356,8 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
         .bytes()
         .any(|byte| byte.is_ascii_digit() || byte == b'$')
     {
-        return expanded;
+        // Nothing to expand: the borrowed case copies once here, and only once.
+        return expanded.into_owned();
     }
     let chars: Vec<char> = expanded.chars().collect();
     let mut out = String::with_capacity(expanded.len() * 2);
@@ -367,14 +370,14 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
             if let Some(scanned) = scan_number(&chars, index + 1) {
                 // `$1m` is one million dollars, and `$2.5b` is two point five billion.
                 if let Some((magnitude, after)) = scan_magnitude(&chars, scanned.end) {
-                    out.push_str(&number(&scanned));
+                    write_number(&scanned, &mut out);
                     out.push(' ');
                     out.push_str(magnitude);
                     out.push_str(" dollars");
                     index = after;
                     continue;
                 }
-                out.push_str(&currency(&scanned));
+                write_currency(&scanned, &mut out);
                 index = scanned.end;
                 continue;
             }
@@ -391,18 +394,18 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
                     }
                     None => (hour, next),
                 };
-                out.push_str(&clock(hour, minute, second, options));
+                write_clock(hour, minute, second, options, &mut out);
                 index = next;
                 continue;
             }
             if let Some(scanned) = scan_number(&chars, index) {
-                if let Some((suffix, after)) = scan_ordinal_suffix(&chars, scanned.end) {
-                    out.push_str(&ordinal(scanned.whole, suffix));
+                if let Some((_, after)) = scan_ordinal_suffix(&chars, scanned.end) {
+                    write_ordinal(scanned.whole, &mut out);
                     index = after;
                     continue;
                 }
                 if chars.get(scanned.end) == Some(&'%') {
-                    out.push_str(&number(&scanned));
+                    write_number(&scanned, &mut out);
                     out.push_str(" percent");
                     index = scanned.end + 1;
                     continue;
@@ -419,7 +422,7 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
                         } else {
                             scanned.whole % 12
                         };
-                        out.push_str(&clock(hour, 0, 0, options));
+                        write_clock(hour, 0, 0, options, &mut out);
                         index = after;
                         continue;
                     }
@@ -427,13 +430,13 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
                 // A unit written straight after the number: `5kg`, `190cm`, `60mph`.
                 if let Some((unit, after)) = scan_unit(&chars, scanned.end) {
                     let singular = scanned.whole == 1 && scanned.fraction.is_empty();
-                    out.push_str(&number(&scanned));
+                    write_number(&scanned, &mut out);
                     out.push(' ');
                     out.push_str(if singular { unit.singular } else { unit.plural });
                     index = scanned.end + after;
                     continue;
                 }
-                out.push_str(&number(&scanned));
+                write_number(&scanned, &mut out);
                 index = scanned.end;
                 continue;
             }
@@ -447,40 +450,34 @@ pub fn normalize_with(text: &str, options: NormalizeOptions) -> String {
 }
 
 /// Expand the abbreviations in [`ABBREVIATIONS`], keeping the source capital.
-fn expand_abbreviations(text: &str) -> String {
+///
+/// The result borrows the input when nothing matched. Almost every sentence reaches here
+/// with a full stop and no abbreviation, and copying it before looking was the cost.
+fn expand_abbreviations(text: &str) -> Cow<'_, str> {
     // Every abbreviation ends in a full stop, so text without one has nothing to expand.
-    // Lowercasing it first allocated a copy of every sentence that needed no work.
     if !text.contains('.') {
-        return text.to_owned();
+        return Cow::Borrowed(text);
     }
-    let lower = text.to_lowercase();
-    let mut out = String::with_capacity(text.len());
+    let mut out: Option<String> = None;
     let mut index = 0;
 
     while index < text.len() {
-        let rest = &lower[index..];
-        let found = ABBREVIATIONS
-            .iter()
-            .find(|(short, _)| rest.starts_with(short))
-            .filter(|_| {
-                // Only at a word start, so "address." does not match "dr.".
-                index == 0
-                    || !text[..index]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|previous| previous.is_alphanumeric())
+        if let Some((short, long)) = abbreviation_at(text, index) {
+            // The first match starts the copy: everything before it is unchanged.
+            let buffer = out.get_or_insert_with(|| {
+                let mut buffer = String::with_capacity(text.len());
+                buffer.push_str(&text[..index]);
+                buffer
             });
-
-        if let Some((short, long)) = found {
             let source = &text[index..index + short.len()];
             if source.chars().next().is_some_and(char::is_uppercase) {
                 let mut chars = long.chars();
                 if let Some(first) = chars.next() {
-                    out.extend(first.to_uppercase());
-                    out.push_str(chars.as_str());
+                    buffer.extend(first.to_uppercase());
+                    buffer.push_str(chars.as_str());
                 }
             } else {
-                out.push_str(long);
+                buffer.push_str(long);
             }
             index += short.len();
             continue;
@@ -490,11 +487,61 @@ fn expand_abbreviations(text: &str) -> String {
             .chars()
             .next()
             .expect("index is on a boundary");
-        out.push(ch);
+        if let Some(buffer) = out.as_mut() {
+            buffer.push(ch);
+        }
         index += ch.len_utf8();
     }
 
-    out
+    match out {
+        Some(buffer) => Cow::Owned(buffer),
+        None => Cow::Borrowed(text),
+    }
+}
+
+/// The abbreviation that starts at `index`, if one does.
+///
+/// The comparison is against the written bytes, ignoring ASCII case, so no lowercase copy
+/// of the sentence is made. The first byte rules out most positions before any slicing:
+/// every token in the table starts with one of the letters below.
+fn abbreviation_at(text: &str, index: usize) -> Option<(&'static str, &'static str)> {
+    let first = *text.as_bytes().get(index)?;
+    if !starts_abbreviation(first) {
+        return None;
+    }
+    // Only at a word start, so "address." does not match "dr.".
+    if index > 0
+        && text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphanumeric())
+    {
+        return None;
+    }
+    ABBREVIATIONS
+        .iter()
+        .copied()
+        .find(|(short, _)| written_starts_with(text.as_bytes(), index, short))
+}
+
+/// Whether a token in [`ABBREVIATIONS`] could start with this byte.
+///
+/// The test below it keeps this in step with the table.
+fn starts_abbreviation(byte: u8) -> bool {
+    matches!(
+        byte.to_ascii_lowercase(),
+        b'a' | b'd' | b'e' | b'i' | b'm' | b's' | b'v'
+    )
+}
+
+/// Whether `bytes[index..]` begins with the ASCII `token`, ignoring ASCII case.
+fn written_starts_with(bytes: &[u8], index: usize, token: &str) -> bool {
+    let token = token.as_bytes();
+    bytes.len() >= index + token.len()
+        && bytes[index..index + token.len()]
+            .iter()
+            .zip(token)
+            .all(|(got, want)| got.eq_ignore_ascii_case(want))
 }
 
 /// A number as written: the whole part, and the fraction digits if any.
@@ -518,6 +565,37 @@ fn is_thousands_separator(chars: &[char], index: usize) -> bool {
         .is_some_and(|run| run.iter().all(char::is_ascii_digit));
     let ends = !chars.get(index + 4).is_some_and(char::is_ascii_digit);
     digits && ends
+}
+
+/// Whether `slice` spells `token`, ignoring ASCII case when asked.
+///
+/// The tables are ASCII and a candidate is at most four characters, so a comparison walks
+/// the slice. Building a `String` per candidate cost more than the scan it was there to do.
+fn spells(slice: &[char], token: &str, ignore_case: bool) -> bool {
+    let mut wanted = token.chars();
+    for got in slice {
+        match wanted.next() {
+            Some(want) => {
+                let same = if ignore_case {
+                    got.eq_ignore_ascii_case(&want)
+                } else {
+                    *got == want
+                };
+                if !same {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    wanted.next().is_none()
+}
+
+/// The same, at an offset in a character slice.
+fn spells_at(chars: &[char], start: usize, token: &str, ignore_case: bool) -> bool {
+    chars
+        .get(start..start + token.chars().count())
+        .is_some_and(|slice| spells(slice, token, ignore_case))
 }
 
 /// A temperature, written with the degree sign.
@@ -582,11 +660,9 @@ fn scan_unit_attached(chars: &[char], start: usize) -> Option<(&'static Unit, us
         {
             continue;
         }
-        let written: String = slice.iter().collect();
-        let folded = written.to_ascii_lowercase();
         let found = UNITS
             .iter()
-            .find(|unit| unit.token == if unit.exact_case { &written } else { &folded });
+            .find(|unit| unit.token.len() == length && spells(slice, unit.token, !unit.exact_case));
         if let Some(unit) = found {
             return Some((unit, length));
         }
@@ -598,11 +674,7 @@ fn scan_unit_attached(chars: &[char], start: usize) -> Option<(&'static Unit, us
 fn scan_magnitude(chars: &[char], start: usize) -> Option<(&'static str, usize)> {
     for (token, word) in MAGNITUDES {
         let length = token.len();
-        let Some(slice) = chars.get(start..start + length) else {
-            continue;
-        };
-        let folded: String = slice.iter().map(|ch| ch.to_ascii_lowercase()).collect();
-        if folded == token
+        if spells_at(chars, start, token, true)
             && !chars
                 .get(start + length)
                 .is_some_and(|ch| ch.is_alphanumeric())
@@ -737,49 +809,65 @@ fn scan_ordinal_suffix(chars: &[char], start: usize) -> Option<(&'static str, us
     if follows_alnum && !adverb {
         return None;
     }
-    let rest: String = chars.get(start..start + 2)?.iter().collect();
-    let suffix = match rest.to_lowercase().as_str() {
-        "st" => "st",
-        "nd" => "nd",
-        "rd" => "rd",
-        "th" => "th",
-        _ => return None,
-    };
+    let suffix = ["st", "nd", "rd", "th"]
+        .into_iter()
+        .find(|suffix| spells_at(chars, start, suffix, true))?;
     Some((suffix, start + 2))
 }
 
 /// Words for a scanned number, choosing the year reading for four-digit years.
-fn number(scanned: &Scanned) -> String {
+fn write_number(scanned: &Scanned, out: &mut String) {
     if !scanned.fraction.is_empty() {
-        let mut text = cardinal(scanned.whole);
-        text.push_str(" point");
+        write_cardinal(scanned.whole, out);
+        out.push_str(" point");
         for digit in &scanned.fraction {
-            text.push(' ');
-            text.push_str(ONES[*digit as usize]);
+            out.push(' ');
+            out.push_str(ONES[*digit as usize]);
         }
-        return text;
+        return;
     }
 
     if scanned.digits == 4 && !scanned.separated && (1100..=2099).contains(&scanned.whole) {
         let high = scanned.whole / 100;
         let low = scanned.whole % 100;
+        write_cardinal(high, out);
         if low == 0 {
-            return format!("{} hundred", cardinal(high));
+            out.push_str(" hundred");
+        } else {
+            out.push(' ');
+            write_cardinal(low, out);
         }
-        return format!("{} {}", cardinal(high), cardinal(low));
+        return;
     }
 
-    cardinal(scanned.whole)
+    write_cardinal(scanned.whole, out);
 }
 
 /// Words for a whole number below one trillion.
 #[must_use]
 pub fn cardinal(value: u64) -> String {
+    let mut out = String::new();
+    write_cardinal(value, &mut out);
+    out
+}
+
+/// Push the words for a whole number below one trillion, one space between words.
+///
+/// Every word is a `&'static str` pushed into the caller's buffer, and nothing is written
+/// before `out`'s existing content: the previous version built a `Vec<String>` of `format!`
+/// output at every level of the recursion, so one number cost a dozen allocations.
+fn write_cardinal(value: u64, out: &mut String) {
+    let start = out.len();
+    write_cardinal_words(value, out, start);
+}
+
+/// The same, knowing where this number's first word begins in `out`.
+fn write_cardinal_words(value: u64, out: &mut String, start: usize) {
     if value == 0 {
-        return ONES[0].to_owned();
+        push_word(out, start, ONES[0]);
+        return;
     }
 
-    let mut parts: Vec<String> = Vec::new();
     let mut rest = value;
     for (divisor, name) in [
         (1_000_000_000u64, "billion"),
@@ -787,49 +875,64 @@ pub fn cardinal(value: u64) -> String {
         (1_000, "thousand"),
     ] {
         if rest >= divisor {
-            parts.push(format!("{} {name}", cardinal(rest / divisor)));
+            write_cardinal_words(rest / divisor, out, start);
+            out.push(' ');
+            out.push_str(name);
             rest %= divisor;
         }
     }
 
     if rest > 0 {
-        parts.push(below_thousand(rest));
+        write_below_thousand(rest, out, start);
     }
-    parts.join(" ")
 }
 
-fn below_thousand(value: u64) -> String {
+/// One word, separated from the words already written for this number.
+fn push_word(out: &mut String, start: usize, word: &str) {
+    if out.len() > start {
+        out.push(' ');
+    }
+    out.push_str(word);
+}
+
+fn write_below_thousand(value: u64, out: &mut String, start: usize) {
     let hundreds = value / 100;
     let rest = value % 100;
-    let mut parts: Vec<String> = Vec::new();
 
     if hundreds > 0 {
-        parts.push(format!("{} hundred", ONES[hundreds as usize]));
+        push_word(out, start, ONES[hundreds as usize]);
+        out.push_str(" hundred");
     }
     if rest > 0 {
         if rest < 20 {
-            parts.push(ONES[rest as usize].to_owned());
+            push_word(out, start, ONES[rest as usize]);
         } else {
             let tens = (rest / 10) as usize;
             let ones = (rest % 10) as usize;
-            if ones == 0 {
-                parts.push(TENS[tens].to_owned());
-            } else {
-                parts.push(format!("{} {}", TENS[tens], ONES[ones]));
+            push_word(out, start, TENS[tens]);
+            if ones > 0 {
+                push_word(out, start, ONES[ones]);
             }
         }
     }
-    parts.join(" ")
 }
 
 /// The ordinal form of a value: `3` with `rd` becomes `third`.
 #[must_use]
 pub fn ordinal(value: u64, _suffix: &str) -> String {
-    let words = cardinal(value);
-    let (head, last) = match words.rsplit_once(' ') {
-        Some((head, last)) => (Some(head), last),
-        None => (None, words.as_str()),
-    };
+    let mut out = String::new();
+    write_ordinal(value, &mut out);
+    out
+}
+
+/// The same, appended to `out`.
+fn write_ordinal(value: u64, out: &mut String) {
+    let begin = out.len();
+    write_cardinal(value, out);
+    let last_start = out[begin..]
+        .rfind(' ')
+        .map_or(begin, |space| begin + space + 1);
+    let last = &out[last_start..];
 
     let irregular = match last {
         "one" => Some("first"),
@@ -841,18 +944,18 @@ pub fn ordinal(value: u64, _suffix: &str) -> String {
         "twelve" => Some("twelfth"),
         _ => None,
     };
+    let stem_ends_in_y = last.ends_with('y');
 
-    let converted = irregular.map_or_else(
-        || match last.strip_suffix('y') {
-            Some(stem) => format!("{stem}ieth"),
-            None => format!("{last}th"),
-        },
-        str::to_owned,
-    );
-
-    match head {
-        Some(head) => format!("{head} {converted}"),
-        None => converted,
+    match irregular {
+        Some(word) => {
+            out.truncate(last_start);
+            out.push_str(word);
+        }
+        None if stem_ends_in_y => {
+            out.truncate(out.len() - 1);
+            out.push_str("ieth");
+        }
+        None => out.push_str("th"),
     }
 }
 
@@ -862,45 +965,63 @@ pub fn ordinal(value: u64, _suffix: &str) -> String {
 /// reading the first two digits said "zero dollars", which is the wrong amount by the whole
 /// point of writing it. Those are read as the number written instead: "zero point zero zero
 /// five dollars".
-fn currency(scanned: &Scanned) -> String {
+fn write_currency(scanned: &Scanned, out: &mut String) {
     let dollars = scanned.whole;
     let fraction = &scanned.fraction;
     if fraction.len() > 2 {
-        return format!("{} dollars", number(scanned));
+        write_number(scanned, out);
+        out.push_str(" dollars");
+        return;
     }
     let cents = fraction.first().copied().unwrap_or(0) * 10 + fraction.get(1).copied().unwrap_or(0);
     match (dollars, cents) {
-        (0, 0) => "zero dollars".to_owned(),
-        (0, cents) => format!("{} cents", cardinal(cents)),
-        (1, 0) => "one dollar".to_owned(),
-        (dollars, 0) => format!("{} dollars", cardinal(dollars)),
-        (dollars, cents) => format!(
-            "{} {} and {} cent{}",
-            cardinal(dollars),
-            if dollars == 1 { "dollar" } else { "dollars" },
-            cardinal(cents),
-            if cents == 1 { "" } else { "s" }
-        ),
+        (0, 0) => out.push_str("zero dollars"),
+        (0, cents) => {
+            write_cardinal(cents, out);
+            out.push_str(" cents");
+        }
+        (1, 0) => out.push_str("one dollar"),
+        (dollars, 0) => {
+            write_cardinal(dollars, out);
+            out.push_str(" dollars");
+        }
+        (dollars, cents) => {
+            write_cardinal(dollars, out);
+            out.push_str(if dollars == 1 { " dollar" } else { " dollars" });
+            out.push_str(" and ");
+            write_cardinal(cents, out);
+            out.push_str(if cents == 1 { " cent" } else { " cents" });
+        }
     }
 }
 
 /// The clock reading of an hour and minute pair.
-fn clock(hour: u64, minute: u64, second: u64, options: NormalizeOptions) -> String {
+fn write_clock(hour: u64, minute: u64, second: u64, options: NormalizeOptions, out: &mut String) {
     let twelve = if hour % 12 == 0 { 12 } else { hour % 12 };
-    let mut spoken = match minute {
-        0 => format!("{} o'clock", cardinal(twelve)),
-        minute if minute < 10 => format!("{} oh {}", cardinal(twelve), cardinal(minute)),
-        minute => format!("{} {}", cardinal(twelve), cardinal(minute)),
-    };
+    match minute {
+        0 => {
+            write_cardinal(twelve, out);
+            out.push_str(" o'clock");
+        }
+        minute if minute < 10 => {
+            write_cardinal(twelve, out);
+            out.push_str(" oh ");
+            write_cardinal(minute, out);
+        }
+        minute => {
+            write_cardinal(twelve, out);
+            out.push(' ');
+            write_cardinal(minute, out);
+        }
+    }
     if second > 0 {
-        spoken.push_str(" and ");
-        spoken.push_str(&cardinal(second));
-        spoken.push_str(if second == 1 { " second" } else { " seconds" });
+        out.push_str(" and ");
+        write_cardinal(second, out);
+        out.push_str(if second == 1 { " second" } else { " seconds" });
     }
     if options.time_of_day {
-        spoken.push_str(period(hour));
+        out.push_str(period(hour));
     }
-    spoken
 }
 
 /// The part of the day, from the hour on a 24-hour clock.
@@ -1205,6 +1326,20 @@ mod tests {
     #[test]
     fn decimals() {
         assert_eq!(normalize("3.5"), "three point five");
+    }
+
+    #[test]
+    fn every_abbreviation_passes_the_first_byte_gate() {
+        // The gate is a `matches!` list rather than a scan of the table, so it has to be
+        // kept in step with it.
+        for (short, _) in ABBREVIATIONS {
+            let first = short.as_bytes()[0];
+            assert!(starts_abbreviation(first), "{short}");
+            assert!(
+                starts_abbreviation(first.to_ascii_uppercase()),
+                "{short} in capitals"
+            );
+        }
     }
 
     #[test]

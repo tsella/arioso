@@ -68,6 +68,11 @@ routes differ by the size of the response, 2 bytes against 1,243 and 1,453.
 The two memory figures are the ones worth knowing before sizing a machine: a ten minute
 stereo file costs 227 MB to read, and the dictionary costs 36.5 MB to hold.
 
+The two `normalize` rows are from the build before the text-path pass; that pass removes the
+lowercase copy of every sentence and the temporary `String` per number, and changes what
+`chunk_text` costs. `docs/plans/2026-11-03-performance.md` records both sides of it,
+measured with one harness on the two trees.
+
 ## What this pass changed, and what it bought
 
 Each row is one change, measured on both builds with the same harness. The right hand
