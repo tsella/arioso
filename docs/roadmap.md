@@ -25,13 +25,6 @@ where one exists, the measurement that decided that.
   a machine with the toolchains installed, which this project does not have, so the build is
   the whole of the evidence today.
 
-## Speech
-
-- **Silero voice activity detection.** The PRD names it the default. What ships is the energy
-  detector, which cuts an utterance on a loudness threshold and is fooled by steady noise. The
-  engine id `vad.engine: "silero"` is refused at validation rather than accepted and ignored,
-  so a config cannot ask for it and be told nothing.
-
 ## Release
 
 - **A release signing key.** The manifest loader verifies a detached Ed25519 signature when

@@ -8447,6 +8447,27 @@
         "num_speakers": 1,
         "license_text": "Apache 2.0"
       }
+    },
+    {
+      "id": "silero-vad",
+      "kind": "vad",
+      "engine": "sherpa",
+      "version": "2026.11",
+      "license": "MIT",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "silero_vad.onnx",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+          "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+          "size": 643854
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "frame_ms": 32,
+        "license_text": "MIT"
+      }
     }
   ]
 }

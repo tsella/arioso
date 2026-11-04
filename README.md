@@ -41,6 +41,8 @@ Working today:
 - Text to speech with Piper voices: WAV over HTTP, PCM frames over WebSocket
 - Model download from a manifest, with SHA-256 verification and resumable transfers
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
+- Voice activity detection: an energy detector that needs no model, and Silero on the
+  sherpa-onnx runtime (`vad.engine`, with the model fetched as `silero-vad`)
 - A user dictionary for names and jargon, reloaded without a restart
 - Spelling rules for words the dictionary does not hold, reported, never silent
 - Speech to text: Parakeet or Whisper through sherpa-onnx, batch, from a WAV file
@@ -52,14 +54,12 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 475 tests
+- 481 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 
 - The Piper and sherpa-onnx engines on iOS and Android: each links a prebuilt native
   library that needs a build for the target, and no such build is wired here yet
-- Silero voice activity detection, which the PRD names as the default over the energy
-  detector that ships
 - A release signing key: the manifest loader verifies a detached signature when one is
   compiled in, and no key is compiled in yet
 

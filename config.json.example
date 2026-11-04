@@ -55,6 +55,8 @@
   },
   "vad": {
     "engine": "energy",
+    "model": "silero-vad",
+    "probability": 0.5,
     "threshold": 0.01,
     "frame_ms": 32,
     "min_speech_ms": 250,

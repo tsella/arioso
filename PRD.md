@@ -388,11 +388,18 @@ because it runs batch models and natively streaming models behind the same C API
 
 ### F5. Voice activity detection
 
-- F5.1 Backends: `energy` (RMS threshold, no model) is the only one built into this
-  binary and is the default. `silero` is the intended default for v1, reusing the
-  sherpa-onnx runtime rather than loading a second ONNX session; until that path exists
-  `vad.engine: "silero"` is refused at validation, because a config that loads and does
-  nothing reads as working.
+- F5.1 Backends: `energy` (RMS threshold, no model) and `silero`, which runs on the
+  sherpa-onnx runtime this project already links rather than loading a second ONNX session.
+  `energy` stays the default, because F5.5 promises the library works with zero models
+  installed, and a default that needs a download and a native runtime is not a default.
+  `silero` needs the model named by `vad.model` (`silero-vad`, 643,854 bytes, MIT) and reads
+  16 kHz at 32 ms frames: a config that asks for another frame length is refused, and a
+  model that is not on disk answers `409 model_not_installed` before the socket upgrades,
+  rather than opening and answering every frame with the detector the caller did not ask
+  for.
+- F5.1a `vad.probability` is the confidence `silero` uses, kept apart from `vad.threshold`,
+  which is a level for `energy`. The two numbers are not interchangeable, and one field with
+  two meanings is how a config ends up sensitive to everything or to nothing.
 - F5.2 Configurable: `threshold`, `min_speech_ms`, `min_silence_ms`, `padding_ms`,
   `max_segment_ms`, and `frame_ms`.
 - F5.3 VAD gates the streaming STT pipeline. Audio before speech confirmation is

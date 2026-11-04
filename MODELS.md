@@ -90,6 +90,11 @@ engine is Python and this project is Rust. Full write-up, including a chunker bu
 that scored 36 percent before it was fixed, is in
 `docs/plans/2026-11-02-tts-engine-comparison.md`.
 
+Voice activity detection ships one model, `silero-vad`: 643,854 bytes, MIT, 16 kHz at 32 ms
+frames, fetched like any other entry and used when `vad.engine` is `silero`. It is not scored
+against the energy detector here — no comparison of the two on the same audio has been made,
+and a table row would suggest otherwise.
+
 BlueTTS is the more intelligible voice by about a point and costs 6.7 times the synthesis
 time and five times the memory. The vendor calls it the fastest open source TTS; on four CPU
 cores it is the slower of the two.

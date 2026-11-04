@@ -13,6 +13,7 @@ use sherpa_onnx::{
     OfflineWhisperModelConfig,
 };
 
+pub mod silero;
 pub mod streaming;
 
 pub use streaming::{StreamSession, StreamingEngine};

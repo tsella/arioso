@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arioso_stt_sherpa::StreamSession;
+use arioso_stt_sherpa::{StreamSession, silero};
 use arioso_vad::{Config as VadConfig, Event, Segmenter};
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -62,6 +62,29 @@ fn default_rate() -> u32 {
 /// Two names differ between the document and the crate: `padding_ms` is audio kept from
 /// before the detected start, which the segmenter calls a preroll, and `max_segment_ms` is
 /// the hard cap on one utterance. Mapping them by position would be a silent bug.
+/// The segmenter this config asks for.
+///
+/// `energy` needs nothing. `silero` reads 16 kHz at 32 ms — the window the model was trained
+/// on — and a config that asks for another frame length is refused rather than fed frames the
+/// model cannot classify.
+fn segmenter_for(state: &AppState) -> Result<Segmenter, String> {
+    let vad = &state.config().vad;
+    let config = vad_config(vad);
+    if vad.engine != "silero" {
+        return Ok(Segmenter::new(STREAM_RATE, config));
+    }
+    if vad.frame_ms != silero::FRAME_MS {
+        return Err(format!(
+            "vad.frame_ms is {}, and the silero detector reads {} ms frames",
+            vad.frame_ms,
+            silero::FRAME_MS
+        ));
+    }
+    let model = state.model_file(&vad.model, ".onnx")?;
+    let gate = silero::Silero::load(&model, vad.probability).map_err(|error| error.to_string())?;
+    Ok(Segmenter::with_gate(STREAM_RATE, config, Box::new(gate)))
+}
+
 fn vad_config(vad: &arioso_config::Vad) -> VadConfig {
     VadConfig {
         threshold: vad.threshold,
@@ -90,6 +113,13 @@ pub(crate) fn preflight(state: &AppState) -> Option<Response> {
         if !state.is_installed(spec) {
             return Some(crate::model_not_installed(&spec.id));
         }
+    }
+    // A detector named in the config is a model like any other: the socket says which file
+    // is missing before it upgrades, rather than opening and answering every frame with the
+    // energy detector the caller did not ask for.
+    let vad = &state.config().vad;
+    if vad.engine == "silero" && !state.model_installed(&vad.model) {
+        return Some(crate::model_not_installed(&vad.model));
     }
     None
 }
@@ -721,7 +751,19 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
     )
     .await;
 
-    let mut segmenter = Segmenter::new(STREAM_RATE, vad_config(&state.config().vad));
+    let mut segmenter = match segmenter_for(&state) {
+        Ok(segmenter) => segmenter,
+        Err(detail) => {
+            send(
+                &out,
+                json!({"type": "error", "code": "model_not_installed", "detail": detail}),
+            )
+            .await;
+            drop(out);
+            let _ = writer.await;
+            return;
+        }
+    };
     let interval_ms = state.config().stt.partial_interval_ms.max(50);
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(interval_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1020,6 +1062,8 @@ mod tests {
     fn the_segmenter_takes_its_settings_from_the_config() {
         let vad = arioso_config::Vad {
             engine: "energy".into(),
+            model: "silero-vad".into(),
+            probability: 0.5,
             threshold: 0.02,
             min_speech_ms: 111,
             min_silence_ms: 222,
@@ -1120,6 +1164,44 @@ mod tests {
 
     fn quiet(ms: u32) -> Vec<f32> {
         vec![0.0; (STREAM_RATE * ms / 1000) as usize]
+    }
+
+    /// A server whose config names the Silero detector and whose models directory is empty.
+    fn silero_state(frame_ms: u32) -> Arc<AppState> {
+        let dir = tempfile::tempdir().unwrap();
+        // The engine loads its dictionary at startup, so a state needs one on disk.
+        std::fs::write(dir.path().join("cmudict.dict"), "HELLO  HH AH0 L OW1\n").unwrap();
+        let mut config = arioso_config::Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.vad.engine = "silero".to_owned();
+        config.vad.frame_ms = frame_ms;
+        let manifest = arioso_models::Manifest::parse(
+            include_str!("../../../models/manifest.json").as_bytes(),
+        )
+        .unwrap();
+        // The temp directory is dropped at the end of this function, which is the point: the
+        // state keeps the path, and the file is not there.
+        Arc::new(AppState::new(config, manifest, None).unwrap())
+    }
+
+    #[test]
+    fn a_detector_that_is_not_on_disk_is_refused_before_the_upgrade() {
+        // A socket that opens and then answers every frame with the energy detector is the
+        // defect F5.1 exists to prevent: the caller asked for a model and would be told
+        // nothing.
+        let state = silero_state(32);
+        let refusal = preflight(&state).expect("a missing detector is refused");
+        assert_eq!(refusal.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn a_frame_length_the_detector_cannot_read_is_refused() {
+        let state = silero_state(20);
+        let error = match segmenter_for(&state) {
+            Ok(_) => panic!("twenty millisecond frames were accepted for Silero"),
+            Err(error) => error,
+        };
+        assert!(error.contains("32"), "{error}");
     }
 
     /// What a session is: the utterance it belongs to, and how much of it has been fed.

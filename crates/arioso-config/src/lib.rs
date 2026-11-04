@@ -388,9 +388,14 @@ impl Default for Capture {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Vad {
-    /// Which detector runs. Only `energy` is built in; `silero` is refused rather than
-    /// accepted and ignored.
+    /// Which detector runs: `energy`, which needs no model, or `silero`, which needs the
+    /// model named by `model`.
     pub engine: String,
+    /// The manifest entry holding the Silero model, used when `engine` is `silero`.
+    pub model: String,
+    /// Confidence above which `silero` calls a frame speech. A probability, not a level, and
+    /// kept apart from `threshold` for that reason.
+    pub probability: f32,
     /// Level above which a frame counts as speech, as a root mean square of samples in the
     /// range -1.0 to 1.0. The energy detector reads it that way, not as a probability.
     pub threshold: f32,
@@ -410,6 +415,8 @@ impl Default for Vad {
     fn default() -> Self {
         Self {
             engine: "energy".into(),
+            model: "silero-vad".into(),
+            probability: 0.5,
             // A probability default of 0.5 on an RMS detector would need near-clipping
             // audio before it called anything speech.
             threshold: 0.01,
@@ -911,13 +918,20 @@ impl Config {
                 ),
             });
         }
-        if self.vad.engine != "energy" {
+        if !matches!(self.vad.engine.as_str(), "energy" | "silero") {
             return Err(ConfigError::Invalid {
                 path: "vad.engine".into(),
                 message: format!(
-                    "expected energy, got {:?}; no other detector is built into this binary",
+                    "expected energy or silero, got {:?}; no other detector is built into \
+                     this binary",
                     self.vad.engine
                 ),
+            });
+        }
+        if !(0.0..=1.0).contains(&self.vad.probability) {
+            return Err(ConfigError::Invalid {
+                path: "vad.probability".into(),
+                message: format!("expected 0.0 to 1.0, got {}", self.vad.probability),
             });
         }
         if !(0.0..=1.0).contains(&self.vad.threshold) {
@@ -1169,13 +1183,23 @@ mod tests {
 
     #[test]
     fn a_vad_engine_that_is_not_built_in_is_refused() {
-        // The config used to ship `silero`, which no backend implements. Accepting the
-        // name and running the energy detector is the defect this refusal replaces.
+        // The config used to ship `silero`, which no backend implemented. Accepting a name
+        // and running the energy detector is the defect this refusal prevents, so a name
+        // that is still nobody's is refused by name.
         let mut config = Config::default();
-        config.vad.engine = "silero".into();
+        config.vad.engine = "webrtc".into();
         let error = config.validate().unwrap_err();
         assert!(error.to_string().contains("vad.engine"), "{error}");
-        assert!(error.to_string().contains("energy"), "{error}");
+        assert!(error.to_string().contains("silero"), "{error}");
+    }
+
+    #[test]
+    fn both_detectors_are_accepted_by_name() {
+        for engine in ["energy", "silero"] {
+            let mut config = Config::default();
+            config.vad.engine = engine.into();
+            assert!(config.validate().is_ok(), "{engine} was refused");
+        }
     }
 
     #[test]

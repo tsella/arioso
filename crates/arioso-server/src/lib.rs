@@ -1019,6 +1019,30 @@ impl AppState {
         stream_spec_in(&self.config(), &self.manifest)
     }
 
+    /// The file of a model, found by its manifest id.
+    ///
+    /// A detector is fetched and checked like any other model, so the path comes from the
+    /// catalog rather than from a config field that could name a file the downloader never
+    /// wrote.
+    pub(crate) fn model_file(&self, id: &str, suffix: &str) -> Result<PathBuf, String> {
+        let spec = self
+            .manifest
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .ok_or_else(|| format!("{id} is not in this catalog"))?;
+        self.file_of(spec, suffix)
+    }
+
+    /// Whether a model is on disk, by manifest id.
+    pub(crate) fn model_installed(&self, id: &str) -> bool {
+        self.manifest
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .is_some_and(|spec| self.is_installed(spec))
+    }
+
     /// Whether the socket reads partials from the model's own state.
     ///
     /// The family comes from the catalog, not from the request: one model is loaded per

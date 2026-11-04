@@ -1,8 +1,10 @@
 //! Voice activity detection, and the segmentation that follows from it.
 //!
-//! The energy backend needs no model: a frame is speech when its level clears a
-//! threshold. That is enough to cut an utterance out of a stream, and it is the fallback
-//! the PRD names for the Silero model that is not built yet.
+//! Two things live here and they are separate on purpose: a [`Gate`] answers whether one
+//! frame holds speech, and the [`Segmenter`] turns a stream of those answers into
+//! utterances. The energy gate needs no model, so the crate stays free of dependencies and
+//! compiles anywhere; a neural gate is built elsewhere, on the runtime that already runs
+//! the speech models, and reaches this crate only through the trait.
 //!
 //! The segmenter keeps a little audio before the first speech frame, because the onset
 //! of a word is quiet and cutting at the threshold clips it.
@@ -43,6 +45,32 @@ impl Default for Config {
     }
 }
 
+/// What decides whether a frame holds speech.
+///
+/// The segmenter cuts on this answer and knows nothing about how it was reached: a level
+/// against a threshold needs no model, a neural detector needs one, and both produce the
+/// same boundaries.
+pub trait Gate: Send {
+    /// Whether this frame holds speech.
+    fn speech(&mut self, frame: &[f32]) -> bool;
+}
+
+/// A frame is speech when its level clears a threshold.
+///
+/// The gate that needs nothing installed, and the one a stream uses until someone asks for
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Energy {
+    /// Root mean square above which a frame counts as speech.
+    pub threshold: f32,
+}
+
+impl Gate for Energy {
+    fn speech(&mut self, frame: &[f32]) -> bool {
+        rms(frame) > self.threshold
+    }
+}
+
 /// What the segmenter found in the audio it was given.
 #[derive(Debug, PartialEq)]
 pub enum Event {
@@ -70,10 +98,11 @@ pub enum Event {
 }
 
 /// Cuts a stream of samples into utterances.
-#[derive(Debug)]
 pub struct Segmenter {
     config: Config,
     rate: u32,
+    /// What decides whether a frame is speech.
+    gate: Box<dyn Gate>,
     /// Samples per frame, at least one.
     frame_len: usize,
     /// Audio not yet divided into frames.
@@ -97,13 +126,27 @@ pub struct Segmenter {
 }
 
 impl Segmenter {
-    /// Build a segmenter for a stream at `rate`.
+    /// Build a segmenter for a stream at `rate`, cutting on the energy gate.
     #[must_use]
     pub fn new(rate: u32, config: Config) -> Self {
+        let gate = Energy {
+            threshold: config.threshold,
+        };
+        Self::with_gate(rate, config, Box::new(gate))
+    }
+
+    /// Build a segmenter that cuts on `gate`.
+    ///
+    /// The frame length stays the segmenter's: a gate that needs a particular one says so by
+    /// refusing the frames it is given, and the caller that chose the gate is the caller that
+    /// knows what it needs.
+    #[must_use]
+    pub fn with_gate(rate: u32, config: Config, gate: Box<dyn Gate>) -> Self {
         let frame_len = ((u64::from(rate) * u64::from(config.frame_ms)) / 1000).max(1) as usize;
         Self {
             config,
             rate,
+            gate,
             frame_len,
             pending: Vec::new(),
             preroll: Vec::new(),
@@ -205,8 +248,7 @@ impl Segmenter {
     }
 
     fn frame(&mut self, frame: &[f32], events: &mut Vec<Event>) {
-        let level = rms(frame);
-        let speech = level > self.config.threshold;
+        let speech = self.gate.speech(frame);
         let frame_len = frame.len();
 
         if !self.speaking {
@@ -287,6 +329,17 @@ impl Segmenter {
     }
 }
 
+impl std::fmt::Debug for Segmenter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Segmenter")
+            .field("config", &self.config)
+            .field("rate", &self.rate)
+            .field("frame_len", &self.frame_len)
+            .field("speaking", &self.speaking)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Root mean square of a frame.
 fn rms(frame: &[f32]) -> f32 {
     if frame.is_empty() {
@@ -311,6 +364,54 @@ mod tests {
 
     fn silence(ms: u32) -> Vec<f32> {
         vec![0.0; (RATE * ms / 1000) as usize]
+    }
+
+    /// A gate that answers from a marker in the audio rather than its level.
+    ///
+    /// A frame whose first sample is below -0.9 is speech, whatever its energy. Silence is
+    /// never speech here, which the energy gate would have called speech if it were loud.
+    struct Marker;
+
+    impl Gate for Marker {
+        fn speech(&mut self, frame: &[f32]) -> bool {
+            frame.first().is_some_and(|first| *first < -0.9)
+        }
+    }
+
+    #[test]
+    fn the_segmenter_cuts_on_the_gate_it_was_given() {
+        // The rule used to live inside `frame`, so a different detector could not be used
+        // without editing the segmenter. A gate that ignores the level proves the segmenter
+        // now follows the answer it is given.
+        let config = Config {
+            min_silence_ms: 100,
+            min_speech_ms: 0,
+            preroll_ms: 0,
+            ..Config::default()
+        };
+        let mut segmenter = Segmenter::with_gate(RATE, config, Box::new(Marker));
+
+        // Loud, and not speech to this gate: the energy detector would have opened here.
+        let mut loud = vec![0.9_f32; 320];
+        loud[0] = 0.5;
+        let events = segmenter.push(&loud);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::SpeechStart { .. })),
+            "the level opened an utterance the gate refused"
+        );
+
+        // Quiet, and speech to this gate: the energy detector would have ignored it.
+        let mut quiet = vec![0.0_f32; 320];
+        quiet[0] = -1.0;
+        let events = segmenter.push(&quiet);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::SpeechStart { .. })),
+            "the gate opened an utterance and the segmenter ignored it: {events:?}"
+        );
     }
 
     #[test]

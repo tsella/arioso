@@ -289,6 +289,7 @@ dependencies = [
  "arioso-g2p",
  "arioso-models",
  "arioso-tts-piper",
+ "arioso-vad",
  "sherpa-onnx",
  "tempfile",
  "thiserror 2.0.21",
