@@ -914,6 +914,13 @@ and cannot do about a flood.
 - F16.11 Limits are per process and per address, not distributed. A volumetric flood is
   the network's problem and is out of scope: what this server promises is to refuse work
   cheaply, not to absorb a flood. The README says so rather than implying otherwise.
+- F16.12 `arioso doctor` reports the configured certificate when `server.tls.cert` is set:
+  the subject common name, the not-before and not-after instants as absolute UTC dates,
+  and the whole days remaining. An expired certificate is a problem and a non-zero exit.
+  Fewer than thirty days left is a warning that leaves the exit code alone unless
+  `--strict` is passed. A certificate that cannot be read, or is not one, is a problem
+  naming the path, so a renewal that pointed the config at the wrong file is visible
+  before a client discovers it.
 
 ### F17. Authentication and exposure
 
