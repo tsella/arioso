@@ -66,6 +66,12 @@ jobs:
           Copy-Item vendor/onnxruntime/lib/*.dll target/debug/ -Force
           Copy-Item vendor/onnxruntime/lib/*.dll target/debug/deps/ -Force
       - run: cargo test --workspace
+      # The gate in AGENTS.md includes this step, and a CI that runs three of four is a CI
+      # that says green about a gate nobody ran.
+      - name: docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
       # A fuzz target that stops compiling must fail the pull request, not sit
       # broken until the next scheduled run. This builds and never runs; the run
       # lives in fuzz.yml. libFuzzer has no Windows support, so the check runs on
