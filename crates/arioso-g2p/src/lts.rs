@@ -76,16 +76,55 @@ const QUADS: [(&str, &[&str]); 5] = [
     ("eigh", &["EY"]),
 ];
 
+/// One ARPAbet token the rules produced, and the stress digit written after it.
+///
+/// The digit used to be pushed onto an owned `String`, which allocated once per phoneme
+/// and then had to be parsed again to reach the symbol table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Token {
+    base: &'static str,
+    stress: Option<u8>,
+}
+
+impl Token {
+    /// The token as CMUdict writes it: the base, then the stress digit.
+    fn written(self) -> String {
+        match self.stress {
+            Some(digit) => format!("{}{digit}", self.base),
+            None => self.base.to_owned(),
+        }
+    }
+}
+
 /// Pronounce a word by spelling rule, as the voice's IPA symbols.
 ///
 /// Returns an empty vector when the word holds no letters to pronounce.
 #[must_use]
 pub fn pronounce(word: &str) -> Vec<&'static str> {
-    let tokens = to_arpabet(word);
-    if tokens.is_empty() {
-        return Vec::new();
+    let mut out = Vec::new();
+    extend_ipa(word, &mut out);
+    out
+}
+
+/// Append a word's symbols to `out`, by spelling rule.
+///
+/// The caller keeps the buffer, so a guessed word is written into the sentence's own
+/// vector instead of one allocated here and joined onto it.
+pub fn extend_ipa(word: &str, out: &mut Vec<&'static str>) {
+    extend_ipa_with(word, true, out);
+}
+
+/// The same symbols with the stress marks left out, for comparing sounds.
+pub fn extend_ipa_unstressed(word: &str, out: &mut Vec<&'static str>) {
+    extend_ipa_with(word, false, out);
+}
+
+fn extend_ipa_with(word: &str, with_mark: bool, out: &mut Vec<&'static str>) {
+    let mut tokens: Vec<Token> = Vec::new();
+    arpabet_tokens(word, &mut tokens);
+    for token in tokens {
+        arpabet::extend_symbols(token.base, token.stress, with_mark, out);
     }
-    arpabet::to_ipa(&tokens.join(" "))
 }
 
 /// Fold a Latin letter carrying a diacritic to the letter these rules can read.
@@ -125,42 +164,44 @@ fn fold_latin(ch: char) -> Option<&'static str> {
 /// Pronounce a word by spelling rule, as ARPAbet tokens with one primary stress.
 #[must_use]
 pub fn to_arpabet(word: &str) -> Vec<String> {
-    let text: String = word
-        .chars()
-        .flat_map(|ch| {
-            let lower = ch.to_lowercase().next().unwrap_or(ch);
-            match fold_latin(lower) {
-                Some(folded) => folded.chars().collect::<Vec<char>>(),
-                None => vec![lower],
-            }
-        })
-        .filter(char::is_ascii_alphabetic)
-        .collect();
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    let mut tokens: Vec<&'static str> = Vec::new();
-    let mut index = 0;
-    while index < text.len() {
-        index += segment(&text, index, &mut tokens);
-    }
-
-    let mut tokens: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
-    stress(&mut tokens);
-    tokens
+    let mut tokens: Vec<Token> = Vec::new();
+    arpabet_tokens(word, &mut tokens);
+    tokens.into_iter().map(Token::written).collect()
 }
 
-/// Mark the first vowel nucleus primary and the rest secondary.
+/// The tokens of a word, appended to `out`.
 ///
-/// Crude on purpose: English stress depends on a word's history, which the spelling
-/// does not carry. A guessed stress still reads better than a skipped word.
-fn stress(tokens: &mut [String]) {
-    let mut first = true;
-    for token in tokens.iter_mut() {
-        if VOWELS.contains(&token.as_str()) {
-            token.push(if first { '1' } else { '0' });
-            first = false;
+/// The letters are folded into one string, which is the only buffer this path builds. A
+/// `Vec<char>` per letter and a `Vec<String>` of the result used to come first.
+fn arpabet_tokens(word: &str, out: &mut Vec<Token>) {
+    let mut text = String::with_capacity(word.len());
+    for ch in word.chars() {
+        let lower = ch.to_lowercase().next().unwrap_or(ch);
+        match fold_latin(lower) {
+            Some(folded) => text.push_str(folded),
+            None if lower.is_ascii_alphabetic() => text.push(lower),
+            None => {}
+        }
+    }
+    if text.is_empty() {
+        return;
+    }
+
+    let first = out.len();
+    let mut index = 0;
+    while index < text.len() {
+        index += segment(&text, index, out);
+    }
+
+    // Mark the first vowel nucleus primary and the rest secondary.
+    //
+    // Crude on purpose: English stress depends on a word's history, which the spelling
+    // does not carry. A guessed stress still reads better than a skipped word.
+    let mut primary = true;
+    for token in &mut out[first..] {
+        if VOWELS.contains(&token.base) {
+            token.stress = Some(u8::from(primary));
+            primary = false;
         }
     }
 }
@@ -168,7 +209,7 @@ fn stress(tokens: &mut [String]) {
 /// Apply the longest rule that fits at `index`, appending its phonemes.
 ///
 /// Returns how many letters the rule consumed. Always at least one.
-fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
+fn segment(text: &str, index: usize, out: &mut Vec<Token>) -> usize {
     let rest = &text[index..];
     let at_start = index == 0;
     let ends_at = |len: usize| index + len == text.len();
@@ -189,22 +230,25 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         };
         if let Some(long) = long {
             if !is_vowel(char::from(consonant)) {
-                out.push(long);
+                push_bases(out, &[long]);
                 // The consonant is followed by that final `e`, which is a front vowel, so a
                 // `c` or `g` here is soft: face, ice, page, huge. `single` has no context
                 // and would say the hard form.
-                out.extend_from_slice(match consonant {
-                    b'c' => &["S"],
-                    b'g' => &["JH"],
-                    other => single(other),
-                });
+                push_bases(
+                    out,
+                    match consonant {
+                        b'c' => &["S"],
+                        b'g' => &["JH"],
+                        other => single(other),
+                    },
+                );
                 return 3;
             }
         }
     }
 
     if let Some((pattern, phonemes)) = QUADS.iter().find(|(pattern, _)| rest.starts_with(pattern)) {
-        out.extend_from_slice(phonemes);
+        push_bases(out, phonemes);
         return pattern.len();
     }
 
@@ -212,7 +256,7 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         .iter()
         .find(|(pattern, _)| rest.starts_with(pattern))
     {
-        out.extend_from_slice(phonemes);
+        push_bases(out, phonemes);
         return pattern.len();
     }
 
@@ -222,7 +266,7 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         // "or" before another r is two sounds, not one: sorry, carry, hurry.
         let before_r = pattern.ends_with('r') && rest[2..].starts_with('r');
         if (!needs_start || at_start) && (!needs_end || ends_at(2)) && !before_r {
-            out.extend_from_slice(phonemes);
+            push_bases(out, phonemes);
             return 2;
         }
     }
@@ -231,7 +275,7 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
     if rest.len() >= 2 && rest.as_bytes()[0] == rest.as_bytes()[1] {
         let doubled = rest.as_bytes()[0];
         if !is_vowel(char::from(doubled)) && doubled.is_ascii_alphabetic() {
-            out.extend_from_slice(single(doubled));
+            push_bases(out, single(doubled));
             return 2;
         }
     }
@@ -241,7 +285,7 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         if before.is_some_and(is_vowel) {
             return 2;
         }
-        out.push("G");
+        push_bases(out, &["G"]);
         return 2;
     }
 
@@ -265,8 +309,13 @@ fn segment(text: &str, index: usize, out: &mut Vec<&'static str>) -> usize {
         b'e' if ends_at(1) && index > 1 => &[],
         other => single(other),
     };
-    out.extend_from_slice(phonemes);
+    push_bases(out, phonemes);
     1
+}
+
+/// Append the tokens for a run of ARPAbet bases, with no stress digit yet.
+fn push_bases(out: &mut Vec<Token>, bases: &[&'static str]) {
+    out.extend(bases.iter().map(|base| Token { base, stress: None }));
 }
 
 /// The phonemes for one letter, with no context.

@@ -136,3 +136,23 @@ The old curve grows about 3.5 times per doubling of the input; the new one about
 `normalize` on 200 plain sentences fell from 0.073 ms to 0.040 ms and on 200 sentences dense
 with numbers from 0.244 ms to 0.074 ms, measured with one harness on both trees (release,
 minimum of seven windows of twenty calls).
+
+## A third pass: the phonemizer
+
+The bounds added with the counting allocator named two costs in `arioso-g2p` that nobody
+had measured: a two-word sentence and a spelled-out word. Both sit in the path every
+synthesis request walks, once per word. The counts below are from
+`cargo test -p arioso-g2p --test allocations -- --nocapture`, and they are per thread: the
+process-wide counter this started with absorbed the other tests' setup and reported 145
+allocations for a call that costs 7 (see `docs/lessons.md`).
+
+| Finding | Change | Before the pass | After |
+| --- | --- | --- | --- |
+| PERF-H1 | `arpabet` uppercases a token into a four-byte stack buffer and reads a `&'static [&'static str]` from the table; `extend_ipa` appends into the caller's vector | `phonemes_for_text("hello world")` 28 allocations, 1,492 bytes; `lts::pronounce("zorbansky")` 49, 1,678 | 7, 883; 7, 1,129 |
+| PERF-H3 | `lts` folds a word into one `String` and holds each token as a base plus a stress digit, so nothing is joined and re-parsed; `phonemes_for_text` keeps one word buffer and one symbol buffer for the sentence and copies a word only when it is reported; `inflect::derive` writes its candidate stems into one buffer | `phonemes_for_text("avengers")` 26, 1,141 | 8, 642 |
+| PERF-H4 | `reverse` compiles the user dictionary once into a `ReverseIndex` — every form pronounced and the list ordered at build — and appends the transcript's phonemes into one flat buffer; the server holds the index beside the dictionary and rebuilds it only when the file changes | `correct` on a five-word transcript against two entries: 146, 6,076 | `ReverseIndex::apply` on the same transcript: 15, 1,623 |
+
+Every figure is measured, not estimated, and every bound in `crates/arioso-g2p/tests/allocations.rs`
+was checked against the tree before its commit: the new bound fails there. The two-word and
+one-word rows fall across the first two commits, 28 -> 12 -> 7 and 49 -> 31 -> 7; the
+derived-word and reverse rows are measured against the commit this pass started from.

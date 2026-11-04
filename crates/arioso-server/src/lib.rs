@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use arioso_config::{AUDIO_FORMATS, Config};
 use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
+use arioso_g2p::reverse::ReverseIndex;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_kokoro::{KokoroError, KokoroVoice};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
@@ -130,6 +131,9 @@ struct UserState {
     path: PathBuf,
     modified: Option<std::time::SystemTime>,
     dictionary: UserDictionary,
+    /// The dictionary's spoken forms, pronounced and ordered once. Rebuilding this per
+    /// transcript re-pronounced every form of every entry on every final.
+    reverse: ReverseIndex,
     /// Parse error from the last reload attempt. The last good copy stays in use.
     error: Option<String>,
 }
@@ -242,12 +246,15 @@ impl AppState {
         if let Some(detail) = stream_model_problem(&config, &manifest) {
             return Err(ServerError::StreamModel(detail));
         }
+        let cmu = CmuDict::parse(&text);
+        let reverse = ReverseIndex::build(&dictionary, &cmu);
         Ok(Self {
-            dictionary: CmuDict::parse(&text),
+            dictionary: cmu,
             user: Mutex::new(UserState {
                 path,
                 modified,
                 dictionary,
+                reverse,
                 error,
             }),
             voice: Mutex::new(None),
@@ -930,7 +937,7 @@ impl AppState {
     /// it would only make the line flicker.
     pub(crate) fn correct(&self, text: &str) -> String {
         let user = self.user_dictionary();
-        arioso_g2p::reverse::correct(&user.dictionary, &self.dictionary, text)
+        user.reverse.apply(&self.dictionary, text)
     }
 
     /// Transcribe for a partial hypothesis, or give up if the engine is busy.
@@ -963,6 +970,7 @@ impl AppState {
         if modified.is_none() {
             // The file was deleted, so the shipped dictionary is what applies again.
             state.dictionary = UserDictionary::shipped();
+            state.reverse = ReverseIndex::build(&state.dictionary, &self.dictionary);
             state.error = None;
             return state;
         }
@@ -971,6 +979,7 @@ impl AppState {
             Ok(dictionary) => {
                 tracing::info!(entries = dictionary.len(), "reloaded the user dictionary");
                 state.dictionary = dictionary;
+                state.reverse = ReverseIndex::build(&state.dictionary, &self.dictionary);
                 state.error = None;
             }
             Err(error) => {

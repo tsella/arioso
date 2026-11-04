@@ -416,3 +416,13 @@ answer before the fix. Check both directions of a rule before committing it: the
 motivated the change, and the input that was already right. The exception kept here is
 deliberate — an adverb ending in `ly` keeps its ordinal — and it is written in the commit
 message so the next reader knows it is a decision.
+
+## A process-wide counter measures the process, not the call
+
+`alloc_count::measure` held a lock, so two measurements never overlapped. That was not
+enough. The tests in one binary run on several threads, and a test that built a
+126,052-entry dictionary string outside its own measurement put 126,000 allocations inside
+another test's window: a call that costs 7 allocations reported 145, and the suite passed or
+failed depending on which test started first. The counters are per thread now, so a
+measurement counts the thread that asked for it. Rule: a bound that can absorb another
+test's work is not a bound.
