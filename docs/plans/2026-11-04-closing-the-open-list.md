@@ -321,32 +321,29 @@ Wave 3, the largest and the one most likely to conflict: T5 (config, core, serve
 After every merge the controller runs the gate on `main` and pushes only when it is green. A
 branch that conflicts is rebased onto the new `main` by the controller, not by the task.
 
-## Open defect: Windows cannot open a speech graph
+## Closed: Windows could not open a speech graph
 
-Surfaced by the first test that asks the runtime to load anything, which arrived with T6.
+A test that asks the runtime to open anything used to abort on `windows-latest` with
+`The requested API version [28] is not available, only API versions [1, 17] are supported`,
+which kills the process inside C++ where no test can catch it.
 
-`cargo test -p arioso-stt-sherpa` on `windows-latest` prints
-`The requested API version [28] is not available, only API versions [1, 17] are supported in
-this build` and aborts the process inside C++, so the whole test binary dies and no other test
-in it runs. The C API version belongs to `onnxruntime`, and the caller is sherpa's prebuilt
-library, so the two disagree about which runtime they are talking to.
+Measured, not guessed. Three runs of a throwaway diagnostic workflow settled it:
 
-Two candidate causes, neither verified without a Windows machine:
+- The vendored runtime was **1.22** (C API 22). The runner also carries
+  `C:\Windows\System32\onnxruntime.dll` at **1.17** (C API 17), and that is the one the abort
+  named, because Windows searches its own directories before anything the build produced.
+- Copying the vendored runtime beside the test binary changed the message to `[1, 22]`: the
+  loader does take a DLL in the executable's directory first. It still aborted, so 22 was also
+  too old. The speech library asks for **API 28**.
+- With ONNX Runtime **1.30.1** beside the binary, the test passes.
 
-1. The prebuilt that `sherpa-onnx-sys` downloads on Windows bundles or expects a different
-   `onnxruntime.dll` from the one it finds. The CI step that deletes `target/sherpa-onnx-prebuilt`
-   forces a fresh download, so a stale cache is not the explanation for a first run.
-2. The workspace builds `ort` for the Piper engine into the same `target/debug`, and cargo
-   places its `onnxruntime.dll` beside the test binaries. A DLL search that finds that one
-   would explain a version the speech library never expected.
+So the fix had two halves and neither alone was enough: fetch a runtime new enough to carry
+API 28, and put it where the loader looks before System32. Both are in the workflow now, and
+the test is no longer quarantined.
 
-Until this is settled, the STT engine is unproven on Windows, not merely untested: the matrix
-has never opened a graph there. The one test that does is quarantined on Windows with the
-reason in its attribute, and this entry is the record.
-
-Next step: a Windows runner that prints `dumpbin /dependents` for the speech library, the
-version of every `onnxruntime.dll` in `target/debug` and `target/debug/deps`, and which one the
-loader picked. That is one workflow run, not a guess.
+What this cost: two reviews asserted the cause and both were wrong about it. One said the fix
+was to align on 1.22, which would have aborted exactly as before. Reading the source could not
+tell 1.17 from 1.22 from 28; one runner printing three version numbers could.
 
 ## Done means
 

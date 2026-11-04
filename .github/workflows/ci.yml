@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=1.22.0
+          version=1.30.1
           case "${{ runner.os }}" in
             Linux)   archive="onnxruntime-linux-x64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
             macOS)   archive="onnxruntime-osx-arm64-$version"; url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz" ;;
@@ -54,6 +54,17 @@ jobs:
           rm -rf target/debug/.fingerprint/sherpa-onnx-sys-*
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Windows searches the directory of the executable before PATH, and the runner
+      # carries its own onnxruntime.dll in System32 at a version that is too old for the
+      # speech library. Copying the vendored runtime beside the test binaries is what makes
+      # the loader take it; without this the speech engine aborts inside C++ on the first
+      # graph it opens, and no test can catch an abort.
+      - name: the runtime beside the binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item vendor/onnxruntime/lib/*.dll target/debug/ -Force
+          Copy-Item vendor/onnxruntime/lib/*.dll target/debug/deps/ -Force
       - run: cargo test --workspace
       # A fuzz target that stops compiling must fail the pull request, not sit
       # broken until the next scheduled run. This builds and never runs; the run
