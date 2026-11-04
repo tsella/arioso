@@ -47,6 +47,38 @@ pub fn to_ipa(pronunciation: &str) -> Vec<&'static str> {
     out
 }
 
+/// Every symbol [`extend_symbols`] can emit, plus the word separator.
+///
+/// The reverse direction exists because phonemes can be edited by a person and then spoken:
+/// the edited line arrives as a string, and the engines take symbols.
+static IPA_SYMBOLS: &[&str] = &[
+    "ɑ", "æ", "ə", "ʌ", "ɔ", "a", "ʊ", "ɪ", "b", "t", "ʃ", "d", "ð", "ɛ", "ɚ", "ɜ", "e", "f", "ɡ",
+    "h", "i", "k", "l", "m", "n", "ŋ", "o", "p", "ɹ", "s", "θ", "u", "v", "w", "j", "z", "ʒ", "ː",
+    "ˈ", "ˌ", " ",
+];
+
+/// Split an IPA line back into the symbols this table knows.
+///
+/// Every symbol is one character wide, so this is a scan rather than a search. A character
+/// that is not a symbol stops the scan and is returned, because a caller that asked for a
+/// sound and got silence has no way to notice.
+///
+/// # Errors
+///
+/// The first character that is not a symbol in this table.
+pub fn symbols_from_ipa(ipa: &str) -> Result<Vec<&'static str>, char> {
+    let mut out = Vec::with_capacity(ipa.chars().count());
+    for character in ipa.chars() {
+        let mut buffer = [0u8; 4];
+        let text = character.encode_utf8(&mut buffer);
+        match IPA_SYMBOLS.iter().find(|symbol| **symbol == text) {
+            Some(symbol) => out.push(*symbol),
+            None => return Err(character),
+        }
+    }
+    Ok(out)
+}
+
 /// Append the symbols for one ARPAbet token to `out`.
 pub fn extend_phoneme(token: &str, with_mark: bool, out: &mut Vec<&'static str>) {
     let mut buffer = [0u8; MAX_TOKEN];
@@ -181,5 +213,33 @@ fn symbols(base: &str, stress: Option<u8>) -> &'static [&'static str] {
         "Z" => &["z"],
         "ZH" => &["ʒ"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pronunciation_survives_the_round_trip_through_ipa() {
+        for pronunciation in [
+            "HH AH0 L OW1",
+            "W ER1 L D",
+            "T R AE1 N S K R IH1 P SH AH0 N",
+        ] {
+            let symbols = to_ipa(pronunciation);
+            let line: String = symbols.concat();
+            assert_eq!(
+                symbols_from_ipa(&line).unwrap(),
+                symbols,
+                "{pronunciation} became {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_character_the_table_cannot_say_is_named() {
+        // `x` is not an IPA symbol this table emits, and neither is a Latin letter.
+        assert_eq!(symbols_from_ipa("h ɛ l x oʊ"), Err('x'));
     }
 }

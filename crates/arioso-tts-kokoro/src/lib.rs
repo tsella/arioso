@@ -77,6 +77,11 @@ pub enum KokoroError {
     /// The caller stopped accepting audio.
     #[error("{0}")]
     Consumer(String),
+    /// Characters in the supplied phonemes that this voice's vocabulary lacks.
+    ///
+    /// Dropped silently, the caller hears a different word and has no way to know.
+    #[error("this voice cannot say {0:?}: its vocabulary has no token for it")]
+    UnknownSymbols(String),
 }
 
 /// How a render is done.
@@ -248,6 +253,67 @@ impl KokoroVoice {
     /// # Errors
     ///
     /// Returns [`KokoroError`] when ONNX Runtime fails or returns no tensor.
+    /// The symbols a text will be spoken as, without synthesizing any of it.
+    ///
+    /// The same symbol pass [`KokoroVoice::render`] runs, stopping before the model: a
+    /// display that built its own symbols could show a line the voice would never say.
+    #[must_use]
+    pub fn phonemes_for(
+        &self,
+        text: &str,
+        dictionary: &CmuDict,
+        user: &UserDictionary,
+        options: RenderOptions,
+    ) -> (Vec<&'static str>, RenderReport) {
+        let mut report = RenderReport::default();
+        let mut out: Vec<&'static str> = Vec::new();
+        for sentence in sentences(text) {
+            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+                let symbols = self.symbols(chunk, dictionary, user, options, &mut report);
+                if symbols.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push(" ");
+                }
+                out.extend(symbols);
+            }
+        }
+        (out, report)
+    }
+
+    /// Synthesize phonemes a caller supplied, one run at a time.
+    ///
+    /// [`KokoroVoice::render`] builds these symbols from text; this takes them as they are,
+    /// so a phoneme a person edited is the phoneme that is spoken.
+    ///
+    /// # Errors
+    ///
+    /// Characters this vocabulary has no token for are refused by name rather than dropped,
+    /// and the engine's own failure comes back unchanged.
+    pub fn render_symbols(
+        &mut self,
+        symbols: &[&str],
+        speed: f32,
+        mut sink: impl FnMut(&[f32], u32) -> Result<(), KokoroError>,
+    ) -> Result<(), KokoroError> {
+        let (tokens, dropped) = self.tokenize(symbols);
+        if !dropped.is_empty() {
+            let named: String = dropped.iter().collect();
+            return Err(KokoroError::UnknownSymbols(named));
+        }
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let rate = self.sample_rate();
+        let space = self.vocab.id(' ').map(i64::from);
+        for run in split_tokens(&tokens, space) {
+            let audio = self.synthesize(&run, speed)?;
+            sink(&audio, rate)?;
+        }
+        Ok(())
+    }
+
     pub fn synthesize(&mut self, tokens: &[i64], speed: f32) -> Result<Vec<f32>, KokoroError> {
         let style = self.style.row(tokens.len()).to_vec();
         let width = self.style.width as i64;

@@ -43,6 +43,11 @@ pub enum PiperError {
     /// A speaker was asked for on a voice that has only one.
     #[error("this voice has a single speaker, so speaker {0} does not exist")]
     NoSpeakers(i64),
+    /// A phoneme the voice's table has no id for.
+    ///
+    /// Dropped silently, the caller hears a different word and has no way to know.
+    #[error("this voice cannot say {0:?}: it has no id for that symbol")]
+    UnknownSymbol(String),
     /// A speaker number outside the voice's range.
     #[error("speaker {sid} is out of range: this voice has {count}")]
     SpeakerRange {
@@ -285,43 +290,7 @@ impl PiperVoice {
 
         for sentence in sentences(text) {
             for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
-                let mut groups: Vec<Vec<&'static str>> = Vec::new();
-                for piece in user.pieces(chunk) {
-                    match piece {
-                        Piece::Entry(entry) => {
-                            match self.entry_symbols(entry, dictionary, options.normalize) {
-                                Some(symbols) => groups.push(symbols),
-                                None => {
-                                    // The voice cannot say any form of this entry, so
-                                    // say the term itself and report it.
-                                    report.unusable.push(entry.term.clone());
-                                    groups.push(self.words(
-                                        &entry.term,
-                                        dictionary,
-                                        &mut report,
-                                        options.normalize,
-                                    ));
-                                }
-                            }
-                        }
-                        Piece::Text(segment) => {
-                            groups.push(self.words(
-                                segment,
-                                dictionary,
-                                &mut report,
-                                options.normalize,
-                            ));
-                        }
-                    }
-                }
-
-                let mut symbols: Vec<&str> = Vec::new();
-                for group in groups.into_iter().filter(|group| !group.is_empty()) {
-                    if !symbols.is_empty() {
-                        symbols.push(" ");
-                    }
-                    symbols.extend(group);
-                }
+                let symbols = self.chunk_symbols(chunk, dictionary, user, options, &mut report);
                 if symbols.is_empty() {
                     continue;
                 }
@@ -330,6 +299,106 @@ impl PiperVoice {
             }
         }
         Ok(report)
+    }
+
+    /// The symbols a text will be spoken as, without synthesizing any of it.
+    ///
+    /// The same loop [`PiperVoice::render`] runs, stopping before the model: a display that
+    /// built its own symbols could show a line the voice would never say.
+    #[must_use]
+    pub fn phonemes_for(
+        &self,
+        text: &str,
+        dictionary: &CmuDict,
+        user: &UserDictionary,
+        options: RenderOptions,
+    ) -> (Vec<&'static str>, RenderReport) {
+        let mut report = RenderReport::default();
+        let mut out: Vec<&'static str> = Vec::new();
+        for sentence in sentences(text) {
+            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+                let symbols = self.chunk_symbols(chunk, dictionary, user, options, &mut report);
+                if symbols.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push(" ");
+                }
+                out.extend(symbols);
+            }
+        }
+        (out, report)
+    }
+
+    /// Symbols for one chunk of text, with the user dictionary applied.
+    fn chunk_symbols(
+        &self,
+        chunk: &str,
+        dictionary: &CmuDict,
+        user: &UserDictionary,
+        options: RenderOptions,
+        report: &mut RenderReport,
+    ) -> Vec<&'static str> {
+        let mut groups: Vec<Vec<&'static str>> = Vec::new();
+        for piece in user.pieces(chunk) {
+            match piece {
+                Piece::Entry(entry) => {
+                    match self.entry_symbols(entry, dictionary, options.normalize) {
+                        Some(symbols) => groups.push(symbols),
+                        None => {
+                            // The voice cannot say any form of this entry, so say the term
+                            // itself and report it.
+                            report.unusable.push(entry.term.clone());
+                            groups.push(self.words(
+                                &entry.term,
+                                dictionary,
+                                report,
+                                options.normalize,
+                            ));
+                        }
+                    }
+                }
+                Piece::Text(segment) => {
+                    groups.push(self.words(segment, dictionary, report, options.normalize));
+                }
+            }
+        }
+
+        let mut symbols: Vec<&'static str> = Vec::new();
+        for group in groups.into_iter().filter(|group| !group.is_empty()) {
+            if !symbols.is_empty() {
+                symbols.push(" ");
+            }
+            symbols.extend(group);
+        }
+        symbols
+    }
+
+    /// Synthesize phonemes a caller supplied, one chunk at a time.
+    ///
+    /// [`PiperVoice::render`] builds these symbols from text; this takes them as they are,
+    /// so a phoneme a person edited is the phoneme that is spoken.
+    ///
+    /// # Errors
+    ///
+    /// A symbol this voice has no id for is refused by name rather than dropped, and the
+    /// engine's own failure comes back unchanged.
+    pub fn render_symbols(
+        &mut self,
+        symbols: &[&str],
+        sid: i64,
+        mut sink: impl FnMut(&[f32], u32) -> Result<(), PiperError>,
+    ) -> Result<(), PiperError> {
+        self.check_speaker(sid)?;
+        if let Some(missing) = symbols.iter().find(|symbol| !self.map.contains(symbol)) {
+            return Err(PiperError::UnknownSymbol((*missing).to_owned()));
+        }
+        let rate = self.sample_rate();
+        for chunk in symbols.chunks(SYNTHESIS_CHUNK) {
+            let audio = self.synthesize(chunk, sid)?;
+            sink(&audio, rate)?;
+        }
+        Ok(())
     }
 
     /// Symbols for a run of text, after normalization.

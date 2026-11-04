@@ -70,6 +70,20 @@ pub enum ServerError {
     },
 }
 
+/// Split an IPA line into the symbols the engines take.
+///
+/// Free rather than a method because it needs no state, and shared rather than copied
+/// because the C ABI answers a bad character before it looks at a voice: an argument error
+/// reported as an engine failure sends a caller looking in the wrong place.
+///
+/// # Errors
+///
+/// The first character that is not a phoneme, in a sentence that names it.
+pub fn parse_phonemes(phonemes: &str) -> Result<Vec<&'static str>, String> {
+    arioso_g2p::arpabet::symbols_from_ipa(phonemes)
+        .map_err(|character| format!("{character:?} is not a phoneme"))
+}
+
 /// A speaker a render cannot use, and why.
 ///
 /// The two cases answer with different codes on the C ABI: a voice that would not load is an
@@ -409,6 +423,115 @@ impl AppState {
             state.finish_download(&id, failure.as_deref());
         });
         None
+    }
+
+    /// Fetch a model and wait for it, reporting progress while it runs.
+    ///
+    /// The routes hand the work to a task and report through `/v1/models`, because an HTTP
+    /// request must not wait for a 300 MB fetch. A caller with no event loop — the C ABI, a
+    /// terminal app — needs the fetch itself to come back and needs to hear about it as it
+    /// goes.
+    ///
+    /// `progress` returns `false` to stop. The fetch is dropped at its next step and the
+    /// `.part` files stay, so a later attempt resumes instead of starting again.
+    ///
+    /// # Errors
+    ///
+    /// An id the catalog does not hold, a fetch already in flight for it, or the
+    /// downloader's own failure.
+    pub fn download_blocking(
+        &self,
+        id: &str,
+        mut progress: impl FnMut(u64, u64) -> bool,
+    ) -> Result<PathBuf, String> {
+        let Some(spec) = self.manifest.find(id).cloned() else {
+            return Err(format!("no model with id {id} in the catalog"));
+        };
+        let dir = self.models_dir.clone();
+        if spec.is_installed(&dir) {
+            return Ok(dir);
+        }
+        let total = spec.total_size();
+        if self.try_start_download(id, total).is_some() {
+            return Err(format!("{id} is already downloading"));
+        }
+        let started = std::time::Instant::now();
+        let result = self.fetch_and_wait(&spec, &dir, total, &mut progress);
+        self.finish_download(id, result.as_ref().err().map(String::as_str));
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    model = %id,
+                    bytes = total,
+                    ms = started.elapsed().as_millis(),
+                    "model downloaded"
+                );
+                Ok(dir)
+            }
+            Err(error) => {
+                tracing::error!(model = %id, %error, "model download failed");
+                Err(error)
+            }
+        }
+    }
+
+    /// The fetch itself: one task, and a loop that reports what it has done.
+    ///
+    /// A blocking caller has no runtime of its own, so this builds one. The task is aborted
+    /// when the callback says stop, which leaves the resumable `.part` files on disk.
+    fn fetch_and_wait(
+        &self,
+        spec: &arioso_models::ModelSpec,
+        dir: &Path,
+        total: u64,
+        progress: &mut impl FnMut(u64, u64) -> bool,
+    ) -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("could not start a runtime for the download: {error}"))?;
+        let downloader =
+            arioso_models::Downloader::with_mirror(self.config().models.mirror.clone())
+                .map_err(|error| error.to_string())?;
+        let id = spec.id.clone();
+        let spec = spec.clone();
+        let dir = dir.to_path_buf();
+        let seen = Arc::new(std::sync::Mutex::new((0u64, total)));
+        let reported = Arc::clone(&seen);
+        runtime.block_on(async {
+            let task = tokio::spawn(async move {
+                let mut report = move |p: arioso_models::Progress| {
+                    if let Ok(mut slot) = reported.lock() {
+                        *slot = (p.downloaded, p.total);
+                    }
+                };
+                downloader
+                    .ensure_model(&spec, &dir, &mut report)
+                    .await
+                    .map(|_paths| ())
+                    .map_err(|error| error.to_string())
+            });
+            let abort = task.abort_handle();
+            tokio::pin!(task);
+            loop {
+                tokio::select! {
+                    finished = &mut task => {
+                        return finished
+                            .map_err(|error| format!("the download task failed: {error}"))?;
+                    }
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        let (downloaded, total) = *seen
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        self.note_download(&id, downloaded, total);
+                        if !progress(downloaded, total) {
+                            abort.abort();
+                            return Err("the download was cancelled".to_owned());
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Start the downloads the config asks for at start-up.
@@ -1290,6 +1413,166 @@ impl AppState {
         self.render_stream(text, speed, sid, sink)
     }
 
+    /// The phonemes a text will be spoken as, as the loaded voice builds them.
+    ///
+    /// The voice is asked rather than the text-to-phoneme rules, because each engine drops
+    /// or joins symbols in its own way: a display built from the rules could show a line the
+    /// voice would never say.
+    ///
+    /// # Errors
+    ///
+    /// A voice that would not load, or a text with nothing in it.
+    pub fn phonemes_for(&self, text: &str) -> Result<String, String> {
+        if text.trim().is_empty() {
+            return Err("the text is empty".to_string());
+        }
+        self.warm_voice().map_err(|error| error.to_string())?;
+        let guard = self
+            .voice
+            .lock()
+            .map_err(|_| "the voice lock is poisoned".to_string())?;
+        let voice = guard.as_ref().ok_or("voice failed to load")?;
+        let user = self.user_dictionary();
+        let normalize = arioso_core::NormalizeOptions {
+            time_of_day: self.config().tts.time_of_day,
+        };
+        // Each engine reports in its own type, and the caller wants the line, so the
+        // reports are dropped where they are made rather than unified.
+        let symbols = match voice {
+            Voice::Piper(voice) => {
+                voice
+                    .phonemes_for(
+                        text,
+                        &self.dictionary,
+                        &user.dictionary,
+                        arioso_tts_piper::RenderOptions {
+                            speed: 1.0,
+                            normalize,
+                            sid: 0,
+                        },
+                    )
+                    .0
+            }
+            Voice::Kokoro(voice) => {
+                voice
+                    .phonemes_for(
+                        text,
+                        &self.dictionary,
+                        &user.dictionary,
+                        arioso_tts_kokoro::RenderOptions {
+                            speed: 1.0,
+                            normalize,
+                        },
+                    )
+                    .0
+            }
+        };
+        Ok(symbols.concat())
+    }
+
+    /// Synthesize phonemes a caller supplied, one chunk at a time.
+    ///
+    /// The symbols are taken as written. A symbol the voice cannot say is refused by name:
+    /// a caller that asked for a sound and heard a different word has no way to notice.
+    ///
+    /// # Errors
+    ///
+    /// A character that is not a phoneme, a symbol this voice has no id for, or the
+    /// engine's own failure.
+    pub fn render_phonemes_stream(
+        &self,
+        phonemes: &str,
+        speed: f32,
+        sid: i64,
+        mut sink: impl FnMut(&[f32], u32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let symbols = parse_phonemes(phonemes)?;
+        self.check_sid(sid).map_err(|error| error.to_string())?;
+        let mut guard = self
+            .voice
+            .lock()
+            .map_err(|_| "the voice lock is poisoned".to_string())?;
+        if guard.is_none() {
+            *guard = Some(self.load_voice().map_err(|error| error.to_string())?);
+        }
+        let voice = guard.as_mut().ok_or("voice failed to load")?;
+        match voice {
+            Voice::Piper(voice) => {
+                voice.set_speed(speed);
+                voice
+                    .render_symbols(&symbols, sid, |audio, rate| {
+                        sink(audio, rate).map_err(arioso_tts_piper::PiperError::Consumer)
+                    })
+                    .map_err(|error| error.to_string())
+            }
+            Voice::Kokoro(voice) => voice
+                .render_symbols(&symbols, speed, |audio, rate| {
+                    sink(audio, rate).map_err(arioso_tts_kokoro::KokoroError::Consumer)
+                })
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Synthesize phonemes to WAV bytes, for callers that want one buffer.
+    ///
+    /// # Errors
+    ///
+    /// As [`AppState::render_phonemes_stream`].
+    pub fn synthesize_phonemes_wav(
+        &self,
+        phonemes: &str,
+        speed: f32,
+        sid: i64,
+    ) -> Result<Vec<u8>, String> {
+        let mut samples: Vec<f32> = Vec::new();
+        let mut rate = 0u32;
+        self.render_phonemes_stream(phonemes, speed, sid, |audio, at| {
+            rate = at;
+            samples.extend_from_slice(audio);
+            Ok(())
+        })?;
+        Ok(wav::to_bytes_from_pcm(&wav::pcm_s16le(&samples), rate))
+    }
+
+    /// The catalog as a client reads it: what each model is, what it costs in bytes, what
+    /// its licence allows, and whether it is on disk.
+    ///
+    /// One implementation for the route, the C ABI and any other front end: three copies of
+    /// this loop would disagree about what `installed` means within a release.
+    #[must_use]
+    pub fn models_view(&self) -> Vec<ModelView> {
+        self.manifest
+            .models
+            .iter()
+            .map(|m| {
+                let installed = self.is_installed(m);
+                // A caller that started a download polls this. Reporting only `installed`
+                // made it re-POST to find out whether anything was happening.
+                let progress = self.download_progress(&m.id);
+                let label = model_state(installed, progress.is_some());
+                ModelView {
+                    id: m.id.clone(),
+                    kind: format!("{:?}", m.kind).to_lowercase(),
+                    engine: m.engine.clone(),
+                    license: m.license.clone(),
+                    installed,
+                    state: label.to_owned(),
+                    downloaded: progress.map(|(downloaded, _)| downloaded),
+                    bytes: m.total_size(),
+                    commercial_use: m.commercial_use,
+                    speakers: speaker_names(&m.meta),
+                    languages: meta_strings(&m.meta, "languages"),
+                }
+            })
+            .collect()
+    }
+
+    /// The catalog as one JSON document, for callers that speak JSON and nothing else.
+    #[must_use]
+    pub fn models_json(&self) -> String {
+        serde_json::to_string(&self.models_view()).unwrap_or_else(|_| "[]".to_owned())
+    }
+
     /// Open a streaming transcription session, for the C ABI.
     ///
     /// The model loads on the first call, so the first session in a process waits for a
@@ -1486,6 +1769,13 @@ pub struct ModelView {
     pub bytes: u64,
     /// Whether the model's license allows commercial use.
     pub commercial_use: bool,
+    /// Speaker names, in the order the voice numbers them.
+    ///
+    /// Empty for a single-speaker model: a list of one would suggest a choice that is not
+    /// there.
+    pub speakers: Vec<String>,
+    /// Languages the model speaks, as the manifest records them.
+    pub languages: Vec<String>,
 }
 
 /// One model's state, as the catalog reports it and the event stream carries it.
@@ -3223,6 +3513,22 @@ async fn warm_model(
     }
 }
 
+/// Speaker names from a manifest's metadata, in the order the voice numbers them.
+///
+/// The manifest records them as a name-to-index object, so the indices decide the order: a
+/// picker that showed them alphabetically would disagree with `sid`.
+fn speaker_names(meta: &serde_json::Value) -> Vec<String> {
+    let Some(map) = meta.get("speakers").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut pairs: Vec<(i64, String)> = map
+        .iter()
+        .map(|(name, index)| (index.as_i64().unwrap_or(0), name.clone()))
+        .collect();
+    pairs.sort_by_key(|(index, _)| *index);
+    pairs.into_iter().map(|(_, name)| name).collect()
+}
+
 /// Strings under one key of a manifest's free-form metadata.
 fn meta_strings(meta: &serde_json::Value, key: &str) -> Vec<String> {
     meta.get(key)
@@ -3243,30 +3549,9 @@ fn meta_strings(meta: &serde_json::Value, key: &str) -> Vec<String> {
     responses((status = 200, body = ModelListView))
 )]
 async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelListView> {
-    let models: Vec<ModelView> = state
-        .manifest
-        .models
-        .iter()
-        .map(|m| {
-            let installed = state.is_installed(m);
-            // A caller that started a download polls this route. Reporting only `installed`
-            // made it re-POST to find out whether anything was happening.
-            let progress = state.download_progress(&m.id);
-            let label = model_state(installed, progress.is_some());
-            ModelView {
-                id: m.id.clone(),
-                kind: format!("{:?}", m.kind).to_lowercase(),
-                engine: m.engine.clone(),
-                license: m.license.clone(),
-                installed,
-                state: label.to_owned(),
-                downloaded: progress.map(|(downloaded, _)| downloaded),
-                bytes: m.total_size(),
-                commercial_use: m.commercial_use,
-            }
-        })
-        .collect();
-    Json(ModelListView { models })
+    Json(ModelListView {
+        models: state.models_view(),
+    })
 }
 
 /// How long an idle stream waits before sending a comment line.

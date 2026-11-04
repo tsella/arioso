@@ -160,7 +160,16 @@ impl PhonemeMap {
     ///
     /// The render path needs `i64`, and converting the `Vec<u32>` afterwards built the
     /// sequence twice for every chunk it spoke.
+    /// Whether this voice has an id for `phoneme`.
+    ///
+    /// A symbol the table lacks is dropped by [`PhonemeMap::to_ids_i64`] without a word, so
+    /// a caller that must not lose a phoneme silently asks first.
     #[must_use]
+    pub fn contains(&self, phoneme: &str) -> bool {
+        self.ids.contains_key(phoneme)
+    }
+
+    /// The ids for one symbol, or an empty slice.
     pub fn to_ids_i64(&self, phonemes: &[&str]) -> Vec<i64> {
         let mut ids = Vec::with_capacity(phonemes.len() * 2 + 3);
         ids.push(i64::from(self.bos));
