@@ -19,7 +19,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [config_json, dictionary, manifest, wav_header]
+        # Every target in fuzz/Cargo.toml. A target that exists but is not in this matrix
+        # is a target that has never run.
+        target:
+          - config_json
+          - dictionary
+          - manifest
+          - wav_header
+          - normalize
+          - chunk
+          - g2p
+          - kokoro_voice
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -27,13 +37,14 @@ jobs:
         with:
           # fuzz/ is its own workspace with its own target directory.
           workspaces: "fuzz -> target"
-      # The wav_header target links arioso-tts-piper, which links a native ONNX
-      # Runtime, and the vendored copy is gitignored. Same release as ci.yml.
+      # The wav_header and kokoro_voice targets link the speech engines, which link a native
+      # ONNX Runtime, and the vendored copy is gitignored. Same release as ci.yml, because
+      # the speech library asks for an API version the older runtimes do not have.
       - name: onnx runtime
         shell: bash
         run: |
           set -euo pipefail
-          version=1.22.0
+          version=1.30.1
           archive="onnxruntime-linux-x64-$version"
           url="https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive.tgz"
           mkdir -p vendor
