@@ -57,6 +57,15 @@ pub enum Event {
         samples: Vec<f32>,
         /// Sample index where it began.
         start: u64,
+        /// Sample index one past the last sample the segmenter read for this utterance,
+        /// which is where it closed.
+        ///
+        /// `samples` is trimmed to the speech plus a short tail, so it is shorter than
+        /// `end - start`: the silence that ended the utterance is behind this index, and a
+        /// caller that feeds the utterance to a streaming model reads the stream up to
+        /// here. Without it the caller has to guess the boundary, and a guess that runs to
+        /// the end of the chunk it is holding feeds the next utterance's words to this one.
+        end: u64,
     },
 }
 
@@ -164,6 +173,15 @@ impl Segmenter {
         }
     }
 
+    /// Samples handed to this segmenter, including the ones not yet a whole frame.
+    ///
+    /// A caller that slices the stream it pushes needs the index of the next sample, which
+    /// is this value: `consumed` alone is short by whatever the last push left over.
+    #[must_use]
+    pub fn heard(&self) -> u64 {
+        self.consumed + self.pending.len() as u64
+    }
+
     /// Close the open utterance, if any, at the end of the stream.
     pub fn flush(&mut self) -> Option<Event> {
         if !self.speaking || self.speech.is_empty() {
@@ -179,7 +197,11 @@ impl Segmenter {
         if speech_ms < self.config.min_speech_ms {
             return None;
         }
-        Some(Event::Utterance { samples, start })
+        Some(Event::Utterance {
+            samples,
+            start,
+            end: self.heard(),
+        })
     }
 
     fn frame(&mut self, frame: &[f32], events: &mut Vec<Event>) {
@@ -188,20 +210,25 @@ impl Segmenter {
         let frame_len = frame.len();
 
         if !self.speaking {
-            self.remember(frame);
-            if speech {
-                self.speaking = true;
-                self.speech = std::mem::take(&mut self.preroll);
-                self.speech.extend_from_slice(frame);
-                self.started_at = self.consumed.saturating_sub(self.speech.len() as u64);
-                self.silence_frames = 0;
-                self.speech_frames = 1;
-                self.last_speech_len = self.speech.len();
-                events.push(Event::SpeechStart {
-                    at: self.started_at,
-                });
-            }
             self.consumed += frame_len as u64;
+            if !speech {
+                self.remember(frame);
+                return;
+            }
+            // The frame that starts the utterance is not preroll: it is the utterance's
+            // first frame, and remembering it here as well put a copy of it at the front of
+            // every utterance, so a model heard it twice. The count is added before the
+            // start is taken from it, because the utterance begins with this frame.
+            self.speaking = true;
+            self.speech = std::mem::take(&mut self.preroll);
+            self.speech.extend_from_slice(frame);
+            self.started_at = self.consumed.saturating_sub(self.speech.len() as u64);
+            self.silence_frames = 0;
+            self.speech_frames = 1;
+            self.last_speech_len = self.speech.len();
+            events.push(Event::SpeechStart {
+                at: self.started_at,
+            });
             return;
         }
 
@@ -233,6 +260,7 @@ impl Segmenter {
         events.push(Event::Utterance {
             samples,
             start: self.started_at,
+            end: self.consumed,
         });
     }
 
@@ -439,6 +467,61 @@ mod tests {
             (900..=1200).contains(&ms),
             "cut near the limit, got {ms} ms"
         );
+    }
+
+    #[test]
+    fn the_event_says_where_the_utterance_ended() {
+        // The socket slices the chunk it just pushed by this index. If it were the end of
+        // the push instead, the speech that followed the silence would be handed to the
+        // utterance that closed.
+        let mut segmenter = Segmenter::new(RATE, Config::default());
+        let mut audio = silence(500);
+        audio.extend(tone(600));
+        audio.extend(silence(900));
+        let events = segmenter.push(&audio);
+        let Some(Event::Utterance {
+            samples,
+            start,
+            end,
+        }) = events
+            .iter()
+            .find(|event| matches!(event, Event::Utterance { .. }))
+        else {
+            panic!("one utterance: {events:?}");
+        };
+        // 500 ms of leading silence, 600 ms of speech, and the 500 ms of silence that
+        // ended it: the close is there, and the 400 ms of silence after it is not.
+        assert_eq!(*end, 1600 * u64::from(RATE) / 1000, "end at {end}");
+        assert!(*end <= segmenter.heard());
+        assert_eq!(segmenter.heard(), audio.len() as u64);
+        // The audio is trimmed to the speech and a short tail, so it is shorter.
+        assert!(samples.len() as u64 <= *end - *start);
+    }
+
+    #[test]
+    fn the_frame_that_starts_an_utterance_is_not_preroll() {
+        // Remembering that frame as preroll and then appending it again put a copy of it at
+        // the front of every utterance, so a model heard one frame of it twice.
+        let mut segmenter = Segmenter::new(RATE, Config::default());
+        let audio = tone(100);
+        let events = segmenter.push(&audio);
+        let Some((buffer, start)) = segmenter.open() else {
+            panic!("speech must open an utterance: {events:?}");
+        };
+        assert_eq!(buffer.len(), audio.len());
+        assert_eq!(start, 0);
+
+        // Leading silence is preroll, and the utterance still begins with it.
+        let mut segmenter = Segmenter::new(RATE, Config::default());
+        let mut audio = silence(400);
+        audio.extend(tone(100));
+        segmenter.push(&audio);
+        let Some((buffer, start)) = segmenter.open() else {
+            panic!("speech must open an utterance");
+        };
+        // 200 ms of preroll and 100 ms of speech, with no frame counted twice.
+        assert_eq!(buffer.len(), RATE as usize * 300 / 1000);
+        assert_eq!(start, 200 * u64::from(RATE) / 1000);
     }
 
     #[test]

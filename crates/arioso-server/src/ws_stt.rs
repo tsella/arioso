@@ -347,6 +347,83 @@ async fn end_with_error(out: &mpsc::Sender<Message>, failure: &SttFailure) -> bo
     false
 }
 
+/// One thing a chunk asks of the streaming path.
+#[derive(Debug)]
+enum Step<'a> {
+    /// Audio an utterance's session has not heard yet.
+    Hear {
+        /// Where the utterance began in the stream.
+        start: u64,
+        /// The samples to feed.
+        audio: &'a [f32],
+    },
+    /// The utterance is over: hear its last audio, then send its final.
+    Close {
+        /// Where the utterance began in the stream.
+        start: u64,
+        /// The last of its audio, which the session has not heard.
+        audio: &'a [f32],
+        /// Everything the segmenter kept for it, which is what the final frame covers and
+        /// what is decoded when no session was ever opened for it.
+        utterance: &'a [f32],
+    },
+}
+
+/// What one chunk means for the sessions, in the order it happens.
+///
+/// The segmenter is the only thing that knows where an utterance ends, so this is built
+/// from what it reported and not from the extent of the chunk. A session that has heard
+/// `fed` samples of the utterance that began at `start` hears the chunk from that point to
+/// where the segmenter closed the utterance, and the speech that opens the next utterance
+/// is behind that point, so no session hears a word that is not its own and no sample is
+/// fed twice.
+///
+/// `at` is the stream index of `chunk[0]` and `session` is the open session's utterance
+/// start with how many samples it has heard.
+fn plan_chunk<'a>(
+    chunk: &'a [f32],
+    at: u64,
+    events: &'a [Event],
+    open: Option<(&'a [f32], u64)>,
+    session: Option<(u64, usize)>,
+) -> Vec<Step<'a>> {
+    let index = |position: u64| {
+        usize::try_from(position.saturating_sub(at))
+            .unwrap_or(usize::MAX)
+            .min(chunk.len())
+    };
+    let fed = |start: u64| match session {
+        Some((heard_from, heard)) if heard_from == start => heard,
+        _ => 0,
+    };
+    let mut steps = Vec::new();
+    for event in events {
+        let Event::Utterance {
+            samples: utterance,
+            start,
+            end,
+        } = event
+        else {
+            continue;
+        };
+        let from = index(*start + fed(*start) as u64);
+        let to = index(*end);
+        steps.push(Step::Close {
+            start: *start,
+            audio: &chunk[from..to.max(from)],
+            utterance,
+        });
+    }
+    if let Some((buffer, start)) = open {
+        let from = fed(start).min(buffer.len());
+        steps.push(Step::Hear {
+            start,
+            audio: &buffer[from..],
+        });
+    }
+    steps
+}
+
 /// Feed one chunk of audio through the streaming path.
 ///
 /// Returns false when the session has to end, which means an error frame has been sent.
@@ -358,61 +435,103 @@ async fn stream_chunk(
     gate: &mut Gate,
     samples: &[f32],
 ) -> bool {
-    // The utterance the segmenter already has open hears this chunk. A chunk that ends
-    // the utterance also feeds the silence that ended it, which is what the model needs
-    // to be sure the word is over.
-    if let Some(open) = live.as_mut() {
-        match open.feed(samples.to_vec()).await {
-            Ok(Some(text)) => {
-                if open.fed >= MIN_PARTIAL {
-                    if let Some(text) = gate.allow(&text) {
-                        send(
-                            out,
-                            json!({
-                                "type": "partial",
-                                "text": text,
-                                "t": seconds(open.fed),
-                                "provisional": true,
-                            }),
-                        )
-                        .await;
-                    }
+    // The segmenter hears the chunk first, because it is what knows where an utterance
+    // ends. Feeding the open session the whole chunk first made that session hear the
+    // silence that ended its utterance and the words that began the next one, so its final
+    // covered the wrong audio and those words were then fed to the next session and
+    // decoded a second time.
+    let at = segmenter.heard();
+    let events = segmenter.push(samples);
+    let open = segmenter.open();
+    let steps = plan_chunk(
+        samples,
+        at,
+        &events,
+        open,
+        live.as_ref().map(|open| (open.start as u64, open.fed)),
+    );
+
+    for step in steps {
+        match step {
+            Step::Hear { start, audio } => {
+                if !feed_utterance(state, out, live, start, audio, gate).await {
+                    return false;
                 }
             }
-            Ok(None) => {}
-            Err(failure) => return end_with_error(out, &failure).await,
-        }
-    }
-
-    // Whatever the segmenter closed is final.
-    for event in segmenter.push(samples) {
-        let Event::Utterance {
-            samples: audio,
-            start,
-        } = event
-        else {
-            continue;
-        };
-        if !finish_utterance(state, out, live, &audio, start as usize, gate).await {
-            return false;
-        }
-    }
-
-    // The utterance the segmenter now has open starts a stream of its own, fed with
-    // everything it holds so far: the preroll is part of what the model should hear.
-    if live.is_none() {
-        if let Some((buffer, start)) = segmenter.open() {
-            let session = match state.stream_session() {
-                Ok(session) => session,
-                Err(failure) => return end_with_error(out, &failure).await,
-            };
-            let mut open = Live::new(session, start as usize);
-            let buffer = buffer.to_vec();
-            if let Err(failure) = open.feed(buffer).await {
-                return end_with_error(out, &failure).await;
+            Step::Close {
+                start,
+                audio,
+                utterance,
+            } => {
+                // The session hears the last of its own audio, the silence that ended the
+                // utterance included, before it is asked for the final: that silence is
+                // what tells the model the word is over.
+                if !feed_utterance(state, out, live, start, audio, gate).await {
+                    return false;
+                }
+                if !finish_utterance(state, out, live, utterance, start as usize, gate).await {
+                    return false;
+                }
             }
-            *live = Some(open);
         }
+    }
+    true
+}
+
+/// Give one utterance's session the audio it has not heard.
+///
+/// The session is created when the utterance first has audio, and hears nothing but its
+/// own. Returns false when the session has to end, which means an error frame was sent.
+async fn feed_utterance(
+    state: &Arc<AppState>,
+    out: &mpsc::Sender<Message>,
+    live: &mut Option<Live>,
+    start: u64,
+    audio: &[f32],
+    gate: &mut Gate,
+) -> bool {
+    let start = start as usize;
+    // A session for another utterance is one the segmenter has moved past.
+    if live.as_ref().is_some_and(|open| open.start != start) {
+        *live = None;
+    }
+    if live.is_none() {
+        if audio.is_empty() {
+            // Nothing to hear, so there is nothing to open: the final is decoded from the
+            // segmenter's own copy of the utterance.
+            return true;
+        }
+        let session = match state.stream_session() {
+            Ok(session) => session,
+            Err(failure) => return end_with_error(out, &failure).await,
+        };
+        *live = Some(Live::new(session, start));
+    }
+    let Some(open) = live.as_mut() else {
+        return true;
+    };
+    if audio.is_empty() {
+        return true;
+    }
+    match open.feed(audio.to_vec()).await {
+        Ok(Some(text)) => {
+            if open.fed >= MIN_PARTIAL {
+                if let Some(text) = gate.allow(&text) {
+                    send(
+                        out,
+                        json!({
+                            "type": "partial",
+                            "text": text,
+                            "t": seconds(open.fed),
+                            "provisional": true,
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(failure) => return end_with_error(out, &failure).await,
     }
     true
 }
@@ -608,7 +727,9 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                         }
                         let mut failed = false;
                         for event in segmenter.push(&samples) {
-                            let Event::Utterance { samples, start } = event else { continue };
+                            let Event::Utterance { samples, start, .. } = event else {
+                                continue;
+                            };
                             if samples.len() < MIN_FINAL {
                                 continue;
                             }
@@ -634,15 +755,39 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                             }
                             Some("stop") => {
                                 if streaming {
-                                    if let Some(Event::Utterance { samples, start }) =
+                                    if let Some(Event::Utterance { samples, start, .. }) =
                                         segmenter.flush()
                                     {
+                                        let start = start as usize;
+                                        // The frames the segmenter had not completed are
+                                        // the last of the utterance; the session hears
+                                        // them before its final, as it hears every chunk.
+                                        let heard = live
+                                            .as_ref()
+                                            .filter(|open| open.start == start)
+                                            .map_or(0, |open| open.fed);
+                                        let rest = samples
+                                            .get(heard.min(samples.len())..)
+                                            .unwrap_or_default()
+                                            .to_vec();
+                                        if !feed_utterance(
+                                            &state,
+                                            &out,
+                                            &mut live,
+                                            start as u64,
+                                            &rest,
+                                            &mut gate,
+                                        )
+                                        .await
+                                        {
+                                            break;
+                                        }
                                         if !finish_utterance(
                                             &state,
                                             &out,
                                             &mut live,
                                             &samples,
-                                            start as usize,
+                                            start,
                                             &mut gate,
                                         )
                                         .await
@@ -650,7 +795,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                                             break;
                                         }
                                     }
-                                } else if let Some(Event::Utterance { samples, start }) =
+                                } else if let Some(Event::Utterance { samples, start, .. }) =
                                     segmenter.flush()
                                 {
                                     if samples.len() >= MIN_FINAL
@@ -912,5 +1057,172 @@ mod tests {
         assert_eq!(seconds(0), 0.0);
         assert_eq!(seconds(16_000), 1.0);
         assert_eq!(seconds(24_000), 1.5);
+    }
+
+    /// A segmenter that cuts quickly, so a test can carry a whole utterance boundary in
+    /// one chunk.
+    fn test_vad() -> VadConfig {
+        VadConfig {
+            threshold: 0.01,
+            frame_ms: 20,
+            min_silence_ms: 300,
+            min_speech_ms: 100,
+            preroll_ms: 100,
+            max_utterance_ms: 30_000,
+        }
+    }
+
+    /// Audio at a level the segmenter counts as speech. Each utterance gets its own level,
+    /// so a sample can be traced to the utterance it came from.
+    fn voiced(ms: u32, level: f32) -> Vec<f32> {
+        vec![level; (STREAM_RATE * ms / 1000) as usize]
+    }
+
+    fn quiet(ms: u32) -> Vec<f32> {
+        vec![0.0; (STREAM_RATE * ms / 1000) as usize]
+    }
+
+    /// What a session is: the utterance it belongs to, and how much of it has been fed.
+    type Session = Option<(u64, usize)>;
+
+    /// Everything each utterance's session heard, by the utterance's start.
+    type Heard = std::collections::BTreeMap<u64, Vec<f32>>;
+
+    /// The plan for one chunk, applied the way the socket applies it.
+    ///
+    /// The engine is not available in a unit test, so this does what `stream_chunk` does
+    /// with the plan: a session is opened by its first audio, hears each step in turn, and
+    /// is gone once its utterance closes. Returns the finals the chunk produced.
+    fn drive(
+        segmenter: &mut Segmenter,
+        chunk: &[f32],
+        session: &mut Session,
+        heard: &mut Heard,
+    ) -> Vec<(u64, usize)> {
+        let at = segmenter.heard();
+        let events = segmenter.push(chunk);
+        let open = segmenter.open();
+        let steps = plan_chunk(chunk, at, &events, open, *session);
+        let mut finals = Vec::new();
+        for step in steps {
+            let (start, audio) = match step {
+                Step::Hear { start, audio } => (start, audio),
+                Step::Close {
+                    start,
+                    audio,
+                    utterance,
+                } => {
+                    finals.push((start, utterance.len()));
+                    (start, audio)
+                }
+            };
+            if audio.is_empty() {
+                continue;
+            }
+            let fed = match *session {
+                Some((from, fed)) if from == start => fed,
+                _ => 0,
+            };
+            heard.entry(start).or_default().extend_from_slice(audio);
+            *session = Some((start, fed + audio.len()));
+        }
+        finals
+    }
+
+    #[test]
+    fn a_chunk_that_ends_one_utterance_and_begins_the_next_feeds_each_session_its_own_audio() {
+        // One WebSocket message carrying the silence that ends the first utterance and the
+        // first words of the second. The session for the first was fed the whole message,
+        // so its final covered the next utterance's words, and those words were then fed
+        // to the new session and decoded a second time.
+        let mut segmenter = Segmenter::new(STREAM_RATE, test_vad());
+        let mut heard = Heard::new();
+        let mut session: Session = None;
+
+        let first = voiced(400, 0.5);
+        let finals = drive(&mut segmenter, &first, &mut session, &mut heard);
+        assert!(finals.is_empty(), "nothing closes on the first chunk");
+        let Some((start, fed)) = session else {
+            panic!("the first utterance has a session");
+        };
+        assert_eq!(fed, first.len(), "the session heard the whole chunk");
+
+        let mut second = quiet(400);
+        second.extend(voiced(400, 0.7));
+        let finals = drive(&mut segmenter, &second, &mut session, &mut heard);
+        assert_eq!(
+            finals.len(),
+            1,
+            "the chunk closes one utterance: {finals:?}"
+        );
+
+        // Everything the closing session heard is its own: its speech, then the 300 ms of
+        // silence that ended it, and none of the 0.7 speech that began the next utterance.
+        let closing = heard.get(&start).expect("the first utterance was heard");
+        assert_eq!(closing.len(), first.len() + quiet(300).len());
+        assert!(closing[..first.len()].iter().all(|sample| *sample == 0.5));
+        assert!(
+            closing[first.len()..].iter().all(|sample| *sample == 0.0),
+            "the closing session heard the next utterance's speech"
+        );
+
+        // The final covers the utterance the segmenter closed, and stops before the next
+        // one begins.
+        let (next, _) = session.expect("the second utterance has a session");
+        assert_eq!(finals[0].0, start);
+        assert!(
+            start + finals[0].1 as u64 <= next,
+            "the final runs into the next utterance"
+        );
+
+        // The next utterance's speech was fed once, to its own session, as its preroll
+        // followed by the speech.
+        let fresh = heard.get(&next).expect("the second utterance was heard");
+        assert_eq!(fresh.len(), quiet(100).len() + voiced(400, 0.7).len());
+        assert_eq!(
+            fresh.iter().filter(|sample| **sample == 0.7).count(),
+            voiced(400, 0.7).len(),
+            "the next utterance's speech is fed exactly once"
+        );
+    }
+
+    #[test]
+    fn no_sample_reaches_another_utterance_and_none_is_fed_twice() {
+        // A stream cut into chunks that line up with neither frames nor utterances: every
+        // sample of speech has to reach its own session once, and no other session at all.
+        let mut segmenter = Segmenter::new(STREAM_RATE, test_vad());
+        let mut stream = quiet(200);
+        stream.extend(voiced(300, 0.5));
+        stream.extend(quiet(400));
+        stream.extend(voiced(300, 0.7));
+        stream.extend(quiet(500));
+        stream.extend(voiced(300, 0.9));
+        stream.extend(quiet(400));
+
+        let mut heard = Heard::new();
+        let mut session: Session = None;
+        let mut finals = 0;
+        for chunk in stream.chunks(777) {
+            finals += drive(&mut segmenter, chunk, &mut session, &mut heard).len();
+        }
+
+        assert_eq!(finals, 3, "three utterances were final");
+        assert_eq!(heard.len(), 3, "three sessions heard audio");
+        for (start, audio) in &heard {
+            let levels: Vec<f32> = [0.5, 0.7, 0.9]
+                .into_iter()
+                .filter(|level| audio.iter().any(|sample| sample == level))
+                .collect();
+            assert_eq!(
+                levels.len(),
+                1,
+                "the session at {start} heard more than one utterance: {levels:?}"
+            );
+            assert_eq!(
+                audio.iter().filter(|sample| **sample == levels[0]).count(),
+                voiced(300, levels[0]).len(),
+                "the speech of {levels:?} was fed once, to one session"
+            );
+        }
     }
 }
