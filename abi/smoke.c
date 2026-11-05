@@ -149,6 +149,18 @@ int main(void) {
               NULL);
     }
 
+    /* Diarization is exported and declared in the header: a null engine is refused before
+     * anything is read, which is the one call that needs no models to make. */
+    {
+        float samples[16] = {0};
+        AriosoBuffer turns = {0};
+        code = arioso_diarize(NULL, samples, 16, 16000, &turns);
+        printf("      %d %s\n", code, arioso_last_error());
+        check(code == ARIOSO_ERR_NULL_ARGUMENT, "a null engine is refused by diarization",
+              NULL);
+        check(turns.data == NULL && turns.len == 0, "a refusal hands back no buffer", NULL);
+    }
+
     /* The releases. Both take null as a no-op, so a caller that never got a buffer can still
      * run the same cleanup. */
     arioso_free(NULL);

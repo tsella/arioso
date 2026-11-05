@@ -56,7 +56,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 487 tests
+- 488 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 
@@ -391,8 +391,21 @@ failure answers `{"type":"error","detail":...}` and ends the stream.
 
 A program that links the engine in process — a sandboxed app bundle, say — uses
 `include/arioso.h` instead of the HTTP API. The surface is an engine built from the same JSON
-config, synthesis to a buffer or to an audio callback, streaming transcription, and one
-function that releases what the library allocated.
+config, synthesis to a buffer or to an audio callback, streaming transcription, diarization of
+a whole recording, the catalog, and one function that releases what the library allocated.
+
+`arioso_diarize` takes 16 kHz mono `float` samples and writes the same JSON document the route
+answers, so a front end parses one shape whichever door it came through:
+
+```c
+AriosoBuffer turns = {0};
+int32_t code = arioso_diarize(engine, samples, count, 16000, &turns);
+/* {"turns":[{"start":1.583,"end":3.406,"speaker":0}],"speakers":2,"seconds":16.0} */
+arioso_free(turns.data);
+```
+
+It blocks for the length of the recording, because the clustering needs every embedding at
+once. A rate other than 16000 is refused, not resampled.
 
 The header is generated from `crates/arioso-abi`, and CI fails when the two disagree:
 

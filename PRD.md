@@ -422,6 +422,10 @@ because it runs batch models and natively streaming models behind the same C API
 - F5.6c Audio at a rate other than 16 kHz is refused by name, not resampled silently. A wrong
   rate scales every timestamp by the ratio, and the answer would look reasonable while being
   wrong.
+- F5.6e The C ABI carries it as `arioso_diarize`: 16 kHz mono `float` samples in, the same
+  JSON document out that the route answers, so a front end parses one shape whichever door it
+  came through. It blocks for the length of the recording, and a rate other than 16 kHz is
+  refused by name.
 - F5.6d `diarize.speakers` fixes the voice count when the caller knows it; null lets the
   clustering decide from `diarize.threshold`, where a higher number merges more segments.
 

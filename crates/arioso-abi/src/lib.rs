@@ -1214,6 +1214,88 @@ fn tts_sid(state: &AppState, speaker: i64) -> Result<i64, i32> {
 /// The rate a session accepts, refusing one the model cannot take.
 ///
 /// The same sentence the streaming socket sends, because it is the same rule.
+/// Label the voices in a recording.
+///
+/// `samples` is `length` mono `f32` samples at `sample_rate`, which must be 16000: the models
+/// read that rate, and a different one is refused rather than resampled, because a silent
+/// resample scales every timestamp by the ratio.
+///
+/// `*out` receives a JSON document — `{"turns":[{"start":1.583,"end":3.406,"speaker":0}],
+/// "speakers":2,"seconds":16.0}` — owned by the library until `arioso_free(buffer.data)`, and
+/// not NUL-terminated: `len` is its length. On any failure `*out` is `{ NULL, 0 }`.
+///
+/// Blocks for the length of the recording, because the clustering needs every embedding at
+/// once. Speaker numbers are local to this call and mean nothing across recordings.
+///
+/// # Safety
+///
+/// `engine` must be a live handle, `samples` readable for `length` floats, and `out` writable
+/// for one `AriosoBuffer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arioso_diarize(
+    engine: *mut AriosoEngine,
+    samples: *const f32,
+    length: usize,
+    sample_rate: u32,
+    out: *mut AriosoBuffer,
+) -> i32 {
+    guard(|| {
+        if out.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_diarize: out is null",
+            ));
+        }
+        // Safety: `out` is writable by the caller's contract; an empty buffer first means a
+        // refusal hands back nothing to free.
+        unsafe {
+            out.write(AriosoBuffer {
+                data: std::ptr::null_mut(),
+                len: 0,
+            });
+        }
+        if samples.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_NULL_ARGUMENT,
+                "arioso_diarize: samples is null",
+            ));
+        }
+        if length == 0 {
+            return Err(fail(
+                ARIOSO_ERR_INVALID_ARGUMENT,
+                "arioso_diarize: length is zero",
+            ));
+        }
+        let rate = check_rate(sample_rate)?;
+        // Safety: the caller guarantees `length` readable floats.
+        let audio = unsafe { std::slice::from_raw_parts(samples, length) };
+        // Safety: the caller guarantees a live handle.
+        let state = unsafe { state_of(engine, "arioso_diarize") }?;
+        let document = state
+            .diarize_json(audio, rate)
+            .map_err(|error| match error {
+                arioso_server::DiarizeFailure::NotInstalled(id) => fail(
+                    ARIOSO_ERR_ENGINE,
+                    format!("{id} is not installed; download it first"),
+                ),
+                other => fail(ARIOSO_ERR_ENGINE, other.to_string()),
+            })?;
+        // Safety: the bytes are released by `arioso_free` and by nothing else.
+        let (data, len) = unsafe { memory::copy_out(document.as_bytes()) };
+        if data.is_null() {
+            return Err(fail(
+                ARIOSO_ERR_ENGINE,
+                "the diarization result could not be allocated",
+            ));
+        }
+        // Safety: `out` is writable for one buffer, as checked above.
+        unsafe {
+            out.write(AriosoBuffer { data, len });
+        }
+        Ok(())
+    })
+}
+
 fn check_rate(rate: u32) -> Result<u32, i32> {
     let rate = if rate == 0 { STREAM_RATE } else { rate };
     if rate != STREAM_RATE {

@@ -21,10 +21,10 @@ use arioso::{
     ARIOSO_ABI_VERSION, ARIOSO_CANCELLED, ARIOSO_ERR_CONFIG, ARIOSO_ERR_ENGINE,
     ARIOSO_ERR_INVALID_ARGUMENT, ARIOSO_ERR_NULL_ARGUMENT, ARIOSO_ERR_PANIC,
     ARIOSO_ERR_STRUCT_SIZE, ARIOSO_OK, AriosoBuffer, AriosoEngine, AriosoSttEvent,
-    AriosoSttOptions, AriosoSttSession, AriosoTtsOptions, arioso_abi_version, arioso_engine_free,
-    arioso_engine_new, arioso_free, arioso_last_error, arioso_model_download, arioso_models_json,
-    arioso_phonemes, arioso_stt_close, arioso_stt_finish, arioso_stt_open, arioso_stt_push,
-    arioso_tts_phonemes, arioso_tts_stream, arioso_tts_synthesize,
+    AriosoSttOptions, AriosoSttSession, AriosoTtsOptions, arioso_abi_version, arioso_diarize,
+    arioso_engine_free, arioso_engine_new, arioso_free, arioso_last_error, arioso_model_download,
+    arioso_models_json, arioso_phonemes, arioso_stt_close, arioso_stt_finish, arioso_stt_open,
+    arioso_stt_push, arioso_tts_phonemes, arioso_tts_stream, arioso_tts_synthesize,
 };
 
 /// The sentence the last call left on this thread.
@@ -100,6 +100,67 @@ fn an_engine_is_created_from_a_config_and_freed() {
     // Freeing null is a no-op rather than a crash: a caller's cleanup path can be careless.
     // Safety: null is the documented no-op.
     unsafe { arioso_engine_free(ptr::null_mut()) };
+}
+
+#[test]
+fn diarization_refuses_what_it_cannot_read() {
+    let dir = models_dir();
+    let json = config_json(dir.path());
+    let mut engine: *mut AriosoEngine = ptr::null_mut();
+    // Safety: `json` outlives the call and `engine` is writable for one pointer.
+    let code = unsafe { arioso_engine_new(json.as_ptr(), &raw mut engine) };
+    assert_eq!(code, ARIOSO_OK, "{}", last_error());
+
+    let samples = vec![0.0_f32; 16_000];
+    let mut buffer = AriosoBuffer {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+
+    // A null sample pointer is a code, not a crash.
+    // Safety: the null pointer is the case under test.
+    let code = unsafe { arioso_diarize(engine, ptr::null(), 16_000, 16_000, &raw mut buffer) };
+    assert_eq!(code, ARIOSO_ERR_NULL_ARGUMENT);
+    assert!(buffer.data.is_null());
+
+    // No samples is refused by name rather than answered with an empty list.
+    // Safety: `samples` is valid for its length.
+    let code = unsafe { arioso_diarize(engine, samples.as_ptr(), 0, 16_000, &raw mut buffer) };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("length"), "{}", last_error());
+
+    // The models read 16 kHz, and a different rate is named rather than resampled.
+    // Safety: as above.
+    let code = unsafe {
+        arioso_diarize(
+            engine,
+            samples.as_ptr(),
+            samples.len(),
+            44_100,
+            &raw mut buffer,
+        )
+    };
+    assert_eq!(code, ARIOSO_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("16000"), "{}", last_error());
+
+    // The catalog here is empty, so the models are not installed: the sentence names the
+    // entry to fetch rather than the algorithm.
+    // Safety: as above.
+    let code = unsafe {
+        arioso_diarize(
+            engine,
+            samples.as_ptr(),
+            samples.len(),
+            16_000,
+            &raw mut buffer,
+        )
+    };
+    assert_eq!(code, ARIOSO_ERR_ENGINE);
+    assert!(buffer.data.is_null());
+    assert!(last_error().contains("diarization-en"), "{}", last_error());
+
+    // Safety: a live handle, freed once.
+    unsafe { arioso_engine_free(engine) };
 }
 
 #[test]
@@ -189,6 +250,36 @@ fn a_null_argument_is_a_code_rather_than_a_crash() {
     let code = unsafe { arioso_stt_finish(ptr::null_mut(), None, ptr::null_mut()) };
     assert_eq!(code, ARIOSO_ERR_NULL_ARGUMENT);
     assert_eq!(last_error(), "arioso_stt_finish: session is null");
+
+    // Diarization refuses what it cannot read, before it looks for a model.
+    let samples = vec![0.0_f32; 16_000];
+    // Safety: a null out pointer is the case under test.
+    let code = unsafe {
+        arioso_diarize(
+            ptr::null_mut(),
+            samples.as_ptr(),
+            samples.len(),
+            16_000,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(code, ARIOSO_ERR_NULL_ARGUMENT);
+    assert_eq!(last_error(), "arioso_diarize: out is null");
+    // Safety: a null engine is the case under test.
+    let code = unsafe {
+        arioso_diarize(
+            ptr::null_mut(),
+            samples.as_ptr(),
+            samples.len(),
+            16_000,
+            &raw mut buffer,
+        )
+    };
+    assert_eq!(code, ARIOSO_ERR_NULL_ARGUMENT);
+    assert!(
+        buffer.data.is_null(),
+        "a refusal must not hand back a buffer"
+    );
 
     // The releases are quiet no-ops on null, so a cleanup path can be careless.
     // Safety: null is the documented no-op for each of these.

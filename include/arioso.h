@@ -498,6 +498,32 @@ int32_t arioso_stt_finish(struct AriosoSttSession *session,
 // `session` must be null, or a handle from `arioso_stt_open` that has not been closed.
 void arioso_stt_close(struct AriosoSttSession *session);
 
+// The rate a session accepts, refusing one the model cannot take.
+//
+// The same sentence the streaming socket sends, because it is the same rule.
+// Label the voices in a recording.
+//
+// `samples` is `length` mono `f32` samples at `sample_rate`, which must be 16000: the models
+// read that rate, and a different one is refused rather than resampled, because a silent
+// resample scales every timestamp by the ratio.
+//
+// `*out` receives a JSON document — `{"turns":[{"start":1.583,"end":3.406,"speaker":0}],
+// "speakers":2,"seconds":16.0}` — owned by the library until `arioso_free(buffer.data)`, and
+// not NUL-terminated: `len` is its length. On any failure `*out` is `{ NULL, 0 }`.
+//
+// Blocks for the length of the recording, because the clustering needs every embedding at
+// once. Speaker numbers are local to this call and mean nothing across recordings.
+//
+// # Safety
+//
+// `engine` must be a live handle, `samples` readable for `length` floats, and `out` writable
+// for one `AriosoBuffer`.
+int32_t arioso_diarize(struct AriosoEngine *engine,
+                       const float *samples,
+                       size_t length,
+                       uint32_t sample_rate,
+                       struct AriosoBuffer *out);
+
 #endif  /* ARIOSO_ABI_H */
 
 /*

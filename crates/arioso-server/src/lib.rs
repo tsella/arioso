@@ -1148,8 +1148,22 @@ impl AppState {
         if samples.is_empty() {
             return Err(DiarizeFailure::Audio("the audio is empty".to_string()));
         }
-        let seconds = f64::from(rate).max(1.0);
-        let seconds = samples.len() as f64 / seconds;
+        self.diarize_samples(&samples, rate)
+    }
+
+    /// Label the voices in samples already in hand, for callers that decode their own audio.
+    ///
+    /// `rate` is the rate of `samples`, and it must be the rate the models read: a mismatch
+    /// is refused rather than resampled, because resampling silently scales every timestamp.
+    pub fn diarize_samples(
+        &self,
+        samples: &[f32],
+        rate: u32,
+    ) -> Result<(Vec<arioso_stt_sherpa::diarize::Turn>, f64), DiarizeFailure> {
+        if samples.is_empty() {
+            return Err(DiarizeFailure::Audio("the audio is empty".to_string()));
+        }
+        let seconds = samples.len() as f64 / f64::from(rate).max(1.0);
         if seconds > f64::from(self.config().stt.max_audio_s) {
             return Err(DiarizeFailure::Audio(format!(
                 "the audio is {seconds:.0} s, longer than stt.max_audio_s of {} s",
@@ -1168,9 +1182,20 @@ impl AppState {
             .as_ref()
             .ok_or_else(|| DiarizeFailure::Engine("the models failed to load".to_string()))?;
         let turns = diarizer
-            .run(&samples, rate)
+            .run(samples, rate)
             .map_err(|error| DiarizeFailure::Audio(error.to_string()))?;
         Ok((turns, seconds))
+    }
+
+    /// The turns as one JSON document.
+    ///
+    /// The route, the command line and the C ABI all read this shape, so it is built in one
+    /// place: a front end that parses a second copy of a document is a front end that breaks
+    /// when only one copy changes.
+    pub fn diarize_json(&self, samples: &[f32], rate: u32) -> Result<String, DiarizeFailure> {
+        let (turns, seconds) = self.diarize_samples(samples, rate)?;
+        serde_json::to_string(&DiarizeResponse::from_turns(turns, seconds))
+            .map_err(|error| DiarizeFailure::Engine(error.to_string()))
     }
 
     /// Load the models the config names, into a fresh diarizer.
@@ -4030,6 +4055,33 @@ pub struct DiarizeTurn {
     pub speaker: u32,
 }
 
+/// Seconds, rounded to the millisecond.
+///
+/// An `f32` widened to `f64` prints sixteen digits of noise after the third decimal, and the
+/// answer comes from clustering over windows of half a second: a caller cannot use anything
+/// finer, and a document full of digits invites the reader to believe there is.
+fn round_ms(seconds: f32) -> f32 {
+    (seconds * 1000.0).round() / 1000.0
+}
+
+impl DiarizeResponse {
+    /// Build the document every front end reads from one list of turns.
+    fn from_turns(turns: Vec<arioso_stt_sherpa::diarize::Turn>, seconds: f64) -> Self {
+        Self {
+            speakers: arioso_stt_sherpa::diarize::speakers(&turns),
+            turns: turns
+                .into_iter()
+                .map(|turn| DiarizeTurn {
+                    start: round_ms(turn.start),
+                    end: round_ms(turn.end),
+                    speaker: turn.speaker,
+                })
+                .collect(),
+            seconds: (seconds * 1000.0).round() / 1000.0,
+        }
+    }
+}
+
 /// Response body for `POST /v1/diarize`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DiarizeResponse {
@@ -4120,18 +4172,7 @@ async fn diarize_audio(
             }
         })?;
 
-    Ok(Json(DiarizeResponse {
-        speakers: arioso_stt_sherpa::diarize::speakers(&turns),
-        turns: turns
-            .into_iter()
-            .map(|turn| DiarizeTurn {
-                start: turn.start,
-                end: turn.end,
-                speaker: turn.speaker,
-            })
-            .collect(),
-        seconds,
-    }))
+    Ok(Json(DiarizeResponse::from_turns(turns, seconds)))
 }
 
 /// Response body for `POST /v1/stt`.
