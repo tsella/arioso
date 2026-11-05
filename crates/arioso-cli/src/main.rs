@@ -82,6 +82,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Label the voices in a recording.
+    ///
+    /// The whole file is read before any answer is given: the clustering needs every
+    /// embedding at once. Speaker numbers are assigned per file and mean nothing across
+    /// files.
+    Diarize {
+        /// Audio file. Mono, 16 kHz, 16-bit PCM or 32-bit float.
+        file: PathBuf,
+        /// Print JSON instead of one line per turn.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print or export configuration.
     Config {
         #[command(subcommand)]
@@ -176,6 +188,7 @@ fn main() -> Result<()> {
             },
         ),
         Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
+        Command::Diarize { file, json } => diarize(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
         Command::Stop => stop(&config_path),
         Command::Normalize { text } => {
@@ -1589,6 +1602,69 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
         eprintln!("no speech found in {}", file.display());
     } else {
         println!("{text}");
+    }
+    Ok(())
+}
+
+/// `seconds`, rounded to the millisecond.
+fn millis(seconds: f32) -> f64 {
+    (f64::from(seconds) * 1000.0).round() / 1000.0
+}
+
+/// Label the voices in one recording, through the same state the route uses.
+///
+/// The models are loaded by the state, so a missing entry gives the same sentence here as it
+/// does over HTTP: the message names the catalog id and the command that fetches it.
+fn diarize(config: &Config, config_path: &Path, file: &Path, json: bool) -> Result<()> {
+    let manifest = load_manifest_checked(config)?;
+    let state =
+        arioso_server::AppState::new(config.clone(), manifest.manifest.clone(), Some(config_path))
+            .context("building the engine")?;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let (turns, seconds) = state.diarize(&bytes).map_err(|error| match error {
+        arioso_server::DiarizeFailure::NotInstalled(id) => {
+            anyhow::anyhow!("{id} is not installed. Run `arioso models download {id}`.")
+        }
+        other => anyhow::anyhow!(other),
+    })?;
+
+    let voices = arioso_stt_sherpa::diarize::speakers(&turns);
+    if json {
+        let turns: Vec<_> = turns
+            .iter()
+            .map(|turn| {
+                // Milliseconds, as a number a reader can compare: an `f32` widened to
+                // `f64` prints sixteen digits of noise after the third decimal.
+                serde_json::json!({
+                    "start": millis(turn.start),
+                    "end": millis(turn.end),
+                    "speaker": turn.speaker,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "turns": turns,
+                "speakers": voices,
+                "seconds": millis(seconds as f32),
+            })
+        );
+    } else if turns.is_empty() {
+        eprintln!("no speech found in {}", file.display());
+    } else {
+        for turn in &turns {
+            println!(
+                "{:>7.2} - {:>7.2}  speaker {}",
+                turn.start, turn.end, turn.speaker
+            );
+        }
+        eprintln!(
+            "{} turns, {} speakers, {:.1} s of audio",
+            turns.len(),
+            voices,
+            seconds
+        );
     }
     Ok(())
 }

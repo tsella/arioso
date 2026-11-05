@@ -67,6 +67,8 @@ pub struct Config {
     pub stt: Stt,
     /// Voice activity detection.
     pub vad: Vad,
+    /// Speaker diarization.
+    pub diarize: Diarize,
     /// Audio routing and playback.
     pub audio: Audio,
     /// Model cache and download behaviour.
@@ -89,6 +91,7 @@ impl Default for Config {
             tts: Tts::default(),
             stt: Stt::default(),
             vad: Vad::default(),
+            diarize: Diarize::default(),
             audio: Audio::default(),
             models: Models::default(),
             log: Log::default(),
@@ -380,6 +383,30 @@ impl Default for Capture {
             sources: vec!["mic".into()],
             mode: "separate".into(),
             loopback_device: None,
+        }
+    }
+}
+
+/// Speaker diarization settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct Diarize {
+    /// The manifest entry holding the segmentation and embedding models.
+    pub model: String,
+    /// How many voices are in the recording, when the caller knows. Null lets the
+    /// clustering decide, which is the only honest answer for a file nobody has heard.
+    pub speakers: Option<u32>,
+    /// Clustering threshold, `0.0..=1.0`. Higher merges more segments, so it finds fewer
+    /// voices. Ignored when `speakers` is set.
+    pub threshold: f32,
+}
+
+impl Default for Diarize {
+    fn default() -> Self {
+        Self {
+            model: "diarization-en".into(),
+            speakers: None,
+            threshold: 0.5,
         }
     }
 }
@@ -928,6 +955,30 @@ impl Config {
                 ),
             });
         }
+        // Silero reads one 512-sample window per answer, which is 32 ms at the 16 kHz the
+        // streaming route carries. Another frame length is a config that cannot run, and the
+        // socket is the wrong place to find out: it opens and then refuses every frame.
+        if self.vad.engine == "silero" && self.vad.frame_ms != 32 {
+            return Err(ConfigError::Invalid {
+                path: "vad.frame_ms".into(),
+                message: format!(
+                    "silero reads 32 ms frames at 16 kHz, got {}",
+                    self.vad.frame_ms
+                ),
+            });
+        }
+        if !(0.0..=1.0).contains(&self.diarize.threshold) {
+            return Err(ConfigError::Invalid {
+                path: "diarize.threshold".into(),
+                message: format!("expected 0.0 to 1.0, got {}", self.diarize.threshold),
+            });
+        }
+        if self.diarize.speakers == Some(0) {
+            return Err(ConfigError::Invalid {
+                path: "diarize.speakers".into(),
+                message: "a recording with no voices cannot be labelled".into(),
+            });
+        }
         if !(0.0..=1.0).contains(&self.vad.probability) {
             return Err(ConfigError::Invalid {
                 path: "vad.probability".into(),
@@ -1200,6 +1251,18 @@ mod tests {
             config.vad.engine = engine.into();
             assert!(config.validate().is_ok(), "{engine} was refused");
         }
+    }
+
+    #[test]
+    fn silero_refuses_a_frame_length_the_model_cannot_read() {
+        // The model reads one 512-sample window per answer, which is 32 ms at 16 kHz. A
+        // config that asks for 20 ms would reach the socket and be refused there, per
+        // connection, instead of once at startup with the field named.
+        let mut config = Config::default();
+        config.vad.engine = "silero".into();
+        config.vad.frame_ms = 20;
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("vad.frame_ms"), "{error}");
     }
 
     #[test]

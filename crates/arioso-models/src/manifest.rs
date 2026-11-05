@@ -22,6 +22,8 @@ pub enum Kind {
     Stt,
     /// Voice activity detection.
     Vad,
+    /// Speaker diarization.
+    Diarize,
 }
 
 /// How a speech to text model consumes audio.

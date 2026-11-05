@@ -8468,6 +8468,32 @@
         "frame_ms": 32,
         "license_text": "MIT"
       }
+    },
+    {
+      "id": "diarization-en",
+      "kind": "diarize",
+      "engine": "sherpa",
+      "version": "3.0",
+      "license": "MIT + Apache-2.0",
+      "commercial_use": true,
+      "files": [
+        {
+          "name": "segmentation-3.0.onnx",
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+          "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+          "size": 5992913
+        },
+        {
+          "name": "embedding-campplus-en.onnx",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+          "sha256": "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
+          "size": 29596978
+        }
+      ],
+      "meta": {
+        "sample_rate": 16000,
+        "license_text": "pyannote segmentation 3.0 is MIT; the 3D-Speaker CAM++ embedding is Apache 2.0"
+      }
     }
   ]
 }

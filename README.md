@@ -43,6 +43,8 @@ Working today:
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
 - Voice activity detection: an energy detector that needs no model, and Silero on the
   sherpa-onnx runtime (`vad.engine`, with the model fetched as `silero-vad`)
+- Speaker diarization, offline over a whole file: `arioso diarize recording.wav` or
+  `POST /v1/diarize` labels every stretch of speech with a speaker number
 - A user dictionary for names and jargon, reloaded without a restart
 - Spelling rules for words the dictionary does not hold, reported, never silent
 - Speech to text: Parakeet or Whisper through sherpa-onnx, batch, from a WAV file
@@ -54,7 +56,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 481 tests
+- 487 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 
@@ -258,6 +260,18 @@ $ curl -X POST --data-binary @hello.wav -H 'Content-Type: audio/wav' \
 {"text":"The quick brown fox jumps over the lazy dog.","seconds":2.67}
 ```
 
+`POST /v1/diarize` takes the same kind of body and answers every stretch of speech with a
+speaker number. The whole file is read before anything comes back, because the clustering
+needs every embedding at once:
+
+```console
+$ curl -X POST --data-binary @meeting.wav -H 'Content-Type: audio/wav' \
+    http://127.0.0.1:10101/v1/diarize
+{"turns":[{"start":1.583,"end":3.406,"speaker":0},{"start":9.346,"end":11.472,"speaker":1}],"speakers":2,"seconds":16.0}
+```
+
+Speaker numbers are local to the recording: speaker 0 in one file is not speaker 0 in the next.
+
 `GET /v1/stt/ws` streams. The client sends a start frame, then 16 kHz mono `s16le` PCM,
 and receives a final per utterance with its offsets. Partials arrive between them, when
 the engine is free:
@@ -304,6 +318,7 @@ dictionary entry produces, so a recognition that spells the term differently sti
 | `/v1/tts/ws` | GET | Upgrade to WebSocket, then one PCM frame per sentence |
 | `/v1/stt` | POST | A transcript for a WAV body |
 | `/v1/stt/ws` | GET | Upgrade to WebSocket, then partial and final transcripts |
+| `/v1/diarize` | POST | Speaker turns for a 16 kHz WAV body, offline over the whole file |
 | `/v1/stop` | POST | `202`, then drain in-flight work and exit |
 | `/v1/abort` | POST | `202`, then exit at once |
 | `/docs` | GET | Swagger UI over the document below |

@@ -90,6 +90,17 @@ engine is Python and this project is Rust. Full write-up, including a chunker bu
 that scored 36 percent before it was fixed, is in
 `docs/plans/2026-11-02-tts-engine-comparison.md`.
 
+Diarization ships as one entry, `diarization-en`, holding two files: pyannote segmentation
+3.0 (MIT, 5,992,913 bytes) and the 3D-Speaker CAM++ English embedding (Apache 2.0,
+29,596,978 bytes). Measured on the two recordings the segmentation model's own release ships:
+
+- `1-two-speakers-en.wav`, 16.0 s: 4 turns, 2 speakers, 2.4 s wall.
+- `0-four-speakers-zh.wav`, 56.9 s: 12 turns, 4 speakers, 11.5 s wall, RTF 0.20, 180 MB RSS.
+
+Both clips are labelled with the number of voices they contain, and neither is scored for
+turn-boundary accuracy: nothing here compares a predicted boundary against a hand-marked one,
+and a number claiming otherwise would be invented.
+
 Voice activity detection ships one model, `silero-vad`: 643,854 bytes, MIT, 16 kHz at 32 ms
 frames, fetched like any other entry and used when `vad.engine` is `silero`. It is not scored
 against the energy detector here — no comparison of the two on the same audio has been made,

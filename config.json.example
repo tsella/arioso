@@ -53,6 +53,11 @@
       "loopback_device": null
     }
   },
+  "diarize": {
+    "model": "diarization-en",
+    "speakers": null,
+    "threshold": 0.5
+  },
   "vad": {
     "engine": "energy",
     "model": "silero-vad",

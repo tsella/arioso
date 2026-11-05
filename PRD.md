@@ -407,6 +407,23 @@ because it runs batch models and natively streaming models behind the same C API
 - F5.4 VAD is exposed as its own event stream for callers that want to drive their
   own segmentation.
 - F5.5 `energy` VAD exists so the library works with zero models installed.
+- F5.6 Diarization is offline and whole-file. `POST /v1/diarize` and `arioso diarize` take a
+  16 kHz mono WAV and answer every stretch of speech with a speaker number: segmentation, an
+  embedding per segment, then clustering. The clustering needs every embedding at once, so
+  there is no streaming form of this and no partial answer — a socket that promised one would
+  be lying about what the algorithm does.
+- F5.6a A speaker number is local to its recording. The clustering's own ids are sparse and
+  depend on how many candidate clusters it opened and merged (a two-voice file came back as
+  speakers 0 and 4), so they are renumbered from zero in the order the voices first speak.
+  Numbers still mean nothing across files, and no route claims otherwise.
+- F5.6b The models are one catalog entry, `diarization-en`, holding both files: pyannote
+  segmentation 3.0 (MIT, 5,992,913 bytes) and the 3D-Speaker CAM++ English embedding
+  (Apache 2.0, 29,596,978 bytes). One entry means one download and one size in the list.
+- F5.6c Audio at a rate other than 16 kHz is refused by name, not resampled silently. A wrong
+  rate scales every timestamp by the ratio, and the answer would look reasonable while being
+  wrong.
+- F5.6d `diarize.speakers` fixes the voice count when the caller knows it; null lets the
+  clustering decide from `diarize.threshold`, where a higher number merges more segments.
 
 ### F6. Audio output
 

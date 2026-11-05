@@ -20,6 +20,13 @@ pub const FRAME_MS: u32 = 32;
 /// Samples in one frame at [`RATE`].
 pub const FRAME_SAMPLES: usize = (RATE as usize * FRAME_MS as usize) / 1000;
 
+/// Longest unbroken speech the detector buffers before it forces a segment to end.
+///
+/// The segmenter cuts an utterance at `max_segment_ms`, whose default is 30 s, so this is the
+/// same boundary seen from the detector's side. At this length sherpa raises its own
+/// threshold and closes the segment, which is how it honours the cap.
+const MAX_SPEECH_S: f32 = 30.0;
+
 /// What went wrong building a detector.
 #[derive(Debug, thiserror::Error)]
 pub enum SileroError {
@@ -60,7 +67,11 @@ impl Silero {
                 min_silence_duration: 0.1,
                 min_speech_duration: 0.0,
                 window_size: FRAME_SAMPLES as i32,
-                max_speech_duration: 30.0,
+                // After this much unbroken speech sherpa raises its own threshold to 0.9 and
+                // ends the segment, which is how it forces a cut. The segmenter's
+                // `max_segment_ms` is the cap that matters, and 30 s is its default, so the
+                // two agree instead of one cutting where the other does not.
+                max_speech_duration: MAX_SPEECH_S,
             },
             sample_rate: RATE as i32,
             num_threads: 1,
@@ -68,9 +79,11 @@ impl Silero {
             debug: false,
             ..VadModelConfig::default()
         };
-        // A second of buffer: the detector queues segments, and this gate never reads them,
-        // so the buffer only has to hold what the model writes between frames.
-        let detector = VoiceActivityDetector::create(&config, 1.0)
+        // The buffer has to hold the open segment, and sherpa logs an overflow and grows it
+        // when it does not: one second of audio is 512 samples short of the first second of
+        // speech, so a small buffer complains for the whole utterance. A second more than the
+        // longest segment covers the push that crosses the cap.
+        let detector = VoiceActivityDetector::create(&config, MAX_SPEECH_S + 1.0)
             .ok_or_else(|| SileroError::Load(model.to_path_buf()))?;
         Ok(Self {
             detector,
@@ -87,6 +100,11 @@ impl Gate for Silero {
             let rest = self.pending.split_off(FRAME_SAMPLES);
             self.detector.accept_waveform(&self.pending);
             self.last = self.detector.detected();
+            // Sherpa queues the audio of every finished segment, and this gate never reads
+            // it: the boundary it was kept for is already decided here. Left in place the
+            // queue holds each utterance for the life of the stream, so a long call grows
+            // by the length of everything said on it.
+            self.detector.clear();
             self.pending = rest;
         }
         // A frame shorter than the model's window is answered with the state the last whole
@@ -100,23 +118,30 @@ impl Gate for Silero {
 mod tests {
     use super::*;
 
-    /// The model is 643 KiB and not in the repository, so this runs when it is on disk.
+    /// The model and a recording, from `ARIOSO_TEST_SILERO`.
     ///
-    /// `ARIOSO_TEST_SILERO` names a directory holding `silero_vad.onnx` and one 16 kHz mono
-    /// 16-bit WAV of speech. A tone will not do: the model is trained on voices and answers
-    /// correctly that a sine is not one.
-    fn fixture() -> Option<(PathBuf, PathBuf)> {
-        let dir = PathBuf::from(std::env::var_os("ARIOSO_TEST_SILERO")?);
+    /// The model is 643 KiB and not in the repository, so the test that uses it is ignored by
+    /// default: it `expect`s the fixture instead of returning, and it is run deliberately with
+    /// `ARIOSO_TEST_SILERO=... cargo test -p arioso-stt-sherpa -- --ignored`. A tone will not
+    /// do as the recording: the model is trained on voices and answers correctly that a sine
+    /// is not one.
+    fn fixture() -> (PathBuf, PathBuf) {
+        let dir = PathBuf::from(
+            std::env::var_os("ARIOSO_TEST_SILERO")
+                .expect("set ARIOSO_TEST_SILERO to a directory holding silero_vad.onnx and a WAV"),
+        );
         let model = dir.join("silero_vad.onnx");
         let wav = std::fs::read_dir(&dir)
-            .ok()?
+            .expect("the fixture directory is readable")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))?;
-        (model.is_file() && wav.is_file()).then_some((model, wav))
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("a 16 kHz mono WAV beside the model");
+        assert!(model.is_file(), "no model at {}", model.display());
+        (model, wav)
     }
 
-    /// Samples from a 16 kHz mono 16-bit WAV, read by its `data` chunk.
+    /// Samples from a 16 kHz mono 16-bit WAV, read from its `data` chunk.
     fn read_wav(path: &Path) -> Vec<f32> {
         let bytes = std::fs::read(path).expect("the wav is readable");
         let start = bytes
@@ -140,12 +165,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs silero_vad.onnx and a 16 kHz WAV in ARIOSO_TEST_SILERO"]
     fn speech_and_silence_are_told_apart() {
-        let Some((model, wav)) = fixture() else {
-            // No fixture on this machine: the load path is covered above, and the rest needs
-            // the model and a recording.
-            return;
-        };
+        let (model, wav) = fixture();
         let mut gate = Silero::load(&model, 0.5).expect("loading the model");
         let speech = read_wav(&wav);
 
@@ -159,11 +181,22 @@ mod tests {
             "{heard} of {frames} frames of speech were called speech"
         );
 
+        // The detector keeps its own silence hold: `min_silence_duration` is 0.1 s and the
+        // model's state decays for a few frames after loud speech, so the answer stays true
+        // for about 0.25 s. That is well under the segmenter's `min_silence_ms`, and the
+        // property that matters is that the gate lets go; the test says how long it took
+        // instead of demanding zero.
         let quiet = vec![0.0_f32; FRAME_SAMPLES];
-        let mut heard_silence = false;
-        for _ in 0..80 {
-            heard_silence |= gate.speech(&quiet);
-        }
-        assert!(!heard_silence, "silence was called speech");
+        let answers: Vec<bool> = (0..80).map(|_| gate.speech(&quiet)).collect();
+        let hold = answers.iter().take_while(|answer| **answer).count();
+        assert!(
+            hold <= 10,
+            "speech held for {hold} silent frames, {} ms",
+            hold * FRAME_MS as usize
+        );
+        assert!(
+            answers[40..].iter().all(|answer| !answer),
+            "silence was still called speech after 1.28 s: {answers:?}"
+        );
     }
 }

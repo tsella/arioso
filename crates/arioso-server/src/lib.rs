@@ -42,6 +42,9 @@ pub enum ServerError {
     /// The configured speech to text model is not in the manifest.
     #[error("no speech to text model matches stt.batch_model {0:?}")]
     NoSttModel(String),
+    /// The configured voice activity detector is not in the manifest.
+    #[error("no detector matches vad.model {0:?}")]
+    NoVadModel(String),
     /// The configured streaming speech to text model cannot be served.
     ///
     /// The detail is the same sentence PATCH answers with, so a config refused at startup
@@ -123,6 +126,12 @@ pub struct AppState {
     /// the batch one, because the two models are chosen by different settings and the
     /// socket must not displace the model the file route is using.
     stt_stream: Mutex<Option<arioso_stt_sherpa::Engine>>,
+    /// The diarization models, loaded on first use.
+    ///
+    /// They are 34 MiB together and the load is a second, so the slot keeps them. It holds
+    /// nothing between calls but the models: there is no per-recording state to clear,
+    /// because the clustering finishes with the file.
+    diarizer: Mutex<Option<arioso_stt_sherpa::diarize::Diarizer>>,
     /// Where the config came from, so a patch can be written back. Absent when the
     /// server was started with defaults and no file.
     config_file: Option<std::path::PathBuf>,
@@ -299,6 +308,7 @@ impl AppState {
             style_swaps: std::sync::atomic::AtomicUsize::new(0),
             stt: Mutex::new(None),
             stt_stream: Mutex::new(None),
+            diarizer: Mutex::new(None),
             config: std::sync::RwLock::new(Arc::new(config)),
             config_file,
             limiter,
@@ -335,6 +345,28 @@ impl AppState {
                 .any(|model| model.kind == Kind::Stt)
         {
             state.stt_spec()?;
+        }
+        // A detector named by a config that streams speech has to be a detector the catalog
+        // knows. Only a catalog that lists one can answer the question, for the same reason
+        // the voice check above says so: an empty directory is nothing downloaded yet, not a
+        // wrong name.
+        if state.config().stt.enabled
+            && state.config().vad.engine == "silero"
+            && state
+                .manifest
+                .models
+                .iter()
+                .any(|model| model.kind == Kind::Vad)
+        {
+            let id = &state.config().vad.model;
+            if !state
+                .manifest
+                .models
+                .iter()
+                .any(|model| model.kind == Kind::Vad && model.id == *id)
+            {
+                return Err(ServerError::NoVadModel(id.clone()));
+            }
         }
         Ok(state)
     }
@@ -1102,6 +1134,76 @@ impl AppState {
         Ok((text, seconds))
     }
 
+    /// Label the voices in one recording.
+    ///
+    /// The whole file is read before any answer is given, because the clustering needs
+    /// every embedding at once. A long recording therefore costs its length in seconds
+    /// before the first turn comes back.
+    pub fn diarize(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(Vec<arioso_stt_sherpa::diarize::Turn>, f64), DiarizeFailure> {
+        let (samples, rate) = wav::read_bytes(bytes)
+            .map_err(|error| DiarizeFailure::Audio(format!("reading the audio: {error}")))?;
+        if samples.is_empty() {
+            return Err(DiarizeFailure::Audio("the audio is empty".to_string()));
+        }
+        let seconds = f64::from(rate).max(1.0);
+        let seconds = samples.len() as f64 / seconds;
+        if seconds > f64::from(self.config().stt.max_audio_s) {
+            return Err(DiarizeFailure::Audio(format!(
+                "the audio is {seconds:.0} s, longer than stt.max_audio_s of {} s",
+                self.config().stt.max_audio_s
+            )));
+        }
+
+        let mut guard = self
+            .diarizer
+            .lock()
+            .map_err(|_| DiarizeFailure::Engine("the diarization lock is poisoned".to_string()))?;
+        if guard.is_none() {
+            *guard = Some(self.build_diarizer()?);
+        }
+        let diarizer = guard
+            .as_ref()
+            .ok_or_else(|| DiarizeFailure::Engine("the models failed to load".to_string()))?;
+        let turns = diarizer
+            .run(&samples, rate)
+            .map_err(|error| DiarizeFailure::Audio(error.to_string()))?;
+        Ok((turns, seconds))
+    }
+
+    /// Load the models the config names, into a fresh diarizer.
+    fn build_diarizer(&self) -> Result<arioso_stt_sherpa::diarize::Diarizer, DiarizeFailure> {
+        let config = self.config();
+        let id = config.diarize.model.trim().to_string();
+        let spec = self
+            .manifest
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .ok_or_else(|| DiarizeFailure::Audio(format!("{id} is not in this catalog")))?;
+        if !self.is_installed(spec) {
+            return Err(DiarizeFailure::NotInstalled(id));
+        }
+        // Two files, so each is named rather than matched by suffix: both are `.onnx`, and
+        // a suffix lookup would hand the segmentation model in twice.
+        let file = |suffix: &str| {
+            spec.files
+                .iter()
+                .find(|file| file.name.contains(suffix))
+                .map(|file| self.models_dir.join(&file.name))
+                .ok_or_else(|| DiarizeFailure::Engine(format!("{id} has no {suffix} file")))
+        };
+        arioso_stt_sherpa::diarize::Diarizer::load(
+            &file("segmentation")?,
+            &file("embedding")?,
+            config.diarize.speakers,
+            config.diarize.threshold,
+        )
+        .map_err(|error| DiarizeFailure::Engine(error.to_string()))
+    }
+
     /// Transcribe samples already in hand, for the streaming path.
     pub(crate) fn transcribe_samples(
         &self,
@@ -1727,7 +1829,8 @@ impl ApiError {
         list_models,
         model_events,
         synthesize,
-        transcribe_audio
+        transcribe_audio,
+        diarize_audio
     ),
     components(schemas(
         TtsRequest,
@@ -1735,6 +1838,8 @@ impl ApiError {
         ModelEvent,
         ModelListView,
         SttResponse,
+        DiarizeResponse,
+        DiarizeTurn,
         ReadyView,
         DictionaryView,
         Problem
@@ -1781,6 +1886,23 @@ enum SttFailure {
     #[error("{0}")]
     Engine(String),
     /// The model the config asks for is not downloaded.
+    #[error("{0} is not installed")]
+    NotInstalled(String),
+}
+
+/// Why the diarization models could not be loaded or run.
+///
+/// The three are answered differently because they are different mistakes: bytes that are
+/// not audio, a model that is not downloaded, and a model that is there and will not run.
+#[derive(Debug, thiserror::Error)]
+pub enum DiarizeFailure {
+    /// The bytes were not audio we can read, or at a rate the models do not read.
+    #[error("{0}")]
+    Audio(String),
+    /// The models could not load or run.
+    #[error("{0}")]
+    Engine(String),
+    /// The catalog entry the config names is not downloaded.
     #[error("{0} is not installed")]
     NotInstalled(String),
 }
@@ -2301,6 +2423,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         post(transcribe_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
     );
     router = router.route("/v1/stt/ws", get(stt_ws_handler));
+    router = router.route(
+        "/v1/diarize",
+        post(diarize_audio).layer(axum::extract::DefaultBodyLimit::max(limit)),
+    );
 
     // The limiter wraps every route, including the ones a client can afford to hammer:
     // /healthz is the cheapest way to make the server do work, which makes it the first
@@ -2371,6 +2497,12 @@ pub struct ReadyView {
     pub stt_installed: bool,
     /// Whether it is loaded right now.
     pub stt_loaded: bool,
+    /// Voice activity detection model the streaming path will load, when speech to text is
+    /// on and `vad.engine` is `silero`. Absent when the energy detector runs, which needs no
+    /// model.
+    pub vad: Option<String>,
+    /// Whether that model is on disk.
+    pub vad_installed: bool,
     /// How many catalog models are installed.
     pub models_installed: usize,
 }
@@ -2525,11 +2657,18 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
                 .stream_spec()
                 .is_none_or(|spec| state.is_installed(spec)));
     let stt_loaded = state.stt_loaded();
+    // The detector is only in the streaming path, so it is only part of readiness when
+    // speech to text is on and the config asks for a model.
+    let vad =
+        (config.stt.enabled && config.vad.engine == "silero").then(|| config.vad.model.clone());
+    let vad_installed = vad.as_ref().is_none_or(|id| state.model_installed(id));
 
     let status = if !voice_installed {
         "voice_missing"
     } else if !stt_installed {
         "stt_missing"
+    } else if !vad_installed {
+        "vad_missing"
     } else {
         "ready"
     };
@@ -2559,6 +2698,8 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
             stt,
             stt_installed,
             stt_loaded,
+            vad,
+            vad_installed,
             models_installed: installed,
         }),
     )
@@ -3150,6 +3291,22 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
     // operator thought selected streaming.
     if let Some(detail) = stream_model_problem(config, &state.manifest) {
         return Err(unprocessable(detail));
+    }
+    // The detector is a catalog entry like the speech model, and the socket resolves it by
+    // id. A name the catalog does not hold would open a session and then refuse every frame
+    // with `model_not_installed`, which sends an operator to download a model that does not
+    // exist.
+    if config.vad.engine == "silero"
+        && !state
+            .manifest
+            .models
+            .iter()
+            .any(|model| model.kind == arioso_models::Kind::Vad && model.id == config.vad.model)
+    {
+        return Err(unprocessable(format!(
+            "vad.model {} is not a detector in the catalog; GET /v1/models lists what is",
+            config.vad.model
+        )));
     }
     Ok(())
 }
@@ -3860,6 +4017,121 @@ async fn synthesize(
         wav::to_bytes_from_pcm(&pcm, rate),
     )
         .into_response())
+}
+
+/// One stretch of audio and the voice in it, in a diarization response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DiarizeTurn {
+    /// Start, in seconds from the beginning of the recording.
+    pub start: f32,
+    /// End, in seconds.
+    pub end: f32,
+    /// Which voice, numbered from zero. The numbers mean nothing outside this recording.
+    pub speaker: u32,
+}
+
+/// Response body for `POST /v1/diarize`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DiarizeResponse {
+    /// The turns, in time order.
+    pub turns: Vec<DiarizeTurn>,
+    /// How many distinct voices were found.
+    pub speakers: usize,
+    /// Length of the recording, in seconds.
+    pub seconds: f64,
+}
+
+/// Label the voices in an uploaded WAV file.
+///
+/// The body is the audio itself. The answer is every stretch of speech with a speaker
+/// number: the numbers are assigned per recording and mean nothing across files.
+#[utoipa::path(
+    post,
+    path = "/v1/diarize",
+    tag = "diarize",
+    summary = "Label the voices in an uploaded file",
+    description = "The body is the audio itself, not a JSON envelope. Offline: the whole \
+                   file is read before any answer is given.",
+    request_body(content = Vec<u8>, content_type = "audio/wav"),
+    responses(
+        (status = 200, body = DiarizeResponse),
+        (status = 415, description = "Not a WAV, or a rate the models do not read", body = Problem),
+        (status = 409, description = "The models are not installed", body = Problem)
+    )
+)]
+async fn diarize_audio(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<DiarizeResponse>, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        content_type.as_str(),
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "application/octet-stream" | ""
+    ) {
+        return Err(ApiError::coded(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_format",
+            format!("{content_type} is not audio/wav"),
+        ));
+    }
+    if body.is_empty() {
+        return Err(ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "bad_audio",
+            "the request body is empty",
+        ));
+    }
+
+    let worker = Arc::clone(&state);
+    let (turns, seconds) = tokio::task::spawn_blocking(move || worker.diarize(&body))
+        .await
+        .map_err(|e| {
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "engine_unavailable",
+                e.to_string(),
+            )
+        })?
+        .map_err(|failure| match failure {
+            DiarizeFailure::Audio(detail) => {
+                ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "bad_audio", detail)
+            }
+            DiarizeFailure::NotInstalled(id) => ApiError::coded(
+                StatusCode::CONFLICT,
+                "model_not_installed",
+                format!("{id} is not installed"),
+            ),
+            DiarizeFailure::Engine(detail) => {
+                tracing::error!(%detail, "the diarization engine failed");
+                ApiError::coded(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "engine_unavailable",
+                    "the diarization engine failed; the server log has the detail",
+                )
+            }
+        })?;
+
+    Ok(Json(DiarizeResponse {
+        speakers: arioso_stt_sherpa::diarize::speakers(&turns),
+        turns: turns
+            .into_iter()
+            .map(|turn| DiarizeTurn {
+                start: turn.start,
+                end: turn.end,
+                speaker: turn.speaker,
+            })
+            .collect(),
+        seconds,
+    }))
 }
 
 /// Response body for `POST /v1/stt`.
@@ -5109,6 +5381,53 @@ mod tests {
         );
     }
 
+    async fn post_diarize(
+        state: Arc<AppState>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/diarize")
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn a_diarization_request_for_models_that_are_not_installed_is_refused() {
+        // The config names the entry and the directory is empty, so the answer is the same
+        // one `/v1/stt` gives for a missing model, with the catalog id a client can fetch.
+        let (state, _dir) = state();
+        let pcm = vec![0_u8; 32_000];
+        let wav = arioso_tts_piper::wav::to_bytes_from_pcm(&pcm, 16_000);
+        let (status, body) = post_diarize(state, "audio/wav", wav).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "model_not_installed");
+        assert!(
+            body["detail"].as_str().unwrap().contains("diarization-en"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_diarization_body_that_is_not_a_wav_is_refused() {
+        let (state, _dir) = state();
+        let (status, body) = post_diarize(state, "audio/wav", b"not a wav".to_vec()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "bad_audio");
+    }
+
     #[tokio::test]
     async fn a_wrong_content_type_is_refused() {
         let (state, _dir) = state();
@@ -5352,6 +5671,74 @@ mod tests {
         assert_eq!(json["status"], "stt_missing");
         assert_eq!(json["stt_installed"], false);
         assert_eq!(json["voice_installed"], true);
+    }
+
+    #[tokio::test]
+    async fn readiness_names_the_detector_when_that_is_what_is_missing() {
+        // The voice and the speech model are installed, and the config asks for Silero
+        // whose model is not. The file route would still transcribe, but every streaming
+        // session answers 409, so the server cannot do what it was configured to do.
+        let (state, dir) = silero_state();
+        let (status, body) = call(
+            router(state.clone()),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "vad_missing");
+        assert_eq!(json["vad"], "silero-vad");
+        assert_eq!(json["vad_installed"], false);
+        assert_eq!(json["stt_installed"], true, "the speech model is there");
+
+        // With the model on disk the same server is ready, and says which detector it runs.
+        let vad = state.manifest.find("silero-vad").unwrap().clone();
+        for file in &vad.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let (status, body) = call(
+            router(state),
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["vad_installed"], true);
+    }
+
+    /// A server whose config names Silero, with the voice and the speech model installed and
+    /// the detector absent.
+    fn silero_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let mut manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        // Every catalog file is zero bytes here, so an empty file is an installed model and
+        // a missing one is a model that was never downloaded.
+        for spec in &mut manifest.models {
+            for file in &mut spec.files {
+                file.size = 0;
+            }
+        }
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.vad.engine = "silero".to_owned();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+        let voice = state.voice_spec().unwrap().clone();
+        for file in &voice.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        let stt = state.stt_spec().unwrap().clone();
+        for file in &stt.files {
+            std::fs::write(dir.path().join(&file.name), b"").unwrap();
+        }
+        (state, dir)
     }
 
     #[tokio::test]
