@@ -150,8 +150,10 @@ mod tests {
             .expect("a data chunk")
             + 8;
         bytes[start..]
-            .chunks_exact(2)
-            .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32_768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
             .collect()
     }
 
@@ -173,8 +175,10 @@ mod tests {
 
         let frames = speech.len() / FRAME_SAMPLES;
         let heard = speech
-            .chunks_exact(FRAME_SAMPLES)
-            .filter(|frame| gate.speech(frame))
+            .as_chunks::<FRAME_SAMPLES>()
+            .0
+            .iter()
+            .filter(|frame| gate.speech(&frame[..]))
             .count();
         assert!(
             heard > frames / 4,
