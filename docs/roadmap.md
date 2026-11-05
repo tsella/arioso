@@ -14,6 +14,22 @@ where one exists, the measurement that decided that.
   Numbers and the full comparison: `MODELS.md`, and
   `docs/plans/2026-11-02-tts-engine-comparison.md`.
 
+## Speech
+
+Diarization ships as a whole-file route. What it does not do:
+
+- **A diarization error rate.** The two release clips have a known speaker count and nothing
+  finer, so the count is checked and the boundaries are not. Scoring needs reference turns,
+  and a hand-marked set of a few minutes is the smallest thing that would mean anything.
+
+- **Resampling.** A file that is not 16 kHz is refused by name. The terminal front end has a
+  Kaiser-windowed resampler for playback; a second copy in the server is not obviously right,
+  so the decision waits for a caller who needs it.
+
+- **Identity across files.** Speaker 1 in one recording is not speaker 1 in the next. Linking
+  them needs stored embeddings and a threshold, which is a different feature with a privacy
+  question attached, and nothing in the engine keeps speaker data today.
+
 ## Platforms
 
 - **Piper and sherpa-onnx on iOS and Android.** Both engines link a prebuilt native library,
