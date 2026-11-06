@@ -21,7 +21,7 @@ use arioso_core::UserDictionary;
 use arioso_g2p::CmuDict;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 
 /// Flow-matching steps per clause.
 ///
@@ -218,36 +218,49 @@ impl Voice {
         } else {
             1.0
         };
-        let rate = self.shape.rate;
         for (index, clause) in arioso_core::clauses(text).into_iter().enumerate() {
             for (part, chunk) in arioso_core::chunk_text(clause, MAX_CHUNK)
                 .into_iter()
                 .enumerate()
             {
                 let seed = SEED.wrapping_add((index * 16 + part) as u64);
-                let audio = self.infer(chunk, speed, seed)?;
-                if !audio.is_empty() {
-                    sink(&audio, rate)?;
-                }
+                self.infer(chunk, speed, seed, &mut sink)?;
             }
         }
         Ok(RenderReport::default())
     }
 
-    /// One clause through the four graphs.
-    fn infer(&mut self, clause: &str, speed: f32, seed: u64) -> Result<Vec<f32>, SupertonicError> {
+    /// One clause through the four graphs, its audio handed to `sink` as it is made.
+    ///
+    /// Nothing here copies a tensor it does not own. The style, the masks and the step counters
+    /// are views on buffers that outlive the call, the latent is updated in place between the
+    /// denoising steps, and the vocoder's output goes to `sink` as the borrowed slice it
+    /// already is. The old shape copied the 51 KB style on every clause, the text embedding and
+    /// the style again on all eight steps, and the audio twice at the end.
+    fn infer<S>(
+        &mut self,
+        clause: &str,
+        speed: f32,
+        seed: u64,
+        sink: &mut S,
+    ) -> Result<(), SupertonicError>
+    where
+        S: FnMut(&[f32], u32) -> Result<(), SupertonicError>,
+    {
         let processed = text::preprocess(clause, &self.lang);
         let ids = text::index(&processed, &self.indexer);
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let length = ids.len();
         let mask = text::mask(length);
 
         let text_ids = Tensor::from_array(([1_i64, length as i64], ids))?;
         let text_mask = Tensor::from_array(([1_i64, 1, length as i64], mask.clone()))?;
-        let style_ttl = Tensor::from_array(([1_i64, 50, 256], self.style_ttl.clone()))?;
-        let style_dp = Tensor::from_array(([1_i64, 8, 16], self.style_dp.clone()))?;
+        // The style is 51 KB and does not change between clauses, so each graph reads it in
+        // place. A view costs one tensor header; the copy it replaces cost 51 KB of memory
+        // traffic per clause, and again on every denoising step.
+        let style_dp = TensorRef::from_array_view(([1_usize, 8, 16], &self.style_dp[..]))?;
 
         // How long the clause is, in seconds. The predictor is the only graph that knows, and
         // it answers before the encoder runs, so a clause that predicts nothing can stop here.
@@ -255,7 +268,7 @@ impl Voice {
             .duration_predictor
             .run(ort::inputs![
                 "text_ids" => &text_ids,
-                "style_dp" => &style_dp,
+                "style_dp" => style_dp,
                 "text_mask" => &text_mask
             ])?
             .get("duration")
@@ -267,14 +280,15 @@ impl Voice {
             .unwrap_or(0.0);
         let seconds = f64::from(duration) / f64::from(speed);
         if !seconds.is_finite() || seconds <= 0.0 {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
+        let style_ttl = TensorRef::from_array_view(([1_usize, 50, 256], &self.style_ttl[..]))?;
         let text_emb = self
             .text_encoder
             .run(ort::inputs![
                 "text_ids" => &text_ids,
-                "style_ttl" => &style_ttl,
+                "style_ttl" => style_ttl,
                 "text_mask" => &text_mask
             ])?
             .get("text_emb")
@@ -285,56 +299,66 @@ impl Voice {
 
         let samples = (seconds * f64::from(self.shape.rate)).round() as usize;
         let frames = samples.div_ceil(self.shape.frame).max(1);
-        let latent = noise::normal(seed, frames * self.shape.channels);
+        let channels = self.shape.channels;
 
-        let mut latent = latent;
-        let total = STEPS as f32;
+        // Two latent buffers, swapped: the step writes into the one that is not being read, so
+        // no step allocates. The mask and the step total are the same on every step and are
+        // built once.
+        let mut latent = noise::normal(seed, frames * channels);
+        let mut next = vec![0.0_f32; latent.len()];
+        let latent_mask = vec![1.0_f32; frames];
+        let total_step = [STEPS as f32];
+
         for step in 0..STEPS {
-            let noisy = Tensor::from_array((
-                [1_i64, self.shape.channels as i64, frames as i64],
-                latent.clone(),
-            ))?;
-            let emb = Tensor::from_array(([1_i64, 256, length as i64], text_emb.clone()))?;
-            let latent_mask =
-                Tensor::from_array(([1_i64, 1, frames as i64], vec![1.0_f32; frames]))?;
-            let current = Tensor::from_array(([1_i64], vec![step as f32]))?;
-            let all_steps = Tensor::from_array(([1_i64], vec![total]))?;
-
-            latent = self
-                .vector_estimator
-                .run(ort::inputs![
-                    "noisy_latent" => &noisy,
-                    "text_emb" => &emb,
-                    "style_ttl" => &style_ttl,
-                    "latent_mask" => &latent_mask,
+            let current_step = [step as f32];
+            let outputs = {
+                // The views live only as long as the call, so the block ends the borrow of
+                // `latent` before it is swapped below.
+                let noisy = TensorRef::from_array_view(([1_usize, channels, frames], &latent[..]))?;
+                let emb = TensorRef::from_array_view(([1_usize, 256, length], &text_emb[..]))?;
+                let latent_mask_view =
+                    TensorRef::from_array_view(([1_usize, 1, frames], &latent_mask[..]))?;
+                let current = TensorRef::from_array_view(([1_usize], &current_step[..]))?;
+                let total = TensorRef::from_array_view(([1_usize], &total_step[..]))?;
+                let style_ttl = TensorRef::from_array_view(([1_usize, 50, 256], &self.style_ttl[..]))?;
+                self.vector_estimator.run(ort::inputs![
+                    "noisy_latent" => noisy,
+                    "text_emb" => emb,
+                    "style_ttl" => style_ttl,
+                    "latent_mask" => latent_mask_view,
                     "text_mask" => &text_mask,
-                    "current_step" => &current,
-                    "total_step" => &all_steps
+                    "current_step" => current,
+                    "total_step" => total
                 ])?
+            };
+            let denoised = outputs
                 .get("denoised_latent")
                 .ok_or_else(|| {
                     SupertonicError::Model("the vector field has no denoised_latent".into())
                 })?
                 .try_extract_tensor::<f32>()?
-                .1
-                .to_vec();
+                .1;
+            next.copy_from_slice(denoised);
+            std::mem::swap(&mut latent, &mut next);
         }
 
-        let final_latent =
-            Tensor::from_array(([1_i64, self.shape.channels as i64, frames as i64], latent))?;
-        let audio = self
-            .vocoder
-            .run(ort::inputs!["latent" => &final_latent])?
+        let final_latent = TensorRef::from_array_view(([1_usize, channels, frames], &latent[..]))?;
+        let outputs = self.vocoder.run(ort::inputs!["latent" => final_latent])?;
+        let audio = outputs
             .get("wav_tts")
             .ok_or_else(|| SupertonicError::Model("the vocoder has no wav_tts".into()))?
             .try_extract_tensor::<f32>()?
-            .1
-            .to_vec();
+            .1;
 
         // The vocoder answers a whole number of latent frames; the predictor said how many
         // samples the clause is. Trimming is what keeps a clause from running into the next.
-        Ok(audio.into_iter().take(samples).collect())
+        let heard = audio.len().min(samples);
+        if heard > 0 {
+            sink(&audio[..heard], self.shape.rate)?;
+        }
+        Ok(())
     }
+
 }
 
 /// `tts.json` is a large document; three numbers are read from it.
