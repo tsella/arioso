@@ -9,7 +9,7 @@ use arioso_core::{Entry, Piece, UserDictionary};
 use arioso_core::{chunk_text, clauses};
 use arioso_g2p::{CmuDict, PhonemeMap};
 use ort::session::Session;
-use ort::value::{Tensor, TensorRef};
+use ort::value::TensorRef;
 use thiserror::Error;
 
 pub mod wav;
