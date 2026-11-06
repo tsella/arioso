@@ -74,10 +74,14 @@ jobs:
       - run: cargo test --workspace
       # The gate in AGENTS.md includes this step, and a CI that runs three of four is a CI
       # that says green about a gate nobody ran.
+      # `-j 1` is not a speed setting, it is the fix for a name collision: the ABI library and
+      # the command line binary are both called `arioso`, so both write `target/doc/arioso` and
+      # two rustdoc processes running at once race to remove the directory the other just made.
+      # Serially the second overwrites the first, which is deterministic.
       - name: docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps -j 1
       # A fuzz target that stops compiling must fail the pull request, not sit
       # broken until the next scheduled run. This builds and never runs; the run
       # lives in fuzz.yml. libFuzzer has no Windows support, so the check runs on
