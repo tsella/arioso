@@ -185,7 +185,9 @@ mod tests {
         let samples = read_wav(&wav);
         let mut gate = Silero::load(&model, 0.5).expect("the model loads");
         let mut spoken = 0;
-        for frame in samples.chunks_exact(FRAME_SAMPLES).take(200) {
+        // `as_chunks` rather than `chunks_exact`: the length is a constant, and the newer
+        // clippy the gate runs says so.
+        for frame in samples.as_chunks::<FRAME_SAMPLES>().0.iter().take(200) {
             if gate.speech(frame) {
                 spoken += 1;
             }
@@ -214,7 +216,12 @@ mod tests {
         let samples = read_wav(&wav);
         let mut gate = Silero::load(&model, 0.5).expect("the model loads");
         let mut capacity = 0;
-        for frame in samples.chunks_exact(FRAME_SAMPLES + 7).take(50) {
+        for frame in samples
+            .as_chunks::<{ FRAME_SAMPLES + 7 }>()
+            .0
+            .iter()
+            .take(50)
+        {
             let _ = gate.speech(frame);
             capacity = capacity.max(gate.pending.capacity());
         }
