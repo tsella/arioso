@@ -130,6 +130,21 @@ impl TextBuffer {
         self.chars.iter().collect()
     }
 
+    /// The characters, borrowed.
+    ///
+    /// The screen is drawn sixteen times a second and it needs the characters, not a `String`
+    /// that is turned back into characters a line later.
+    #[must_use]
+    pub fn chars(&self) -> &[char] {
+        &self.chars
+    }
+
+    /// How many characters there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.chars.len()
+    }
+
     /// Whether there is nothing to say.
     #[must_use]
     pub fn is_blank(&self) -> bool {

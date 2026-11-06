@@ -39,33 +39,26 @@ pub fn cell(level: f32, row: usize, col: usize) -> &'static str {
     RAMP[index]
 }
 
-/// A mirrored waveform, `rows` tall and one column per level, as intensities.
+/// The intensity of one cell of a mirrored waveform.
 ///
-/// The centre line is the quiet one, and the envelope grows outwards from it, so a syllable
-/// reads as a shape rather than a number. Intensities rather than glyphs, because the caller
-/// colours a peak differently from the body: without the numbers it would have to guess the
-/// colour back out of the character.
+/// The centre line is the quiet one and the envelope grows outwards from it, so a syllable
+/// reads as a shape rather than a number. A draw asks for every cell of a frame sixteen times a
+/// second, which is why this is a function of the cell rather than a grid that is built and
+/// thrown away after one read.
 #[must_use]
-pub fn waveform_levels(levels: &[f32], rows: usize) -> Vec<Vec<f32>> {
+pub fn waveform_level(level: f32, row: usize, rows: usize) -> f32 {
     let rows = rows.max(1);
     let middle = (rows as f32 - 1.0) / 2.0;
-    let mut grid = vec![vec![0.0f32; levels.len()]; rows];
-    for (col, level) in levels.iter().enumerate() {
-        // Half the height is the most a symmetric shape can use.
-        let amplitude = level.clamp(0.0, 1.0) * middle;
-        for (row, line) in grid.iter_mut().enumerate() {
-            let distance = (row as f32 - middle).abs();
-            // Full density inside the envelope, nothing outside it, and the matrix softens
-            // the boundary by one cell. Silence is no ink at all rather than a half-full
-            // centre row, which is what the raw arithmetic would give.
-            line[col] = if amplitude <= f32::EPSILON {
-                0.0
-            } else {
-                (amplitude - distance + 0.5).clamp(0.0, 1.0)
-            };
-        }
+    // Half the height is the most a symmetric shape can use.
+    let amplitude = level.clamp(0.0, 1.0) * middle;
+    // Full density inside the envelope, nothing outside it, and the matrix softens the
+    // boundary by one cell. Silence is no ink at all rather than a half-full centre row,
+    // which is what the raw arithmetic would give.
+    if amplitude <= f32::EPSILON {
+        return 0.0;
     }
-    grid
+    let distance = (row as f32 - middle).abs();
+    (amplitude - distance + 0.5).clamp(0.0, 1.0)
 }
 
 /// A left-to-right fill, for a progress bar of `width` columns, as intensities.
@@ -125,15 +118,14 @@ mod tests {
 
     #[test]
     fn a_waveform_is_empty_at_zero_and_full_at_one() {
-        let quiet = waveform_levels(&[0.0, 0.0], 3);
-        assert!(
-            quiet
-                .iter()
-                .all(|row| row.iter().all(|level| *level == 0.0))
-        );
-        let loud = waveform_levels(&[1.0, 1.0], 3);
-        // The centre row of a full envelope is inked everywhere.
-        assert_eq!(loud[1], vec![1.0, 1.0]);
+        // Silence is no ink anywhere, rather than a half-full centre row.
+        for row in 0..3 {
+            assert_eq!(waveform_level(0.0, row, 3), 0.0);
+        }
+        // The centre row of a full envelope is inked everywhere, and the rows above and below
+        // fade outwards from it.
+        assert_eq!(waveform_level(1.0, 1, 3), 1.0);
+        assert!(waveform_level(1.0, 0, 3) < 1.0);
     }
 
     #[test]

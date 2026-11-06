@@ -1112,7 +1112,11 @@ mod tests {
         let capacity = samples.capacity();
         assert_eq!(samples.len(), 3);
         pcm16_into(&[0xff, 0x7f], &mut samples);
-        assert_eq!(samples, vec![1.0], "the shorter frame replaced the longer one");
+        assert_eq!(
+            samples,
+            vec![1.0],
+            "the shorter frame replaced the longer one"
+        );
         assert_eq!(samples.capacity(), capacity, "the buffer was reallocated");
     }
 

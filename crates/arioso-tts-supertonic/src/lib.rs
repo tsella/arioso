@@ -320,7 +320,8 @@ impl Voice {
                     TensorRef::from_array_view(([1_usize, 1, frames], &latent_mask[..]))?;
                 let current = TensorRef::from_array_view(([1_usize], &current_step[..]))?;
                 let total = TensorRef::from_array_view(([1_usize], &total_step[..]))?;
-                let style_ttl = TensorRef::from_array_view(([1_usize, 50, 256], &self.style_ttl[..]))?;
+                let style_ttl =
+                    TensorRef::from_array_view(([1_usize, 50, 256], &self.style_ttl[..]))?;
                 self.vector_estimator.run(ort::inputs![
                     "noisy_latent" => noisy,
                     "text_emb" => emb,
@@ -358,7 +359,6 @@ impl Voice {
         }
         Ok(())
     }
-
 }
 
 /// `tts.json` is a large document; three numbers are read from it.

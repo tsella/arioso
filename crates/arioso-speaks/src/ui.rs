@@ -210,38 +210,37 @@ fn draw_signal(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         standby(width, app.frame)
     };
-    let grid = dither::waveform_levels(&levels, height);
     let playhead = if live { Some(width / 2) } else { None };
 
     let caption_row = height - 1;
-    let caption: Vec<char> = SPEAKS.chars().collect();
 
-    let lines: Vec<Line> = grid
-        .iter()
-        .enumerate()
-        .map(|(row, cells)| {
-            let mut spans: Vec<Span> = Vec::with_capacity(cells.len());
-            for (col, level) in cells.iter().enumerate() {
+    let lines: Vec<Line> = (0..height)
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::with_capacity(levels.len());
+            for (col, level) in levels.iter().enumerate() {
+                let level = dither::waveform_level(*level, row, height);
+                // The word is ASCII, so a byte is a character and a slice of it is a `&str`
+                // that outlives the frame: no `String` per cell, sixteen times a second.
                 if row == caption_row
-                    && let Some(letter) = caption.get(col)
-                    && *letter != ' '
+                    && let Some(letter) = SPEAKS.as_bytes().get(col)
+                    && *letter != b' '
                 {
                     // A stroke is behind the letter: invert it rather than lose it.
-                    let style = if dither::has_ink(*level) {
+                    let style = if dither::has_ink(level) {
                         Style::default().fg(CREAM).bg(PETROL)
                     } else {
                         Style::default().fg(PETROL)
                     };
-                    spans.push(Span::styled(letter.to_string(), style));
+                    spans.push(Span::styled(&SPEAKS[col..=col], style));
                     continue;
                 }
                 let ink = if playhead == Some(col) {
                     CREAM
                 } else {
-                    waveform_ink(*level, has_audio)
+                    waveform_ink(level, has_audio)
                 };
                 spans.push(Span::styled(
-                    dither::cell(*level, row, col),
+                    dither::cell(level, row, col),
                     Style::default().fg(ink),
                 ));
             }
@@ -383,7 +382,7 @@ fn draw_text(frame: &mut Frame, area: Rect, app: &App) {
         .title(Line::from(vec![
             Span::styled(" text ", Style::default().fg(MUTED)),
             Span::styled(
-                format!("· {} characters ", app.text.text().chars().count()),
+                format!("· {} characters ", app.text.len()),
                 Style::default().fg(FAINT),
             ),
         ]));
@@ -567,7 +566,7 @@ fn draw_save_prompt(frame: &mut Frame, area: Rect) {
 
 /// The lines of a buffer, wrapped at `width`, each with the character range it covers.
 fn wrapped_lines(buffer: &TextBuffer, width: usize) -> Vec<(String, std::ops::Range<usize>)> {
-    let chars: Vec<char> = buffer.text().chars().collect();
+    let chars = buffer.chars();
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {

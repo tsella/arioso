@@ -136,7 +136,8 @@ fn an_empty_dictionary_does_not_scan_the_transcript() {
     let empty = UserDictionary::parse(r#"{"version":1,"entries":[]}"#).unwrap();
     let index = ReverseIndex::build(&empty, &parsed);
     assert!(index.is_empty());
-    let (out, stats) = measure_warm(|| index.apply(&parsed, "a long sentence that would need scanning"));
+    let (out, stats) =
+        measure_warm(|| index.apply(&parsed, "a long sentence that would need scanning"));
     assert_eq!(out, "a long sentence that would need scanning");
     // One allocation: the returned `String`. The word table the old order built first is gone.
     assert!(

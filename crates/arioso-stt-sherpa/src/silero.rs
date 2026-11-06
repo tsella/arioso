@@ -192,7 +192,10 @@ mod tests {
         }
         // The struct is built with one window's capacity, and that is the whole point: the
         // fast path must leave it exactly as it was found, not grow it.
-        assert!(gate.pending.is_empty(), "the buffer held audio after exact frames");
+        assert!(
+            gate.pending.is_empty(),
+            "the buffer held audio after exact frames"
+        );
         assert_eq!(
             gate.pending.capacity(),
             FRAME_SAMPLES,
@@ -215,7 +218,10 @@ mod tests {
             let _ = gate.speech(frame);
             capacity = capacity.max(gate.pending.capacity());
         }
-        assert!(capacity >= FRAME_SAMPLES, "the buffer allocated: capacity {capacity}");
+        assert!(
+            capacity >= FRAME_SAMPLES,
+            "the buffer allocated: capacity {capacity}"
+        );
         assert!(
             capacity <= FRAME_SAMPLES * 4,
             "the buffer grew without bound: capacity {capacity}"

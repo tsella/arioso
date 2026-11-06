@@ -3477,7 +3477,9 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
             .manifest
             .models
             .iter()
-            .find(|model| model.engine == config.tts.engine && model.kind == arioso_models::Kind::Tts)
+            .find(|model| {
+                model.engine == config.tts.engine && model.kind == arioso_models::Kind::Tts
+            })
             .and_then(|model| entry_voices(&state.models_dir, model));
         held.is_none_or(|names| names.contains(&config.voice_name().to_string()))
     } else {
@@ -6046,11 +6048,7 @@ mod tests {
             engines.iter().map(|engine| &engine.id).collect::<Vec<_>>()
         );
 
-        let (status, body) = patch(
-            Arc::clone(&state),
-            r#"{"tts":{"engine":"supertonic"}}"#,
-        )
-        .await;
+        let (status, body) = patch(Arc::clone(&state), r#"{"tts":{"engine":"supertonic"}}"#).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let config = state.config();
         assert_eq!(config.tts.engine, "supertonic");
