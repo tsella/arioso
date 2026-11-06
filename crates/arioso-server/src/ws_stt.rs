@@ -130,15 +130,29 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -
 }
 
 /// Convert little-endian 16-bit PCM to samples.
+/// The conversion, for a caller that wants a fresh `Vec`.
+///
+/// The stream does not: it reuses one buffer per session, which is what `pcm16_into` is for.
+/// The tests read better with the wrapper, so it exists for them and not for the route.
+#[cfg(test)]
 fn pcm16(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
+    let mut samples = Vec::with_capacity(bytes.len() / 2);
+    pcm16_into(bytes, &mut samples);
+    samples
+}
+
+/// The same conversion into a buffer the caller keeps.
+///
+/// A stream sends thirty to fifty frames a second, and a fresh `Vec` for each one is a heap
+/// allocation and a grow per frame, per open connection, for audio that is handed to the
+/// segmenter and dropped. The session owns one buffer and reuses it.
+fn pcm16_into(bytes: &[u8], out: &mut Vec<f32>) {
+    out.clear();
+    out.extend(bytes.chunks_exact(2).map(|pair| {
         // `i16::MIN` divided by `i16::MAX` lands at -1.00003, outside the range the model
         // takes; the clamp keeps the samples in it.
-        .map(|pair| {
-            (f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX)).max(-1.0)
-        })
-        .collect()
+        (f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX)).max(-1.0)
+    }));
 }
 
 /// A session id that sorts by time, for a client to correlate its logs.
@@ -788,6 +802,9 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Shared with the partial tasks so the same hypothesis is not sent twice.
     let last_partial = Arc::new(tokio::sync::Mutex::new(String::new()));
+    // One buffer for the life of the stream: a frame is decoded, used and replaced, thirty to
+    // fifty times a second.
+    let mut samples: Vec<f32> = Vec::new();
 
     loop {
         tokio::select! {
@@ -796,7 +813,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, permit: tokio::sync::Owned
                 last_heard = Instant::now();
                 match message {
                     Message::Binary(bytes) => {
-                        let samples = pcm16(&bytes);
+                        pcm16_into(&bytes, &mut samples);
                         if streaming {
                             if !stream_chunk(
                                 &state,
@@ -1084,6 +1101,19 @@ mod tests {
         assert_eq!(config.preroll_ms, 333);
         assert_eq!(config.max_utterance_ms, 444);
         assert_eq!(config.frame_ms, 20);
+    }
+
+    #[test]
+    fn a_reused_buffer_keeps_its_capacity_and_its_length() {
+        // The stream decodes into one buffer for its whole life. A shorter frame must not
+        // leave the tail of the longer one behind, and the buffer must not shrink.
+        let mut samples = Vec::new();
+        pcm16_into(&[0x00, 0x00, 0xff, 0x7f, 0x00, 0x00], &mut samples);
+        let capacity = samples.capacity();
+        assert_eq!(samples.len(), 3);
+        pcm16_into(&[0xff, 0x7f], &mut samples);
+        assert_eq!(samples, vec![1.0], "the shorter frame replaced the longer one");
+        assert_eq!(samples.capacity(), capacity, "the buffer was reallocated");
     }
 
     #[test]

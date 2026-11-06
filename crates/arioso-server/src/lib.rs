@@ -1832,14 +1832,17 @@ impl AppState {
         speed: f32,
         sid: i64,
     ) -> Result<Vec<u8>, String> {
-        let mut samples: Vec<f32> = Vec::new();
+        // Converted as each chunk arrives rather than after the last one: holding the whole
+        // take as `f32` and then as `i16` keeps two copies of the response alive at once, and
+        // the second is what gets sent.
+        let mut pcm: Vec<u8> = Vec::new();
         let mut rate = 0u32;
         self.render_phonemes_stream(phonemes, speed, sid, |audio, at| {
             rate = at;
-            samples.extend_from_slice(audio);
+            wav::write_pcm_s16le(audio, &mut pcm);
             Ok(())
         })?;
-        Ok(wav::to_bytes_from_pcm(&wav::pcm_s16le(&samples), rate))
+        Ok(wav::to_bytes_from_pcm(&pcm, rate))
     }
 
     /// The catalog as a client reads it: what each model is, what it costs in bytes, what
