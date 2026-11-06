@@ -15,7 +15,7 @@ use arioso_core::{Entry, Piece, TtsEngine, UserDictionary};
 use arioso_core::{chunk_text, clauses};
 use arioso_g2p::CmuDict;
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::TensorRef;
 use thiserror::Error;
 
 pub mod vocab;
@@ -341,22 +341,23 @@ impl KokoroVoice {
 
     pub fn synthesize(&mut self, tokens: &[i64], speed: f32) -> Result<Vec<f32>, KokoroError> {
         let style = self.style.row(tokens.len()).to_vec();
-        let width = self.style.width as i64;
         let padded = padded(tokens);
-        let length = padded.len() as i64;
 
-        let speed_value: ort::session::SessionInputValue<'_> = if self.speed_is_integer {
-            Tensor::from_array(([1i64], vec![i64::from(speed.round() as i32)]))?.into()
+        // Views: the padded token run, the style row and the speed are contiguous already, and
+        // this runs once per chunk of every utterance.
+        let speed_as_int = [i64::from(speed.round() as i32)];
+        let speed_as_float = [speed];
+        let tokens_view = TensorRef::from_array_view(([1usize, padded.len()], &padded[..]))?;
+        let style_view = TensorRef::from_array_view(([1usize, self.style.width], &style[..]))?;
+        let speed_view = if self.speed_is_integer {
+            TensorRef::from_array_view(([1usize], &speed_as_int[..]))?.into_dyn()
         } else {
-            Tensor::from_array(([1i64], vec![speed]))?.into()
+            TensorRef::from_array_view(([1usize], &speed_as_float[..]))?.into_dyn()
         };
         let feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
-            (
-                "tokens",
-                Tensor::from_array(([1i64, length], padded))?.into(),
-            ),
-            ("style", Tensor::from_array(([1i64, width], style))?.into()),
-            ("speed", speed_value),
+            ("tokens", tokens_view.into_dyn().into()),
+            ("style", style_view.into_dyn().into()),
+            ("speed", speed_view.into()),
         ];
 
         let outputs = self.session.run(feeds)?;

@@ -9,7 +9,7 @@ use arioso_core::{Entry, Piece, UserDictionary};
 use arioso_core::{chunk_text, clauses};
 use arioso_g2p::{CmuDict, PhonemeMap};
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 use thiserror::Error;
 
 pub mod wav;
@@ -493,24 +493,38 @@ impl PiperVoice {
     ///
     /// Returns [`PiperError`] when ONNX Runtime fails or returns no tensor.
     pub fn synthesize_ids(&mut self, input: &[i64], sid: i64) -> Result<Vec<f32>, PiperError> {
-        let length = input.len() as i64;
-
+        let length = input.len();
+        // Views rather than copies: the phoneme run, the scales and the speaker are already
+        // contiguous, and a clause is synthesised every time a sentence is spoken.
+        let lengths = [length as i64];
+        let speakers = [sid];
         let mut feeds: Vec<(&str, ort::session::SessionInputValue<'_>)> = vec![
             (
                 "input",
-                Tensor::from_array(([1i64, length], input.to_vec()))?.into(),
+                TensorRef::from_array_view(([1usize, length], input))?
+                    .into_dyn()
+                    .into(),
             ),
             (
                 "input_lengths",
-                Tensor::from_array(([1i64], vec![length]))?.into(),
+                TensorRef::from_array_view(([1usize], &lengths[..]))?
+                    .into_dyn()
+                    .into(),
             ),
             (
                 "scales",
-                Tensor::from_array(([3i64], self.scales.to_vec()))?.into(),
+                TensorRef::from_array_view(([3usize], &self.scales[..]))?
+                    .into_dyn()
+                    .into(),
             ),
         ];
         if self.has_sid {
-            feeds.push(("sid", Tensor::from_array(([1i64], vec![sid]))?.into()));
+            feeds.push((
+                "sid",
+                TensorRef::from_array_view(([1usize], &speakers[..]))?
+                    .into_dyn()
+                    .into(),
+            ));
         }
 
         let outputs = self.session.run(feeds)?;
