@@ -22,6 +22,92 @@ const BETA: f32 = 8.0;
 /// band sits below the fold rather than across it.
 const CUTOFF: f64 = 0.95;
 
+/// Points in the window table.
+///
+/// The window is a smooth curve over `-1..=1`; 2048 points with linear interpolation between
+/// them is far finer than the ear and turns two transcendental calls per tap into two table
+/// reads and a multiply.
+const WINDOW_STEPS: usize = 2048;
+
+/// The Kaiser window, tabulated once.
+///
+/// It depends only on the constants above, so it is built on first use and shared by every
+/// conversion. Without it the inner loop ran the Bessel series fifteen times per tap per
+/// output sample: about one and a half million series a second of audio.
+fn window_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=WINDOW_STEPS)
+            .map(|step| {
+                let u = (step as f32 / WINDOW_STEPS as f32) * 2.0 - 1.0;
+                window_exact(u)
+            })
+            .collect()
+    })
+}
+
+/// The window at `u`, read from the table.
+fn window(u: f32) -> f32 {
+    let table = window_table();
+    let at = ((u + 1.0) * 0.5 * WINDOW_STEPS as f32).clamp(0.0, WINDOW_STEPS as f32);
+    let low = at.floor() as usize;
+    let high = (low + 1).min(WINDOW_STEPS);
+    let fraction = at - low as f32;
+    table[low] * (1.0 - fraction) + table[high] * fraction
+}
+
+/// Taps per phase, counting both sides of the interpolation point.
+const TAPS_PER_PHASE: usize = (TAPS as usize) * 2;
+
+/// Phases in the polyphase table.
+///
+/// The tap weights depend on where the output sample falls between two input samples, and on
+/// nothing else. Quantising that fraction to one part in 1024 moves the interpolation point by
+/// under a thousandth of a sample, which is a twenty-microsecond error at 48 kHz: below the
+/// resolution of the buffer, let alone the ear.
+const PHASES: usize = 1024;
+
+/// Every tap weight for every phase, with the sum each phase needs for normalisation.
+///
+/// Without it the inner loop evaluated a sine and the Bessel window for each of thirty-two
+/// taps of each of forty-eight thousand output samples a second: a second and a half of audio
+/// took four hundred milliseconds.
+struct Kernel {
+    weights: Vec<f32>,
+    sums: Vec<f32>,
+}
+
+impl Kernel {
+    /// Build the table for a conversion ratio.
+    fn build(cutoff: f64) -> Self {
+        let mut weights = Vec::with_capacity(PHASES * TAPS_PER_PHASE);
+        let mut sums = Vec::with_capacity(PHASES);
+        for phase in 0..PHASES {
+            let fraction = phase as f64 / PHASES as f64;
+            let mut sum = 0.0_f32;
+            for tap in -TAPS + 1..=TAPS {
+                let offset = fraction - f64::from(tap);
+                let weight = if offset.abs() > f64::from(TAPS) {
+                    0.0
+                } else {
+                    (sinc(offset * cutoff) * f64::from(window((offset / f64::from(TAPS)) as f32)))
+                        as f32
+                };
+                sum += weight;
+                weights.push(weight);
+            }
+            sums.push(sum);
+        }
+        Self { weights, sums }
+    }
+
+    /// The weights for one phase.
+    fn phase(&self, phase: usize) -> &[f32] {
+        let start = (phase % PHASES) * TAPS_PER_PHASE;
+        &self.weights[start..start + TAPS_PER_PHASE]
+    }
+}
+
 /// Convert `samples` from `from` to `to` hertz.
 ///
 /// A matching rate is a copy, not a pass through the filter: the common case should cost
@@ -37,31 +123,32 @@ pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
     let length = ((samples.len() as f64) * f64::from(to) / f64::from(from)).round() as usize;
     let cutoff = f64::min(1.0, f64::from(to) / f64::from(from)) * CUTOFF;
     let last = samples.len() - 1;
+    let kernel = Kernel::build(cutoff);
 
     let mut out = Vec::with_capacity(length);
     for index in 0..length {
         let at = index as f64 * ratio;
         let base = at.floor() as i64;
-        let mut sum = 0.0f64;
-        let mut weights = 0.0f64;
-        for tap in -TAPS + 1..=TAPS {
-            let offset = at - (base + i64::from(tap)) as f64;
-            if offset.abs() > f64::from(TAPS) {
+        let fraction = at - base as f64;
+        let phase = ((fraction * PHASES as f64).round() as usize) % PHASES;
+        let weights = kernel.phase(phase);
+        let mut sum = 0.0f32;
+        for (slot, tap) in (-TAPS + 1..=TAPS).enumerate() {
+            let weight = weights[slot];
+            if weight == 0.0 {
                 continue;
             }
-            let weight =
-                sinc(offset * cutoff) * f64::from(window((offset / f64::from(TAPS)) as f32));
             // Clamp at the edges rather than pad with zeros: a zero pad fades the first and
             // last few milliseconds of every utterance, which is a click on a short one.
             let sample = samples[(base + i64::from(tap)).clamp(0, last as i64) as usize];
-            sum += f64::from(sample) * weight;
-            weights += weight;
+            sum += sample * weight;
         }
+        let total = kernel.sums[phase];
         // Normalised, so a window whose weights do not sum to one does not change the level.
-        out.push(if weights.abs() < f64::EPSILON {
+        out.push(if total.abs() < f32::EPSILON {
             0.0
         } else {
-            (sum / weights) as f32
+            sum / total
         });
     }
     out
@@ -77,8 +164,8 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
-/// The Kaiser window over `-1..=1`.
-fn window(u: f32) -> f32 {
+/// The Kaiser window over `-1..=1`, evaluated.
+fn window_exact(u: f32) -> f32 {
     let inside = 1.0 - u * u;
     if inside <= 0.0 {
         return 0.0;
@@ -131,6 +218,22 @@ mod tests {
     fn a_matching_rate_is_the_same_samples() {
         let input = sine(440.0, 48_000, 0.05);
         assert_eq!(resample(&input, 48_000, 48_000), input);
+    }
+
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn how_long_ten_seconds_take() {
+        let input = sine(440.0, 22_050, 10.0);
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let out = resample(&input, 22_050, 48_000);
+            let elapsed = start.elapsed();
+            eprintln!(
+                "22.05 kHz to 48 kHz, 10 s: {:.1} ms for {} samples",
+                elapsed.as_secs_f64() * 1000.0,
+                out.len()
+            );
+        }
     }
 
     #[test]
