@@ -174,11 +174,28 @@ pub struct AppState {
 struct UserState {
     path: PathBuf,
     modified: Option<std::time::SystemTime>,
-    dictionary: UserDictionary,
+    /// Shared, so a render and a transcription can each hold one without holding the lock.
+    ///
+    /// A reload replaces the `Arc` and leaves the readers that already took one reading the
+    /// copy they started with, which is what a dictionary that changed mid-sentence should
+    /// do: one request sees one dictionary.
+    dictionary: Arc<UserDictionary>,
     /// The dictionary's spoken forms, pronounced and ordered once. Rebuilding this per
     /// transcript re-pronounced every form of every entry on every final.
-    reverse: ReverseIndex,
+    reverse: Arc<ReverseIndex>,
     /// Parse error from the last reload attempt. The last good copy stays in use.
+    error: Option<String>,
+}
+
+/// The user dictionary, taken at one moment.
+///
+/// Held as two `Arc`s rather than a guard: the lock is taken to look for a reload and released
+/// immediately, so a synthesis that runs for seconds and a transcription that runs for seconds
+/// no longer wait for each other over a dictionary neither of them writes.
+#[derive(Clone)]
+struct UserSnapshot {
+    dictionary: Arc<UserDictionary>,
+    reverse: Arc<ReverseIndex>,
     error: Option<String>,
 }
 
@@ -297,8 +314,8 @@ impl AppState {
             user: Mutex::new(UserState {
                 path,
                 modified,
-                dictionary,
-                reverse,
+                dictionary: Arc::new(dictionary),
+                reverse: Arc::new(reverse),
                 error,
             }),
             voice: Mutex::new(None),
@@ -1350,7 +1367,7 @@ impl AppState {
     /// provisional partial does not, because it is replaced a moment later and correcting
     /// it would only make the line flicker.
     pub(crate) fn correct(&self, text: &str) -> String {
-        let user = self.user_dictionary();
+        let user = self.user_snapshot();
         user.reverse.apply(&self.dictionary, text)
     }
 
@@ -1368,7 +1385,21 @@ impl AppState {
     }
 
     /// The user dictionary, reloaded if the file changed since the last look.
-    fn user_dictionary(&self) -> std::sync::MutexGuard<'_, UserState> {
+    ///
+    /// Answers a snapshot and releases the lock before returning. A guard held for the length
+    /// of a render was the reason a transcription waited behind one, and the reverse: both
+    /// read this dictionary, and neither writes it.
+    fn user_snapshot(&self) -> UserSnapshot {
+        let state = self.lock_user();
+        UserSnapshot {
+            dictionary: Arc::clone(&state.dictionary),
+            reverse: Arc::clone(&state.reverse),
+            error: state.error.clone(),
+        }
+    }
+
+    /// The dictionary state, with the reload applied if the file changed.
+    fn lock_user(&self) -> std::sync::MutexGuard<'_, UserState> {
         let mut state = self
             .user
             .lock()
@@ -1383,8 +1414,8 @@ impl AppState {
 
         if modified.is_none() {
             // The file was deleted, so the shipped dictionary is what applies again.
-            state.dictionary = UserDictionary::shipped();
-            state.reverse = ReverseIndex::build(&state.dictionary, &self.dictionary);
+            state.dictionary = Arc::new(UserDictionary::shipped());
+            state.reverse = Arc::new(ReverseIndex::build(&state.dictionary, &self.dictionary));
             state.error = None;
             return state;
         }
@@ -1392,8 +1423,8 @@ impl AppState {
         match UserDictionary::load(&state.path) {
             Ok(dictionary) => {
                 tracing::info!(entries = dictionary.len(), "reloaded the user dictionary");
-                state.dictionary = dictionary;
-                state.reverse = ReverseIndex::build(&state.dictionary, &self.dictionary);
+                state.dictionary = Arc::new(dictionary);
+                state.reverse = Arc::new(ReverseIndex::build(&state.dictionary, &self.dictionary));
                 state.error = None;
             }
             Err(error) => {
@@ -1503,7 +1534,9 @@ impl AppState {
             *guard = Some(self.load_voice().map_err(|error| error.to_string())?);
         }
         let voice = guard.as_mut().ok_or("voice failed to load")?;
-        let user = self.user_dictionary();
+        // Taken before the render and dropped with it: the snapshot holds `Arc`s, so the
+        // dictionary lock is free for a transcription the whole time this speaks.
+        let user = self.user_snapshot();
         let normalize = arioso_core::NormalizeOptions {
             time_of_day: self.config().tts.time_of_day,
         };
@@ -1614,7 +1647,7 @@ impl AppState {
             .lock()
             .map_err(|_| "the voice lock is poisoned".to_string())?;
         let voice = guard.as_ref().ok_or("voice failed to load")?;
-        let user = self.user_dictionary();
+        let user = self.user_snapshot();
         let normalize = arioso_core::NormalizeOptions {
             time_of_day: self.config().tts.time_of_day,
         };
@@ -2697,7 +2730,7 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     } else {
         "ready"
     };
-    let user = state.user_dictionary();
+    let user = state.user_snapshot();
     let dictionary = DictionaryView {
         entries: user.dictionary.len(),
         error: user.error.clone(),
@@ -5842,6 +5875,62 @@ mod tests {
         // No file of the user's own, so the shipped dictionary is what applies.
         assert_eq!(json["dictionary"]["entries"], 3);
         assert!(json["dictionary"]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_held_without_holding_the_lock() {
+        // The defect this replaces: a render held the dictionary guard for the length of the
+        // synthesis, so a transcription submitted while it spoke waited for it, and the
+        // reverse. A snapshot copies two `Arc`s and lets go, so a second reader is never
+        // behind the first.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cmudict.dict"), DICT).unwrap();
+        let path = dir.path().join("dictionary.json");
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "entries": [{"term": "arioso", "spoken": ["ah ree oh so"]}]}"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.dictionary = Some(path.clone());
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        let held = state.user_snapshot();
+        assert_eq!(held.dictionary.len(), 1);
+
+        // A second reader while the first snapshot is alive, with a budget short enough that
+        // a held lock would miss it.
+        let reader = Arc::clone(&state);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let snapshot = reader.user_snapshot();
+            let _ = sender.send(snapshot.dictionary.len());
+        });
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(1),
+            "a reader waited for another reader"
+        );
+
+        // A reload replaces the shared copy; the snapshot taken before it keeps reading what
+        // it started with, so one request sees one dictionary.
+        write_dictionary(
+            &path,
+            r#"{"version": 1, "entries": [
+                {"term": "arioso", "spoken": ["ah ree oh so"]},
+                {"term": "Sella", "spoken": ["seller"]}
+            ]}"#,
+            2,
+        );
+        assert_eq!(state.user_snapshot().dictionary.len(), 2);
+        assert_eq!(
+            held.dictionary.len(),
+            1,
+            "a held snapshot changed under the reader"
+        );
     }
 
     #[tokio::test]
