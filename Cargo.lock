@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-abi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-config",
  "arioso-models",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arioso-config",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-config"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "schemars",
  "serde",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-g2p"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-core",
  "serde_json",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-models"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-config",
  "ed25519-dalek",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-config",
  "arioso-core",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-speaks"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arioso-config",
@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-stt-sherpa"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-tts-kokoro"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-tts-piper"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-tts-supertonic"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arioso-core",
  "arioso-g2p",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "arioso-vad"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "asn1-rs"
