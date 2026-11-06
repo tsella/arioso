@@ -58,7 +58,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 517 tests
+- 518 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 

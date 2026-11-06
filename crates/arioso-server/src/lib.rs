@@ -2929,6 +2929,10 @@ pub struct TtsPatch {
     pub format: Option<String>,
     /// Whether times are read with a part of day.
     pub time_of_day: Option<bool>,
+    /// Language the text is spoken as. Only Supertonic reads it.
+    pub language: Option<String>,
+    /// Threads synthesis may use. Zero means decide from the machine.
+    pub threads: Option<u32>,
 }
 
 /// Speech to text fields a patch may change.
@@ -3089,6 +3093,16 @@ impl ConfigPatch {
             }
             if let Some(time_of_day) = tts.time_of_day {
                 config.tts.time_of_day = time_of_day;
+            }
+            if let Some(language) = tts.language {
+                config.tts.language = language;
+                // The tag is read when the engine loads, so the loaded voice is stale.
+                touched.voice = VoiceChange::Reload;
+            }
+            if let Some(threads) = tts.threads {
+                config.tts.threads = threads;
+                // The count is read when the graph loads, so the loaded voice is stale.
+                touched.voice = VoiceChange::Reload;
             }
         }
         if let Some(stt) = self.stt {
@@ -5980,6 +5994,23 @@ mod tests {
         // No file of the user's own, so the shipped dictionary is what applies.
         assert_eq!(json["dictionary"]["entries"], 3);
         assert!(json["dictionary"]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_engine_settings_are_patchable_too() {
+        // A field in the config that no patch can reach is a field a client cannot set, and
+        // the document says otherwise the moment it is serialised.
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            Arc::clone(&state),
+            r#"{"tts":{"threads":2,"language":"de"},"stt":{"threads":3}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let config = state.config();
+        assert_eq!(config.tts.threads, 2);
+        assert_eq!(config.tts.language, "de");
+        assert_eq!(config.stt.threads, 3);
     }
 
     #[tokio::test]
