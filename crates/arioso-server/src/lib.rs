@@ -186,6 +186,8 @@ struct UserState {
     reverse: Arc<ReverseIndex>,
     /// Parse error from the last reload attempt. The last good copy stays in use.
     error: Option<String>,
+    /// The tolerance the reverse index was built with, so a config change rebuilds it.
+    tolerance: f32,
 }
 
 /// The user dictionary, taken at one moment.
@@ -309,7 +311,7 @@ impl AppState {
             return Err(ServerError::StreamModel(detail));
         }
         let cmu = CmuDict::parse(&text);
-        let reverse = ReverseIndex::build(&dictionary, &cmu);
+        let reverse = ReverseIndex::build_with(&dictionary, &cmu, config.stt.reverse_tolerance);
         let state = Self {
             dictionary: cmu,
             user: Mutex::new(UserState {
@@ -318,6 +320,7 @@ impl AppState {
                 dictionary: Arc::new(dictionary),
                 reverse: Arc::new(reverse),
                 error,
+                tolerance: config.stt.reverse_tolerance,
             }),
             voice: Mutex::new(None),
             #[cfg(test)]
@@ -1434,6 +1437,9 @@ impl AppState {
 
     /// The dictionary state, with the reload applied if the file changed.
     fn lock_user(&self) -> std::sync::MutexGuard<'_, UserState> {
+        // Read before taking the dictionary lock, never inside it: the config has its own lock,
+        // and one held while waiting for the other is how a patch and a transcript deadlock.
+        let tolerance = self.config().stt.reverse_tolerance;
         let mut state = self
             .user
             .lock()
@@ -1441,15 +1447,35 @@ impl AppState {
         let modified = std::fs::metadata(&state.path)
             .and_then(|meta| meta.modified())
             .ok();
-        if modified == state.modified {
+        // The tolerance is part of what the index is built with, so a config change rebuilds it
+        // for the same reason a file change does: the answer depends on both.
+        let file_moved = modified != state.modified;
+        let retuned = (tolerance - state.tolerance).abs() >= f32::EPSILON;
+        if !file_moved && !retuned {
             return state;
         }
         state.modified = modified;
+        state.tolerance = tolerance;
+
+        if !file_moved {
+            // Only the number moved. The forms are the same ones, pronounced the same way.
+            state.reverse = Arc::new(ReverseIndex::build_with(
+                &state.dictionary,
+                &self.dictionary,
+                tolerance,
+            ));
+            tracing::info!(tolerance, "rebuilt the reverse index at a new tolerance");
+            return state;
+        }
 
         if modified.is_none() {
             // The file was deleted, so the shipped dictionary is what applies again.
             state.dictionary = Arc::new(UserDictionary::shipped());
-            state.reverse = Arc::new(ReverseIndex::build(&state.dictionary, &self.dictionary));
+            state.reverse = Arc::new(ReverseIndex::build_with(
+                &state.dictionary,
+                &self.dictionary,
+                tolerance,
+            ));
             state.error = None;
             return state;
         }
@@ -1458,7 +1484,11 @@ impl AppState {
             Ok(dictionary) => {
                 tracing::info!(entries = dictionary.len(), "reloaded the user dictionary");
                 state.dictionary = Arc::new(dictionary);
-                state.reverse = Arc::new(ReverseIndex::build(&state.dictionary, &self.dictionary));
+                state.reverse = Arc::new(ReverseIndex::build_with(
+                    &state.dictionary,
+                    &self.dictionary,
+                    tolerance,
+                ));
                 state.error = None;
             }
             Err(error) => {
@@ -2916,6 +2946,13 @@ pub struct SttPatch {
     pub language: Option<String>,
     /// Whether the stream sends partial transcripts.
     pub partials: Option<bool>,
+    /// How far a transcript may be from a dictionary form and still be corrected.
+    ///
+    /// Zero means only a form's own pronunciation matches. A change rebuilds the reverse index
+    /// on the next correction; it does not need a restart.
+    pub reverse_tolerance: Option<f32>,
+    /// Threads the recogniser may use. Zero means decide from the machine.
+    pub threads: Option<u32>,
 }
 
 /// Voice activity detection fields a patch may change.
@@ -3072,6 +3109,15 @@ impl ConfigPatch {
             }
             if let Some(partials) = stt.partials {
                 config.stt.partials = partials;
+            }
+            if let Some(tolerance) = stt.reverse_tolerance {
+                config.stt.reverse_tolerance = tolerance;
+            }
+            if let Some(threads) = stt.threads {
+                config.stt.threads = threads;
+                // A thread count is read when the engine is built, so the loaded engine is
+                // stale: drop it and the next request builds one that respects the number.
+                touched.stt = true;
             }
         }
         if let Some(vad) = self.vad {
@@ -5934,6 +5980,40 @@ mod tests {
         // No file of the user's own, so the shipped dictionary is what applies.
         assert_eq!(json["dictionary"]["entries"], 3);
         assert!(json["dictionary"]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_tolerance_patch_changes_the_next_correction() {
+        // The setting has to reach the index, not only the document: a config that reads 0.0
+        // and corrects as though it were 0.4 is a field nobody can trust.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cmudict.dict"),
+            "tom T AA1 M\nseller S EH1 L ER0\nsellers S EH1 L ER0 Z\n",
+        )
+        .unwrap();
+        let dictionary = dir.path().join("dictionary.json");
+        std::fs::write(
+            &dictionary,
+            r#"{"version": 1, "entries": [{"term": "Tom Sella", "spoken": ["tom seller"]}]}"#,
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.models.dir = Some(dir.path().to_path_buf());
+        config.tts.dictionary = Some(dictionary);
+        let manifest = Manifest::parse(MANIFEST.as_bytes()).unwrap();
+        let state = Arc::new(AppState::new(config, manifest, None).unwrap());
+
+        // One phoneme apart: corrected at the default tolerance.
+        assert_eq!(state.correct("i met tom sellers"), "i met Tom Sella");
+
+        let (status, body) =
+            patch(Arc::clone(&state), r#"{"stt":{"reverse_tolerance":0.0}}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // The same transcript, no restart: exact only.
+        assert_eq!(state.correct("i met tom sellers"), "i met tom sellers");
+        assert_eq!(state.correct("i met tom seller"), "i met Tom Sella");
     }
 
     #[tokio::test]

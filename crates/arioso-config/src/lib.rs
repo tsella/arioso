@@ -20,6 +20,17 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// the caller asks for one thing and receives another.
 pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
+/// How far a transcript may be from a dictionary form when the config does not say.
+///
+/// Measured, not chosen: the exact map fired on none of three round trips and this fires on all
+/// three, and the table behind that is in `PRD.md`.
+pub const DEFAULT_REVERSE_TOLERANCE: f32 = 0.4;
+
+/// Above this a form matches so loosely that the correction is a coin toss.
+///
+/// A four-phoneme form then matches a difference of two phonemes, which is half the word.
+pub const LOOSE_REVERSE_TOLERANCE: f32 = 0.6;
+
 /// The most threads a config may ask for.
 ///
 /// A ceiling rather than a refusal above the core count: a container reports the cores it can
@@ -384,6 +395,12 @@ pub struct Stt {
     pub word_timestamps: bool,
     /// Longest accepted audio, in seconds.
     pub max_audio_s: u32,
+    /// How far a transcript may be from a dictionary form and still be corrected.
+    ///
+    /// A fraction of the form's phonemes, so 0.4 lets a seven-phoneme form be two edits away.
+    /// Zero turns approximation off: only a form's own pronunciation matches. The reverse map
+    /// is a guess, and this is the dial on how much guessing it does.
+    pub reverse_tolerance: f32,
     /// Threads for recognition. `0` means decide from the machine.
     ///
     /// A transducer decodes one long sequence, so it gains from threads differently from a
@@ -416,6 +433,7 @@ impl Default for Stt {
             stability_window_ms: 200,
             word_timestamps: false,
             max_audio_s: 600,
+            reverse_tolerance: DEFAULT_REVERSE_TOLERANCE,
             threads: 0,
             capture: Capture::default(),
         }
@@ -1040,6 +1058,14 @@ impl Config {
                     "silero reads 32 ms frames at 16 kHz, got {}",
                     self.vad.frame_ms
                 ),
+            });
+        }
+        if !(0.0..=1.0).contains(&self.stt.reverse_tolerance)
+            || !self.stt.reverse_tolerance.is_finite()
+        {
+            return Err(ConfigError::Invalid {
+                path: "stt.reverse_tolerance".into(),
+                message: format!("expected 0.0 to 1.0, got {}", self.stt.reverse_tolerance),
             });
         }
         for (path, threads) in [

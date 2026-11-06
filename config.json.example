@@ -47,6 +47,7 @@
     "stability_window_ms": 200,
     "word_timestamps": false,
     "max_audio_s": 600,
+    "reverse_tolerance": 0.4,
     "threads": 0,
     "capture": {
       "mode": "separate",

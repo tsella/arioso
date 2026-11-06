@@ -58,7 +58,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 508 tests
+- 517 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 
@@ -252,6 +252,16 @@ smaller install; tiny is the least accurate of the three, and on the same record
 ```console
 $ arioso transcribe hello.wav
 The quick brown fox jumps over the lazy dog.
+```
+
+A final transcript is corrected against the user dictionary by sound: every spoken form is
+pronounced, the transcript is pronounced, and a near miss counts as the term, so `Tonseller`
+comes back as `Tom Sella`. How near is `stt.reverse_tolerance`, 0.4 by default and a fraction
+of the form's phonemes. Zero turns approximation off and corrects only a form's own
+pronunciation; `--tolerance` overrides the config for one run.
+
+```console
+$ arioso transcribe meeting.wav --tolerance 0
 ```
 
 `POST /v1/stt` takes the audio as the body and answers with the text and its length:

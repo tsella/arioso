@@ -81,6 +81,10 @@ enum Command {
         /// Print JSON instead of plain text.
         #[arg(long)]
         json: bool,
+        /// How far a transcript may be from a dictionary form and still be corrected.
+        /// Defaults to stt.reverse_tolerance. Zero corrects only an exact pronunciation.
+        #[arg(long)]
+        tolerance: Option<f32>,
     },
     /// Label the voices in a recording.
     ///
@@ -187,7 +191,11 @@ fn main() -> Result<()> {
                 voice: voice.as_deref(),
             },
         ),
-        Command::Transcribe { file, json } => transcribe(&config, &config_path, &file, json),
+        Command::Transcribe {
+            file,
+            json,
+            tolerance,
+        } => transcribe(&config, &config_path, &file, json, tolerance),
         Command::Diarize { file, json } => diarize(&config, &config_path, &file, json),
         Command::Serve => serve(config, &config_path),
         Command::Stop => stop(&config_path),
@@ -1602,7 +1610,13 @@ fn load_engine(
 }
 
 /// Transcribe a file, with the user dictionary applied to the result.
-fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> Result<()> {
+fn transcribe(
+    config: &Config,
+    config_path: &Path,
+    file: &Path,
+    json: bool,
+    tolerance: Option<f32>,
+) -> Result<()> {
     if !config.stt.enabled {
         bail!("speech to text is off in the config (stt.enabled)");
     }
@@ -1646,7 +1660,17 @@ fn transcribe(config: &Config, config_path: &Path, file: &Path, json: bool) -> R
     let dict_text = std::fs::read_to_string(&dict_path)
         .with_context(|| format!("reading {}", dict_path.display()))?;
     let dictionary = CmuDict::parse(&dict_text);
-    let text = arioso_g2p::reverse::correct(&user, &dictionary, &transcript.text);
+    let tolerance = tolerance.unwrap_or(config.stt.reverse_tolerance);
+    if !(0.0..=1.0).contains(&tolerance) {
+        bail!("--tolerance expects 0.0 to 1.0, got {tolerance}");
+    }
+    if tolerance > arioso_config::LOOSE_REVERSE_TOLERANCE {
+        eprintln!(
+            "warning: a tolerance of {tolerance} matches forms loosely enough to rewrite ordinary words"
+        );
+    }
+    let text = arioso_g2p::reverse::ReverseIndex::build_with(&user, &dictionary, tolerance)
+        .apply(&dictionary, &transcript.text);
 
     if json {
         let seconds = if rate == 0 {

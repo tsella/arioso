@@ -888,6 +888,30 @@ Order of operations, both directions:
 - F14.7 Speech to text uses the same file in reverse: every `spoken` form and every
   `phonemes` entry maps back to `term`, so a transcript containing `ah ree oh so`
   becomes `arioso`. Correction applies to finals, not to provisional partials.
+- F14.7a How near a transcript must be is `stt.reverse_tolerance`, a fraction of the
+  form's phonemes, default `0.4`. Zero turns approximation off: only a form's own
+  pronunciation matches. A value outside 0.0 to 1.0 is refused by name; above 0.6 the server
+  warns, because at that width a correction is a coin toss. The value is part of the index
+  rather than an argument to it, so a config change rebuilds the index on the next transcript
+  and needs no restart. `arioso transcribe --tolerance` overrides it for one run.
+- F14.7b The default is measured, not chosen. Six transcripts a real recogniser produced,
+  corrected against a four-entry dictionary, and one clean paragraph of ordinary English, at
+  every setting:
+
+  | tolerance | corrected | clean paragraph |
+  | --- | --- | --- |
+  | 0 | 1 of 6 | unchanged |
+  | 0.2 | 5 of 6 | unchanged |
+  | 0.3 | 6 of 6 | unchanged |
+  | **0.4** | **6 of 6** | **unchanged** |
+  | 0.5 | 6 of 6 | `nothing Sell A is on the list` |
+  | 0.6 | 6 of 6 | `nothing Sell A is on the list` |
+  | 0.8 | 6 of 6 | five rewrites, `Tom Sella is fine Koober Netties nothing...` |
+
+  The safe band is 0.3 to 0.4: below it a real transcript is missed, above it ordinary words
+  are rewritten. 0.4 is the top of the band and the last setting that leaves the clean
+  paragraph alone. The measurement is `tolerance_table` in `reverse.rs`, ignored by default
+  because it needs the real `cmudict.dict`.
 - F14.8 Matching covers single words and multi-word phrases, longest match first,
   case-insensitive by default, with `case_sensitive` per entry. Matching is on word
   boundaries, so `cat` does not match inside `category`.
@@ -976,9 +1000,10 @@ synthesized by arioso and read back by whisper tiny.en:
 
 So the reverse map only fires when the transcript matches the written form letter for
 letter, which on this evidence is rare. The fix, now built, compares sounds: both sides
-are pronounced with CMUdict and the F15 rules, and a phoneme edit distance within 40 % of
-the form's length counts as the same words. The closest match wins its span, and the
-longer span wins a tie.
+are pronounced with CMUdict and the F15 rules, and a phoneme edit distance within a fraction
+of the form's length counts as the same words. That fraction is `stt.reverse_tolerance`,
+0.4 by default and 0 when the caller wants exact matching only (F14.7a, and F14.7b for the
+table that chose 0.4). The closest match wins its span, and the longer span wins a tie.
 
 Re-measured after the change, same recordings, with whisper base as the default model:
 

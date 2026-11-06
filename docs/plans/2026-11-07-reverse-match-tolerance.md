@@ -117,6 +117,26 @@ measured only what it wanted to find.
 
 Each step is a commit with the gate: fmt, clippy, tests, docs.
 
+## What happened
+
+Executed as written. `stt.reverse_tolerance` is a setting, zero is exact, the index is built
+with it and rebuilt when it changes, `arioso transcribe --tolerance` overrides it for one run,
+and `reverse.rs` has eight tests where it had none. The measurement is F14.7b in `PRD.md`:
+
+| tolerance | corrected | clean paragraph |
+| --- | --- | --- |
+| 0 | 1 of 6 | unchanged |
+| 0.2 | 5 of 6 | unchanged |
+| 0.3 | 6 of 6 | unchanged |
+| **0.4** | **6 of 6** | **unchanged** |
+| 0.5 | 6 of 6 | `nothing Sell A is on the list` |
+| 0.8 | 6 of 6 | five rewrites |
+
+The default did not move. 0.4 is the last setting that corrects every fixture without
+rewriting the clean paragraph, and 0.5 is where the first false positive appears — one step
+below the shipped number rather than several, which is tighter than the plan assumed and worth
+knowing before anyone argues for raising it.
+
 ## What this does not do
 
 - No per-entry tolerance. One number for the dictionary, because the reason to raise it is the
