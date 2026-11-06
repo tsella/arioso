@@ -10,6 +10,7 @@ use arioso_g2p::reverse::ReverseIndex;
 use arioso_models::{Kind, Manifest, ModelSpec, models_dir};
 use arioso_tts_kokoro::{KokoroError, KokoroVoice};
 use arioso_tts_piper::{PiperError, PiperVoice, wav};
+use arioso_tts_supertonic::{SupertonicError, Voice as SupertonicVoice};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -809,7 +810,9 @@ impl AppState {
                     Swapped::Refused
                 }
             },
-            Some(Voice::Piper(_)) => Swapped::OtherEngine,
+            // A Supertonic style is a file chosen at load, so a new one is a reload, the same
+            // as a change of engine.
+            Some(Voice::Piper(_) | Voice::Supertonic(_)) => Swapped::OtherEngine,
             None => Swapped::Empty,
         }
     }
@@ -960,6 +963,34 @@ impl AppState {
                 other => TtsFailure::Engine(other.to_string()),
             })?;
             Ok(Voice::Kokoro(loaded))
+        } else if config.tts.engine == "supertonic" {
+            // The style is a file in the entry, named after the voice, so the config's voice
+            // selects a file rather than a row inside one.
+            let voice = config.voice_name().to_string();
+            let voice = Self::style_for(&voice, &spec.id, &config.tts.engine).unwrap_or(&voice);
+            let file = |suffix: &str| self.file_of(spec, suffix).map_err(TtsFailure::Engine);
+            let files = arioso_tts_supertonic::Files {
+                text_encoder: &file("text-encoder.onnx")?,
+                duration_predictor: &file("duration-predictor.onnx")?,
+                vector_estimator: &file("vector-estimator.onnx")?,
+                vocoder: &file("vocoder.onnx")?,
+                config: &file("tts.json")?,
+                indexer: &file("unicode-indexer.json")?,
+                style: &file(&format!("style-{voice}.json"))?,
+            };
+            let loaded = SupertonicVoice::load_with_threads(
+                &files,
+                &config.tts.language,
+                config.tts_threads(),
+            )
+            .map_err(|error| match error {
+                // A language the model does not speak is a config value, not a broken model.
+                SupertonicError::Config(detail) if detail.contains("language this model") => {
+                    TtsFailure::Client(detail)
+                }
+                other => TtsFailure::Engine(other.to_string()),
+            })?;
+            Ok(Voice::Supertonic(loaded))
         } else {
             let onnx = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
             let symbols = self
@@ -1506,10 +1537,10 @@ impl AppState {
                 .check_speaker(sid)
                 .map_err(|error| SidProblem::NoSuchSpeaker(error.to_string())),
             // A Kokoro voice style is one speaker, and the style is the whole choice.
-            Some(Voice::Kokoro(_)) if sid == 0 => Ok(()),
-            Some(Voice::Kokoro(_)) => Err(SidProblem::NoSuchSpeaker(format!(
-                "this voice has a single speaker, so speaker {sid} does not exist"
-            ))),
+            Some(Voice::Kokoro(_) | Voice::Supertonic(_)) if sid == 0 => Ok(()),
+            Some(Voice::Kokoro(_) | Voice::Supertonic(_)) => Err(SidProblem::NoSuchSpeaker(
+                format!("this voice has a single speaker, so speaker {sid} does not exist"),
+            )),
             None => Err(SidProblem::Unavailable("voice failed to load".to_string())),
         }
     }
@@ -1570,6 +1601,18 @@ impl AppState {
                         &user.dictionary,
                         arioso_tts_kokoro::RenderOptions { speed, normalize },
                         |audio, rate| sink(audio, rate).map_err(KokoroError::Consumer),
+                    )
+                    .map_err(|error| error.to_string())?;
+                (report.guessed, report.missing, report.unusable)
+            }
+            Voice::Supertonic(voice) => {
+                let report = voice
+                    .render(
+                        text,
+                        &self.dictionary,
+                        &user.dictionary,
+                        arioso_tts_supertonic::RenderOptions { speed },
+                        |audio, rate| sink(audio, rate).map_err(|_| SupertonicError::Consumer),
                     )
                     .map_err(|error| error.to_string())?;
                 (report.guessed, report.missing, report.unusable)
@@ -1656,7 +1699,14 @@ impl AppState {
         };
         // Each engine reports in its own type, and the caller wants the line, so the
         // reports are dropped where they are made rather than unified.
+        if matches!(voice, Voice::Supertonic(_)) {
+            // There is no phoneme line to show: the model reads characters. Answering with an
+            // empty string would read as "this text has no phonemes", which is a different
+            // and false statement.
+            return Err("supertonic speaks characters, so it has no phoneme line".to_string());
+        }
         let symbols = match voice {
+            Voice::Supertonic(_) => unreachable!("refused above"),
             Voice::Piper(voice) => {
                 voice
                     .phonemes_for(
@@ -1728,6 +1778,9 @@ impl AppState {
                     sink(audio, rate).map_err(arioso_tts_kokoro::KokoroError::Consumer)
                 })
                 .map_err(|error| error.to_string()),
+            // The symbol path exists for callers that already have phonemes. Supertonic has no
+            // such input, so it is refused rather than spoken as a list of letter names.
+            Voice::Supertonic(_) => Err("supertonic renders text, not phoneme symbols".to_string()),
         }
     }
 
@@ -1826,6 +1879,8 @@ enum Voice {
     Piper(PiperVoice),
     /// Kokoro: one model and a voice style.
     Kokoro(KokoroVoice),
+    /// Supertonic: four graphs and a voice style, characters rather than phonemes.
+    Supertonic(SupertonicVoice),
 }
 
 impl Voice {
@@ -1834,6 +1889,7 @@ impl Voice {
         match self {
             Self::Piper(_) => "piper",
             Self::Kokoro(_) => "kokoro",
+            Self::Supertonic(_) => "supertonic",
         }
     }
 }

@@ -43,6 +43,8 @@ Working today:
 - Text normalization: currency, ordinals, years, times, percentages, abbreviations
 - Voice activity detection: an energy detector that needs no model, and Silero on the
   sherpa-onnx runtime (`vad.engine`, with the model fetched as `silero-vad`)
+- Three text to speech engines: Piper (VITS over phonemes), Kokoro (54 styles, IPA), and
+  Supertonic (four ONNX graphs, characters, 31 languages, 44.1 kHz)
 - Speaker diarization, offline over a whole file: `arioso diarize recording.wav` or
   `POST /v1/diarize` labels every stretch of speech with a speaker number
 - A user dictionary for names and jargon, reloaded without a restart
@@ -56,7 +58,7 @@ Working today:
   `aarch64-linux-android` in CI
 - A nightly fuzz job over the config parser, the dictionary, the manifest and the WAV reader,
   and a build of every fuzz target on each pull request
-- 488 tests
+- 508 tests
 
 Not built yet, with what each one needs in [docs/roadmap.md](docs/roadmap.md):
 

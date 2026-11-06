@@ -307,6 +307,14 @@ ready`, or `failed { reason }`.
   written by the previous schema are migrated: a version 1 file that still holds exactly
   the old default is treated as having named nothing, because that value was never a
   choice, and any other voice is kept.
+- F3.3.3 A third engine, `supertonic`: four ONNX graphs, characters rather than phonemes, 31
+  languages, 44.1 kHz, one voice style per file. One engine is loaded at a time and a patch
+  drops the loaded voice and loads the other on the next request. Supertonic ignores the
+  pronunciation dictionary, because a spoken form written as phonemes is not a sequence of
+  characters; the phoneme routes refuse it by name rather than answering an empty line.
+- F3.3.4 The language is `tts.language`, default `en`. Only Supertonic reads it: a Piper or
+  Kokoro voice already is one language, and a field that silently did nothing for two of the
+  three engines would be worse than a field that says which one it is for.
 - F3.4 Controls: voice, speed (0.5 to 2.0), speaker (`sid`), and format (`wav`, `pcm`). `pcm` is raw
   16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
   `opus` are not implemented: the config refuses them rather than answering with WAV bytes

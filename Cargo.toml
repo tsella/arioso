@@ -19,6 +19,7 @@ arioso-stt-sherpa = { path = "crates/arioso-stt-sherpa" }
 arioso-vad = { path = "crates/arioso-vad" }
 arioso-tts-piper = { path = "crates/arioso-tts-piper" }
 arioso-tts-kokoro = { path = "crates/arioso-tts-kokoro" }
+arioso-tts-supertonic = { path = "crates/arioso-tts-supertonic" }
 arioso-core = { path = "crates/arioso-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }

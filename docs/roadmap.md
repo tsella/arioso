@@ -5,14 +5,19 @@ where one exists, the measurement that decided that.
 
 ## Engines
 
-- **BlueTTS 2.5 as a third engine.** MIT engine, LibriTTS voice `adam`, 269 MiB, Hebrew,
-  English, Spanish, Italian and German. Measured outside this repository, from the upstream
-  Python package: round trip 4.88% against 5.88% for the shipped Piper voice, RTF 0.600
-  against 0.089, memory 1.5 GiB against 290 MiB. It is more intelligible by about a point at
-  6.7 times the synthesis time. The engine is Python and this project is Rust, so adopting it
-  means a sidecar process and a protocol of its own, not a new branch in the current one.
-  Numbers and the full comparison: `MODELS.md`, and
-  `docs/plans/2026-11-02-tts-engine-comparison.md`.
+- **BlueTTS as a sidecar, not an engine.** The acoustic path is six ONNX graphs with standard
+  operators, and a driver over `ort` reproduced the Python package's waveform bit for bit. What
+  does not port is the front end: text to phonemes is espeak-ng (GPL-3.0) for Latin scripts and
+  a second ONNX graph plus roughly a thousand lines of decoding for Hebrew, behind a 646-line
+  Python normaliser. A GPL phonemiser linked into a shipped binary is a licence decision
+  before it is an engineering one.
+
+  The shape that works is a sidecar scoped to one function — text in, IPA out — so the GPL
+  stays in its own process and the graphs stay here. What it needs before it is worth writing:
+  a decision on shipping a GPL sidecar at all, and a measurement of how much of BlueTTS's
+  4.88 % round trip survives our own phonemisation of the same text. Numbers and the full
+  comparison: `MODELS.md`, `docs/plans/2026-11-02-tts-engine-comparison.md`, and
+  `docs/plans/2026-11-07-engines-threads-clauses.md`.
 
 ## Speech
 

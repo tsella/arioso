@@ -874,9 +874,10 @@ fn say(config: &Config, config_path: &Path, request: SayRequest<'_>) -> Result<(
     let (dictionary, user) = dictionaries(config, config_path, request.dict.as_deref())?;
     match engine {
         "kokoro" => say_kokoro(config, &request, &voice, &dictionary, &user),
+        "supertonic" => say_supertonic(config, &request, &voice, &dictionary, &user),
         "piper" => say_piper(config, &request, &voice, &dictionary, &user),
         other => bail!(
-            "tts.engine {other} is not built into this binary; the engines here are piper, kokoro"
+            "tts.engine {other} is not built into this binary; the engines here are piper, kokoro, supertonic"
         ),
     }
 }
@@ -1046,6 +1047,66 @@ fn say_kokoro(
     }
     write_output(request.out.clone(), &pcm, voice.sample_rate())?;
     report_problems(&report.missing, &report.guessed, &report.unusable);
+    Ok(())
+}
+
+/// Speak through Supertonic: four graphs and a style file, characters rather than phonemes.
+fn say_supertonic(
+    config: &Config,
+    request: &SayRequest<'_>,
+    voice: &str,
+    dictionary: &CmuDict,
+    user: &arioso_core::UserDictionary,
+) -> Result<()> {
+    let manifest = load_manifest(config)?;
+    let dir = models_dir(config);
+    let model = manifest
+        .models
+        .iter()
+        .find(|m| m.kind == arioso_models::Kind::Tts && m.engine == "supertonic")
+        .with_context(
+            || "no supertonic model in the catalog; run `arioso models download supertonic-3`",
+        )?;
+    let file = |suffix: &str| {
+        model
+            .files
+            .iter()
+            .find(|f| f.name.ends_with(suffix))
+            .map(|f| dir.join(&f.name))
+            .with_context(|| format!("model {} has no {suffix} file", model.id))
+    };
+    let files = arioso_tts_supertonic::Files {
+        text_encoder: &file("text-encoder.onnx")?,
+        duration_predictor: &file("duration-predictor.onnx")?,
+        vector_estimator: &file("vector-estimator.onnx")?,
+        vocoder: &file("vocoder.onnx")?,
+        config: &file("tts.json")?,
+        indexer: &file("unicode-indexer.json")?,
+        style: &file(&format!("style-{voice}.json"))?,
+    };
+    let mut engine = arioso_tts_supertonic::Voice::load_with_threads(
+        &files,
+        &config.tts.language,
+        config.tts_threads(),
+    )?;
+    let mut pcm: Vec<u8> = Vec::new();
+    engine.render(
+        request.text,
+        dictionary,
+        user,
+        arioso_tts_supertonic::RenderOptions {
+            speed: config.tts.speed,
+        },
+        |audio, _| {
+            arioso_tts_piper::wav::write_pcm_s16le(audio, &mut pcm);
+            Ok(())
+        },
+    )?;
+
+    if pcm.is_empty() {
+        bail!("nothing to say: the model predicted no audio for this text");
+    }
+    write_output(request.out.clone(), &pcm, engine.sample_rate())?;
     Ok(())
 }
 

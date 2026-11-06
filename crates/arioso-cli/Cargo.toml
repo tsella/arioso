@@ -21,6 +21,7 @@ arioso-server.workspace = true
 arioso-stt-sherpa.workspace = true
 arioso-tts-piper.workspace = true
 arioso-tts-kokoro.workspace = true
+arioso-tts-supertonic.workspace = true
 arioso-models.workspace = true
 clap.workspace = true
 serde_json.workspace = true

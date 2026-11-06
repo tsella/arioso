@@ -29,6 +29,7 @@
     "engine": "piper",
     "voice": null,
     "speed": 1.0,
+    "language": "en",
     "threads": 0,
     "sid": 0,
     "format": "wav",

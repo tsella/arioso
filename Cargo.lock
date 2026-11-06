@@ -166,6 +166,7 @@ dependencies = [
  "arioso-stt-sherpa",
  "arioso-tts-kokoro",
  "arioso-tts-piper",
+ "arioso-tts-supertonic",
  "axum",
  "axum-server",
  "clap",
@@ -242,6 +243,7 @@ dependencies = [
  "arioso-stt-sherpa",
  "arioso-tts-kokoro",
  "arioso-tts-piper",
+ "arioso-tts-supertonic",
  "arioso-vad",
  "axum",
  "axum-server",
@@ -317,6 +319,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "arioso-tts-supertonic"
+version = "0.1.7"
+dependencies = [
+ "arioso-core",
+ "arioso-g2p",
+ "ort",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4196,6 +4211,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4588,7 +4612,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

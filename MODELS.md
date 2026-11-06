@@ -82,7 +82,8 @@ catalog says what a voice is, this file says what it scored.
 | `piper-en_US-joe-medium`, the shipped default | en-US | CC0-1.0 voice, GPL-3.0 engine | 60 MiB | 5.88% | **0.089** | 290 MiB |
 | `piper-en_US-lessac-medium` | en-US | Blizzard-2013 voice, research only | 60 MiB | not scored | 0.109 | 368 MB |
 | `kokoro-82m`, voice `af_heart` | en-US, en-GB, es, fr, hi, it, ja, pt, zh | Apache-2.0 | 338 MiB | not scored | 1.76 | not measured |
-| BlueTTS 2.5, voice `adam` | he, en, es, it, de | MIT engine, LibriTTS voice | 269 MiB | **4.88%** | 0.600 | 1.5 GiB |
+| `supertonic-3`, voice `M1` | 31 languages | OpenRAIL-M weights, MIT code | 383 MiB | not scored | 0.97 | 502 MB |
+| BlueTTS 2.5, voice `adam` | he, en, es, it, de | MIT weights, **GPL-3.0 front end** | 269 MiB | **4.88%** | 0.600 | 1.5 GiB |
 
 The piper row is the project default and was measured through this repository's own server.
 The BlueTTS row was measured outside it, from the upstream Python package, because that
@@ -109,6 +110,28 @@ and a table row would suggest otherwise.
 BlueTTS is the more intelligible voice by about a point and costs 6.7 times the synthesis
 time and five times the memory. The vendor calls it the fastest open source TTS; on four CPU
 cores it is the slower of the two.
+
+Supertonic is the fourth engine and the only one that reads characters rather than phonemes:
+31 languages, no dictionary, no letter-to-sound rules, and a 65,536-entry table of code points
+instead. Four graphs, 398,075,273 bytes, 99,218,660 parameters, 44.1 kHz out. The RTF of 0.97
+is marginal — a 10.7 s render took 15.0 s wall and a 1.41 s render 6.0 s, so the 5 s graph
+load is subtracted — measured on four cores at eight flow-matching steps. Five steps is the
+SDK default and costs about 40 % less; eight is what this engine ships, and the constant is in
+`arioso-tts-supertonic` for anyone who wants to argue with it.
+
+**Why BlueTTS is not in the binary.** Its acoustic path is expressible in Rust — six ONNX
+graphs, standard operators, batch fixed at one, and a driver reproducing the Python package's
+waveform bit for bit — but text to phonemes is not. Latin scripts go through espeak-ng, which
+is GPL-3.0, and the normaliser ahead of it is 646 lines of Python; Hebrew needs a second ONNX
+graph plus roughly a thousand lines of decoding. Linking a GPL phonemiser into a shipped
+binary is a licence decision before it is an engineering one, so BlueTTS stays a measured
+alternative rather than a fourth engine. A sidecar scoped to text to IPA is the shape that
+would change that, and it is on the roadmap.
+
+The four licences are not interchangeable. Piper's voices are CC0 except `lessac`; the Piper
+engine itself is GPL-3.0, which is why this project links it as a library and ships the
+engine's own licence beside it. Kokoro is Apache-2.0. Supertonic's weights are OpenRAIL-M —
+usable commercially, with use restrictions the licence spells out — and its code is MIT.
 
 The Kokoro row is not comparable with the other two yet. Its RTF is the marginal cost of a
 6.8 second sentence measured by running one and then four of it through `arioso say

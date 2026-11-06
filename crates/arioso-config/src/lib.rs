@@ -58,7 +58,7 @@ fn cores() -> u32 {
 /// A patch to the running server drops the loaded voice and loads the other engine on the
 /// next request; editing the config file needs a restart. The list is here so the refusal
 /// names both, not so a config can use both.
-pub const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
+pub const TTS_ENGINES: [&str; 3] = ["piper", "kokoro", "supertonic"];
 
 /// The Piper voice a config starts with.
 ///
@@ -69,6 +69,11 @@ const PIPER_DEFAULT_VOICE: &str = "en_US-joe-medium";
 
 /// The Kokoro style a config is given when it changes to that engine.
 const KOKORO_DEFAULT_VOICE: &str = "af_heart";
+
+/// The Supertonic voice a config is given when it changes to that engine.
+///
+/// The catalog entry ships ten; `M1` is the one a default speaks with.
+const SUPERTONIC_DEFAULT_VOICE: &str = "M1";
 
 /// The voice an engine speaks with when the config names none it can say.
 ///
@@ -81,6 +86,7 @@ pub fn default_voice(engine: &str) -> Option<&'static str> {
     match engine {
         "piper" => Some(PIPER_DEFAULT_VOICE),
         "kokoro" => Some(KOKORO_DEFAULT_VOICE),
+        "supertonic" => Some(SUPERTONIC_DEFAULT_VOICE),
         _ => None,
     }
 }
@@ -302,6 +308,11 @@ pub struct Tts {
     pub voice: Option<String>,
     /// Speaking rate multiplier.
     pub speed: f32,
+    /// Language the text is spoken as, for an engine that needs to be told.
+    ///
+    /// Supertonic is trained on 31 languages and takes a tag; Piper and Kokoro take a voice
+    /// that already is one language, and ignore this.
+    pub language: String,
     /// Intra-op threads for synthesis. `0` means decide from the machine.
     ///
     /// Configurable because the right number is a property of the machine and of what else is
@@ -338,6 +349,7 @@ impl Default for Tts {
             engine: "piper".into(),
             voice: None,
             speed: 1.0,
+            language: "en".into(),
             threads: 0,
             sid: 0,
             format: "wav".into(),
