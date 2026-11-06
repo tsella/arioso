@@ -15,7 +15,8 @@ It runs offline. No hosted service is called at run time. A downloaded model is 
 network traffic, and only when someone asks for it.
 
 What it is not: a cloud service, a client for a hosted TTS vendor, or a GUI application.
-Text to speech uses Piper voices. Speech to text uses sherpa-onnx with Whisper models.
+Text to speech uses one of three engines: Piper voices, Kokoro styles, or Supertonic. Speech
+to text uses sherpa-onnx with Whisper models.
 Both engines run in process.
 
 ## Quickstart
@@ -45,11 +46,12 @@ platforms use their own system frameworks and need nothing.
 | `arioso-g2p` | grapheme to phoneme: the dictionary, then the letter-to-sound rules |
 | `arioso-tts-piper` | the Piper engine, synthesis, WAV output |
 | `arioso-tts-kokoro` | the Kokoro engine: one graph, a style archive of 54 voices |
+| `arioso-tts-supertonic` | the Supertonic engine: four graphs, characters rather than phonemes, ten voices |
 | `arioso-stt-sherpa` | the sherpa-onnx engine, transcription |
 | `arioso-vad` | voice activity detection for streaming |
 | `arioso-server` | the HTTP and WebSocket routes, auth, TLS, limits |
 | `arioso-abi` | the C surface: sixteen exported functions, and the header generated from them |
-| `arioso-speaks` | the terminal front end: voices, phonemes, playback, saving |
+| `arioso-speaks` | the terminal front end: voices, phonemes, playback, saving. Piper and Kokoro only: the pane is a phoneme editor, and Supertonic has no phonemes to edit |
 | `arioso-cli` | the binary: commands, sidecar, PID files, logging setup |
 
 Dependency direction is downward: `arioso-cli`, `arioso-server` and `arioso-abi` at the
@@ -112,7 +114,9 @@ Loopback by default. `GET /healthz` needs no token; everything else follows
 | POST | `/v1/models/{id}/warm` | load it before the first request |
 | DELETE | `/v1/models/{id}` | remove its files |
 | POST | `/v1/tts` | text in, audio out |
+| POST | `/v1/phonemes` | text in, the phoneme line out, no audio |
 | POST | `/v1/stt` | audio in, text out |
+| POST | `/v1/diarize` | a whole file in, who spoke when |
 | WS | `/v1/tts/ws`, `/v1/stt/ws` | streaming |
 | POST | `/v1/stop`, `/v1/abort` | graceful stop, immediate stop |
 | GET | `/openapi.json`, `/docs` | the document, when `server.docs` |
