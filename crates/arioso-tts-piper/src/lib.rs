@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use arioso_core::{Entry, Piece, UserDictionary};
-use arioso_core::{chunk_text, sentences};
+use arioso_core::{chunk_text, clauses};
 use arioso_g2p::{CmuDict, PhonemeMap};
 use ort::session::Session;
 use ort::value::Tensor;
@@ -60,6 +60,14 @@ pub enum PiperError {
 
 /// Longest piece of text handed to the model, in characters.
 pub const SYNTHESIS_CHUNK: usize = 300;
+
+/// Threads used when the caller does not say.
+///
+/// Every core, which is what this crate did before it took the number: one voice speaks one
+/// request at a time, so the graph is the only work in flight.
+fn default_threads() -> u32 {
+    std::thread::available_parallelism().map_or(1, |count| u32::try_from(count.get()).unwrap_or(1))
+}
 
 /// How a render is done.
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +171,22 @@ impl PiperVoice {
     /// Returns [`PiperError`] when either file cannot be read or parsed, the
     /// phoneme table is unusable, or ONNX Runtime rejects the model.
     pub fn load(model: &Path, config: &Path) -> Result<Self, PiperError> {
+        Self::load_with_threads(model, config, default_threads())
+    }
+
+    /// Load with an explicit intra-op thread count.
+    ///
+    /// The count is a property of the machine and of what else is running in the process, so
+    /// the caller decides it rather than the crate reading the core count behind its back.
+    ///
+    /// # Errors
+    ///
+    /// As [`PiperVoice::load`].
+    pub fn load_with_threads(
+        model: &Path,
+        config: &Path,
+        threads: u32,
+    ) -> Result<Self, PiperError> {
         let text = std::fs::read_to_string(config).map_err(|source| PiperError::Io {
             path: config.to_path_buf(),
             source,
@@ -199,7 +223,7 @@ impl PiperVoice {
         // core: one voice synthesizes one request at a time, so the graph is the only work
         // in flight. Halving it cost a fifth to a quarter of the synthesis time on a four
         // core machine.
-        let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
+        let threads = usize::try_from(threads).unwrap_or(1).max(1);
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
@@ -267,7 +291,7 @@ impl PiperVoice {
 
     /// Speak `text`, handing each piece of audio to `sink` as it is ready.
     ///
-    /// The text is split into sentences, then capped by [`SYNTHESIS_CHUNK`].
+    /// The text is split into clauses, then capped by [`SYNTHESIS_CHUNK`].
     /// Words missing from `dictionary` are skipped and returned, so the caller
     /// can report them. One implementation serves both the CLI and the server;
     /// splitting it would let their output drift apart.
@@ -288,8 +312,11 @@ impl PiperVoice {
         let rate = self.sample_rate();
         let mut report = RenderReport::default();
 
-        for sentence in sentences(text) {
-            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+        // Clauses, not sentences: the first audio leaves after the first comma rather than
+        // after the first full stop, which on a long sentence is the whole latency. Each
+        // clause is still capped by SYNTHESIS_CHUNK, so nothing becomes unbounded.
+        for clause in clauses(text) {
+            for chunk in chunk_text(clause, SYNTHESIS_CHUNK) {
                 let symbols = self.chunk_symbols(chunk, dictionary, user, options, &mut report);
                 if symbols.is_empty() {
                     continue;
@@ -315,8 +342,11 @@ impl PiperVoice {
     ) -> (Vec<&'static str>, RenderReport) {
         let mut report = RenderReport::default();
         let mut out: Vec<&'static str> = Vec::new();
-        for sentence in sentences(text) {
-            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+        // Clauses, not sentences: the first audio leaves after the first comma rather than
+        // after the first full stop, which on a long sentence is the whole latency. Each
+        // clause is still capped by SYNTHESIS_CHUNK, so nothing becomes unbounded.
+        for clause in clauses(text) {
+            for chunk in chunk_text(clause, SYNTHESIS_CHUNK) {
                 let symbols = self.chunk_symbols(chunk, dictionary, user, options, &mut report);
                 if symbols.is_empty() {
                     continue;

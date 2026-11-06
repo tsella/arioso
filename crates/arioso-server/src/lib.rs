@@ -946,22 +946,26 @@ impl AppState {
                 );
                 voice = style.to_owned();
             }
-            let loaded =
-                KokoroVoice::load(&model, &voices, &symbols, &voice).map_err(
-                    |error| match error {
-                        // The archive does not hold the configured style. The model is fine;
-                        // the config names something that is not there.
-                        KokoroError::UnknownVoice { .. } => TtsFailure::Client(error.to_string()),
-                        other => TtsFailure::Engine(other.to_string()),
-                    },
-                )?;
+            let loaded = KokoroVoice::load_with_threads(
+                &model,
+                &voices,
+                &symbols,
+                &voice,
+                config.tts_threads(),
+            )
+            .map_err(|error| match error {
+                // The archive does not hold the configured style. The model is fine;
+                // the config names something that is not there.
+                KokoroError::UnknownVoice { .. } => TtsFailure::Client(error.to_string()),
+                other => TtsFailure::Engine(other.to_string()),
+            })?;
             Ok(Voice::Kokoro(loaded))
         } else {
             let onnx = self.file_of(spec, ".onnx").map_err(TtsFailure::Engine)?;
             let symbols = self
                 .file_of(spec, ".onnx.json")
                 .map_err(TtsFailure::Engine)?;
-            let loaded = PiperVoice::load(&onnx, &symbols)
+            let loaded = PiperVoice::load_with_threads(&onnx, &symbols, config.tts_threads())
                 .map_err(|error| TtsFailure::Engine(error.to_string()))?;
             Ok(Voice::Piper(loaded))
         }
@@ -1329,8 +1333,7 @@ impl AppState {
         } else {
             Some(configured.as_str())
         };
-        let threads =
-            std::thread::available_parallelism().map_or(4, |count| (count.get() / 2).clamp(1, 8));
+        let threads = usize::try_from(config.stt_threads()).unwrap_or(1);
         let paths: Vec<std::path::PathBuf> = spec
             .files
             .iter()

@@ -974,7 +974,7 @@ fn say_piper(
     let onnx = file(".onnx")?;
     let voice_config = file(".onnx.json")?;
 
-    let mut voice = PiperVoice::load(&onnx, &voice_config)?;
+    let mut voice = PiperVoice::load_with_threads(&onnx, &voice_config, config.tts_threads())?;
     // Converted as it arrives: holding the audio as floats and again as bytes costs six
     // bytes a sample for a document that can run for minutes.
     let mut pcm: Vec<u8> = Vec::new();
@@ -1027,7 +1027,8 @@ fn say_kokoro(
     let voices = file(".bin")?;
     let symbols = file("config.json")?;
 
-    let mut voice = KokoroVoice::load(&onnx, &voices, &symbols, voice)?;
+    let mut voice =
+        KokoroVoice::load_with_threads(&onnx, &voices, &symbols, voice, config.tts_threads())?;
     let mut pcm: Vec<u8> = Vec::new();
     let options = arioso_tts_kokoro::RenderOptions {
         speed: config.tts.speed,

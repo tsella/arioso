@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use arioso_core::{Entry, Piece, TtsEngine, UserDictionary};
-use arioso_core::{chunk_text, sentences};
+use arioso_core::{chunk_text, clauses};
 use arioso_g2p::CmuDict;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -140,6 +140,13 @@ impl std::fmt::Debug for KokoroVoice {
     }
 }
 
+/// Threads used when the caller does not say.
+///
+/// Every core, which is what this crate did before it took the number.
+fn default_threads() -> u32 {
+    std::thread::available_parallelism().map_or(1, |count| u32::try_from(count.get()).unwrap_or(1))
+}
+
 impl KokoroVoice {
     /// Load the model, the style archive and the symbol table, and select a voice.
     ///
@@ -153,6 +160,21 @@ impl KokoroVoice {
         config: &Path,
         voice: &str,
     ) -> Result<Self, KokoroError> {
+        Self::load_with_threads(model, voices, config, voice, default_threads())
+    }
+
+    /// Load with an explicit intra-op thread count.
+    ///
+    /// # Errors
+    ///
+    /// As [`KokoroVoice::load`].
+    pub fn load_with_threads(
+        model: &Path,
+        voices: &Path,
+        config: &Path,
+        voice: &str,
+        threads: u32,
+    ) -> Result<Self, KokoroError> {
         let text = std::fs::read_to_string(config).map_err(|source| KokoroError::Io {
             path: config.to_path_buf(),
             source,
@@ -161,7 +183,7 @@ impl KokoroVoice {
         let archive = VoiceFile::open(voices)?;
         let style = archive.style(voice)?;
 
-        let threads = std::thread::available_parallelism().map_or(1, |count| count.get());
+        let threads = usize::try_from(threads).unwrap_or(1).max(1);
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
@@ -267,8 +289,11 @@ impl KokoroVoice {
     ) -> (Vec<&'static str>, RenderReport) {
         let mut report = RenderReport::default();
         let mut out: Vec<&'static str> = Vec::new();
-        for sentence in sentences(text) {
-            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+        // Clauses, not sentences: the first audio leaves after the first comma rather than
+        // after the first full stop, which on a long sentence is the whole latency. Each
+        // clause is still capped by SYNTHESIS_CHUNK, so nothing becomes unbounded.
+        for clause in clauses(text) {
+            for chunk in chunk_text(clause, SYNTHESIS_CHUNK) {
                 let symbols = self.symbols(chunk, dictionary, user, options, &mut report);
                 if symbols.is_empty() {
                     continue;
@@ -342,7 +367,7 @@ impl KokoroVoice {
 
     /// Speak `text`, handing each piece of audio to `sink` as it is ready.
     ///
-    /// The text is split into sentences, then capped by [`SYNTHESIS_CHUNK`]; the tokens
+    /// The text is split into clauses, then capped by [`SYNTHESIS_CHUNK`]; the tokens
     /// of a chunk are split again at a word boundary so no run is longer than
     /// [`MAX_TOKENS`]. Words missing from `dictionary` are reported, not skipped.
     ///
@@ -361,8 +386,11 @@ impl KokoroVoice {
         let mut report = RenderReport::default();
         let space = self.vocab.id(' ').map(i64::from);
 
-        for sentence in sentences(text) {
-            for chunk in chunk_text(sentence, SYNTHESIS_CHUNK) {
+        // Clauses, not sentences: the first audio leaves after the first comma rather than
+        // after the first full stop, which on a long sentence is the whole latency. Each
+        // clause is still capped by SYNTHESIS_CHUNK, so nothing becomes unbounded.
+        for clause in clauses(text) {
+            for chunk in chunk_text(clause, SYNTHESIS_CHUNK) {
                 let symbols = self.symbols(chunk, dictionary, user, options, &mut report);
                 if symbols.is_empty() {
                     continue;

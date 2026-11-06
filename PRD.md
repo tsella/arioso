@@ -311,8 +311,17 @@ ready`, or `failed { reason }`.
   16-bit samples with the rate in the content type (`audio/pcm;rate=22050`). `mp3` and
   `opus` are not implemented: the config refuses them rather than answering with WAV bytes
   labelled as what was asked for.
-- F3.5 Long text is split at sentence boundaries and synthesized incrementally, so
-  first audio arrives before the last sentence is computed.
+- F3.5 Long text is split at **clause** boundaries and synthesized incrementally, so first
+  audio arrives before the last clause is computed. A clause ends at a comma, semicolon,
+  colon or dash, and at a sentence terminator; pieces shorter than `CLAUSE_FLOOR` (60
+  characters) are joined to the next, because every cut is a synthesis call and a pause the
+  voice did not intend. `1,000` and `12:30` are values, not pauses, and are not cut.
+- F3.5a Each engine is told how many intra-op threads to use: `tts.threads` and `stt.threads`,
+  where `0` means decide. The voice default is every core up to 8 and the recognition default
+  is half the cores clamped to 1..8, and the reason is measured rather than assumed: on four
+  cores a Piper render of 16.1 s of audio took 4.10 s at one thread, 3.12 s at two, 2.90 s at
+  three and 2.87 s at four. Two threads buy 91 % of the gain, which is why recognition is not
+  given every core.
 - F3.6 Streaming: chunked HTTP for progressive download, and a WebSocket that
   accepts text fragments and returns audio frames plus a timing event.
 - F3.7 Output is deterministic for a fixed voice, speed, and engine version.
@@ -826,7 +835,7 @@ user needs a way to correct the result without waiting for a release.
 
 Order of operations, both directions:
 
-- Text to speech: sentence split, then user dictionary, then normalization, then
+- Text to speech: clause split, then user dictionary, then normalization, then
   CMUdict, then a regular inflection of a CMUdict entry, then letter-to-sound, then
   phonemes.
 - The inflection step exists because the dictionary is a word list and not a grammar: it

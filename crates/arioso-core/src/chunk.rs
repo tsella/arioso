@@ -79,6 +79,101 @@ pub fn sentences(text: &str) -> Vec<&str> {
     pieces
 }
 
+/// Shortest clause worth its own synthesis call.
+///
+/// Every cut is a separate call and a separate pause. A comma inside a short phrase is not a
+/// place a voice would breathe, so pieces below this are joined to the next one.
+pub const CLAUSE_FLOOR: usize = 60;
+
+/// Split `text` into clauses: the unit streaming synthesis speaks.
+///
+/// A clause ends at a comma, semicolon, colon or dash, and at the sentence terminators
+/// [`sentences`] honours. The pieces are then merged until each is at least
+/// [`CLAUSE_FLOOR`] characters, so a sentence made of short phrases is not three calls with a
+/// pause between each.
+///
+/// The result is slices of the input, trimmed, and empty pieces are dropped: concatenating
+/// them with spaces returns the text.
+#[must_use]
+pub fn clauses(text: &str) -> Vec<&str> {
+    // Spans rather than slices, so the merge below can join two neighbours without pointer
+    // arithmetic: a slice of the same string is `&text[start..end]`, and nothing else is.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if !ends_clause(text, index, ch) {
+            continue;
+        }
+        let cut = index + ch.len_utf8();
+        if let Some(span) = trim_span(text, start, cut) {
+            spans.push(span);
+        }
+        start = cut;
+    }
+    if let Some(span) = trim_span(text, start, text.len()) {
+        spans.push(span);
+    }
+
+    let mut merged: Vec<&str> = Vec::with_capacity(spans.len());
+    let mut current: Option<(usize, usize)> = None;
+    for (from, to) in spans {
+        let (from, to) = match current {
+            Some((first, _)) => (first, to),
+            None => (from, to),
+        };
+        if text[from..to].chars().count() >= CLAUSE_FLOOR {
+            merged.push(&text[from..to]);
+            current = None;
+        } else {
+            current = Some((from, to));
+        }
+    }
+    if let Some((from, to)) = current {
+        merged.push(&text[from..to]);
+    }
+    merged
+}
+
+/// The span with surrounding whitespace removed, or nothing when it is all whitespace.
+fn trim_span(text: &str, mut from: usize, mut to: usize) -> Option<(usize, usize)> {
+    while from < to {
+        let ch = text[from..to].chars().next()?;
+        if !ch.is_whitespace() {
+            break;
+        }
+        from += ch.len_utf8();
+    }
+    while to > from {
+        let ch = text[from..to].chars().next_back()?;
+        if !ch.is_whitespace() {
+            break;
+        }
+        to -= ch.len_utf8();
+    }
+    (from < to).then_some((from, to))
+}
+
+/// Whether the character at `index` ends a clause.
+fn ends_clause(text: &str, index: usize, ch: char) -> bool {
+    match ch {
+        ',' | ';' | ':' | '\u{2014}' | '\u{2013}' => {
+            // `1,000` and `12:30` are numbers, not pauses: a cut needs a space after it, or
+            // the end of the text.
+            match text[index + ch.len_utf8()..].chars().next() {
+                None => true,
+                Some(next) => next.is_whitespace() || is_closing(next),
+            }
+        }
+        '.' | '!' | '?' | '\u{2026}' | '\n' => closes_sentence(text, index, ch),
+        _ => false,
+    }
+}
+
+/// A character that may follow a terminator and still leave it at the end of a clause.
+fn is_closing(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | ')' | ']' | '}' | '\u{2019}' | '\u{201d}')
+}
+
 /// Whether the terminator at `index` ends the sentence.
 fn closes_sentence(text: &str, index: usize, ch: char) -> bool {
     if matches!(ch, '!' | '?' | '\n') {

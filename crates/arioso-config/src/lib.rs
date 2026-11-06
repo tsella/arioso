@@ -20,6 +20,38 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// the caller asks for one thing and receives another.
 pub const AUDIO_FORMATS: [&str; 2] = ["wav", "pcm"];
 
+/// The most threads a config may ask for.
+///
+/// A ceiling rather than a refusal above the core count: a container reports the cores it can
+/// see, and a config written for the host is not wrong for being larger than that.
+pub const MAX_THREADS: u32 = 64;
+
+/// Threads a voice graph is given when the config says `0`.
+///
+/// Every core, up to a ceiling. A voice graph is run once per clause and one voice speaks one
+/// request at a time, so the graph is the only work in flight; the ceiling exists because a
+/// 64-core host giving all of them to a 60 MB graph spends more time at the barrier than in
+/// the kernels, and because the same process may be transcribing.
+#[must_use]
+pub fn default_tts_threads() -> u32 {
+    cores().min(8)
+}
+
+/// Threads recognition is given when the config says `0`.
+///
+/// Half the cores, clamped 1..8. A transducer decodes one long sequence and gains from threads
+/// in a way a voice graph does not, but the other half of the machine is what keeps a
+/// synthesis responsive while a transcript is being produced.
+#[must_use]
+pub fn default_stt_threads() -> u32 {
+    (cores() / 2).clamp(1, 8)
+}
+
+/// Cores this machine reports.
+fn cores() -> u32 {
+    std::thread::available_parallelism().map_or(1, |count| u32::try_from(count.get()).unwrap_or(1))
+}
+
 /// Speech engines this binary can load.
 ///
 /// One engine per process: `tts.engine` chooses it, and only one is loaded at a time.
@@ -270,6 +302,12 @@ pub struct Tts {
     pub voice: Option<String>,
     /// Speaking rate multiplier.
     pub speed: f32,
+    /// Intra-op threads for synthesis. `0` means decide from the machine.
+    ///
+    /// Configurable because the right number is a property of the machine and of what else is
+    /// running: a server that also transcribes must not hand every core to the voice, and a
+    /// laptop doing one thing wants all of them.
+    pub threads: u32,
     /// Speaker number on a multi-speaker voice. Voices with one speaker ignore it.
     pub sid: i64,
     /// Output format: `wav` or `pcm`.
@@ -300,6 +338,7 @@ impl Default for Tts {
             engine: "piper".into(),
             voice: None,
             speed: 1.0,
+            threads: 0,
             sid: 0,
             format: "wav".into(),
             legacy_max_chars: None,
@@ -333,6 +372,11 @@ pub struct Stt {
     pub word_timestamps: bool,
     /// Longest accepted audio, in seconds.
     pub max_audio_s: u32,
+    /// Threads for recognition. `0` means decide from the machine.
+    ///
+    /// A transducer decodes one long sequence, so it gains from threads differently from a
+    /// voice graph run once per clause, and the two defaults are not the same number.
+    pub threads: u32,
     /// Capture sources. `mic` only until the Windows dual-capture work lands.
     pub capture: Capture,
 }
@@ -360,6 +404,7 @@ impl Default for Stt {
             stability_window_ms: 200,
             word_timestamps: false,
             max_audio_s: 600,
+            threads: 0,
             capture: Capture::default(),
         }
     }
@@ -802,6 +847,24 @@ impl Config {
     }
 
     /// Validate every field, naming the offending path.
+    /// Threads synthesis should use, resolving `0`.
+    #[must_use]
+    pub fn tts_threads(&self) -> u32 {
+        match self.tts.threads {
+            0 => default_tts_threads(),
+            set => set,
+        }
+    }
+
+    /// Threads recognition should use, resolving `0`.
+    #[must_use]
+    pub fn stt_threads(&self) -> u32 {
+        match self.stt.threads {
+            0 => default_stt_threads(),
+            set => set,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(ConfigError::UnsupportedVersion {
@@ -966,6 +1029,17 @@ impl Config {
                     self.vad.frame_ms
                 ),
             });
+        }
+        for (path, threads) in [
+            ("tts.threads", self.tts.threads),
+            ("stt.threads", self.stt.threads),
+        ] {
+            if threads > MAX_THREADS {
+                return Err(ConfigError::Invalid {
+                    path: path.into(),
+                    message: format!("expected 0 to {MAX_THREADS}, got {threads}"),
+                });
+            }
         }
         if !(0.0..=1.0).contains(&self.diarize.threshold) {
             return Err(ConfigError::Invalid {
