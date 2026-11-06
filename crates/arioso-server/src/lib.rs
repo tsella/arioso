@@ -875,11 +875,11 @@ impl AppState {
     fn voice_spec(&self) -> Result<&ModelSpec, ServerError> {
         let config = self.config();
         let voice = config.voice_name().to_string();
-        let found = if config.tts.engine == "kokoro" {
+        let found = if engine_holds_voices(&config.tts.engine) {
             self.manifest
                 .models
                 .iter()
-                .find(|model| model.engine == "kokoro" && model.kind == Kind::Tts)
+                .find(|model| model.engine == config.tts.engine && model.kind == Kind::Tts)
         } else {
             self.manifest.find_voice(&voice)
         };
@@ -902,11 +902,18 @@ impl AppState {
             // tells the caller which value to change.
             return Some((config.voice_name().to_string(), false));
         };
-        if config.tts.engine == "kokoro" {
+        if engine_holds_voices(&config.tts.engine) {
             let named = config.voice_name();
+            // Kokoro's styles are inside the archive, so the name is present when the archive
+            // indexes it. Supertonic's is a file, so the name is present when the file is.
             let present = self.is_installed(spec)
-                && archive_names(&self.models_dir, spec)
-                    .is_some_and(|names| names.contains(&named.to_string()));
+                && match config.tts.engine.as_str() {
+                    "kokoro" => archive_names(&self.models_dir, spec)
+                        .is_some_and(|names| names.contains(&named.to_string())),
+                    _ => self
+                        .file_of(spec, &format!("style-{named}.json"))
+                        .is_ok_and(|path| path.is_file()),
+                };
             return Some((named.to_string(), present));
         }
         Some((spec.id.clone(), self.is_installed(spec)))
@@ -2749,6 +2756,30 @@ pub struct ModelListView {
 /// The catalog entry holds every style, so a style is present only if the archive indexes
 /// it. Absent means the archive is not there to ask, which is a model that is not
 /// installed rather than a voice that is missing.
+/// Whether one catalog entry holds every voice of its engine.
+///
+/// A Piper voice is a catalog entry of its own, so the entry id is the voice. Kokoro and
+/// Supertonic are one entry holding many voices, so the entry is chosen by engine and the
+/// voice names a row inside it.
+fn engine_holds_voices(engine: &str) -> bool {
+    matches!(engine, "kokoro" | "supertonic")
+}
+
+/// The voices an entry holds, when it holds them.
+///
+/// Kokoro's styles are inside its archive, so the list exists only once the archive is on
+/// disk. Supertonic's are declared in the catalog, because each one is a file of its own.
+fn entry_voices(models_dir: &Path, spec: &ModelSpec) -> Option<Vec<String>> {
+    match spec.engine.as_str() {
+        "kokoro" => archive_names(models_dir, spec),
+        "supertonic" => {
+            let declared = meta_strings(&spec.meta, "voices");
+            (!declared.is_empty()).then_some(declared)
+        }
+        _ => None,
+    }
+}
+
 fn archive_names(models_dir: &Path, spec: &ModelSpec) -> Option<Vec<String>> {
     spec.files
         .iter()
@@ -3167,7 +3198,10 @@ impl ConfigPatch {
 }
 
 /// Engines this binary can actually serve, and what they are called.
-const TTS_ENGINES: [&str; 2] = ["piper", "kokoro"];
+// The engine list lives in the config crate, which is also what validates a config file.
+// A copy here drifted: it kept two engines after the third was added, so a patch that named
+// the third was refused by the server while the file it wrote was accepted by the loader.
+use arioso_config::TTS_ENGINES;
 const STT_ENGINES: [&str; 1] = ["sherpa"];
 
 #[utoipa::path(
@@ -3435,14 +3469,14 @@ fn validate(config: &Config, state: &AppState) -> Result<(), ApiError> {
     // voice is a style inside one archive, so it is checked against the archive when it is on
     // disk; before that there is nothing to check against, and a wrong name fails at load
     // naming the ones that exist.
-    let voice_known = if config.tts.engine == "kokoro" {
-        let archive = state
+    let voice_known = if engine_holds_voices(&config.tts.engine) {
+        let held = state
             .manifest
             .models
             .iter()
-            .find(|model| model.engine == "kokoro" && model.kind == arioso_models::Kind::Tts)
-            .and_then(|model| archive_names(&state.models_dir, model));
-        archive.is_none_or(|names| names.contains(&config.voice_name().to_string()))
+            .find(|model| model.engine == config.tts.engine && model.kind == arioso_models::Kind::Tts)
+            .and_then(|model| entry_voices(&state.models_dir, model));
+        held.is_none_or(|names| names.contains(&config.voice_name().to_string()))
     } else {
         state.manifest.find_voice(config.voice_name()).is_some()
     };
@@ -3542,8 +3576,8 @@ async fn list_voices(
         // A Kokoro entry is one model holding dozens of voice styles, so the styles are
         // the rows a picker can choose. Until the archive is on disk there is nothing to
         // name, and the catalog row stands in for it rather than a list of guesses.
-        let styles = if model.engine == "kokoro" && installed {
-            archive_names(&state.models_dir, model).unwrap_or_default()
+        let styles = if engine_holds_voices(&model.engine) {
+            entry_voices(&state.models_dir, model).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -3588,7 +3622,7 @@ async fn list_voices(
                 num_speakers: 1,
                 speakers: None,
                 installed,
-                active: active_engine == "kokoro" && active_voice == *name,
+                active: active_engine == model.engine && active_voice == *name,
             });
         }
     }
@@ -5994,6 +6028,64 @@ mod tests {
         // No file of the user's own, so the shipped dictionary is what applies.
         assert_eq!(json["dictionary"]["entries"], 3);
         assert!(json["dictionary"]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_third_engine_is_listed_and_patchable() {
+        // The list the server answers with and the list a patch is checked against are the
+        // same list, and it is the config crate's: a copy here kept two engines after the
+        // third shipped, so `GET /v1/engines` hid it and a patch naming it was refused.
+        let (state, _dir) = state();
+        let engines = state.engines();
+        assert!(
+            engines.iter().any(|engine| engine.id == "supertonic"),
+            "{:?}",
+            engines.iter().map(|engine| &engine.id).collect::<Vec<_>>()
+        );
+
+        let (status, body) = patch(
+            Arc::clone(&state),
+            r#"{"tts":{"engine":"supertonic"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let config = state.config();
+        assert_eq!(config.tts.engine, "supertonic");
+        assert_eq!(config.voice_name(), "M1", "the engine's own default");
+        let spec = state.voice_spec().expect("the entry resolves");
+        assert_eq!(spec.id, "supertonic-3", "the entry that holds the voice");
+    }
+
+    #[tokio::test]
+    async fn a_supertonic_voice_the_catalog_does_not_hold_is_refused() {
+        let (state, _dir) = state();
+        let (status, body) = patch(
+            Arc::clone(&state),
+            r#"{"tts":{"engine":"supertonic","voice":"Z9"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_ten_supertonic_voices_are_rows_a_picker_can_choose() {
+        let (state, _dir) = state();
+        let Json(list) = list_voices(
+            State(Arc::clone(&state)),
+            Query(VoicesQuery { language: None }),
+        )
+        .await;
+        let mut ids: Vec<&str> = list
+            .voices
+            .iter()
+            .filter(|voice| voice.engine == "supertonic")
+            .map(|voice| voice.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"]
+        );
     }
 
     #[tokio::test]
