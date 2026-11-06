@@ -518,10 +518,12 @@ impl App {
             self.error = Some("a download is already running".to_owned());
             return;
         }
+        // A row may name either the model or a style inside it, and a caller that echoes a
+        // row back should not have to know which. Both answer with the model's size.
         let total = self
             .voices
             .iter()
-            .find(|voice| voice.id == id)
+            .find(|voice| voice.model == id || voice.id == id)
             .map_or(0, |voice| voice.bytes);
         self.download = Some((id.to_owned(), 0, total));
         self.status = format!("downloading {id}…");

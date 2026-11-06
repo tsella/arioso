@@ -662,8 +662,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Outcome {
             }
             KeyCode::Char('d') => {
                 if let Some(voice) = app.current_voice() {
-                    let id = voice.id.clone();
-                    app.start_download(&id);
+                    // The model, not the style: `af_heart` is a row inside `kokoro-82m`, and
+                    // the downloader is asked for files, which belong to the model.
+                    let model = voice.model.clone();
+                    app.start_download(&model);
                 }
                 return Outcome::Changed;
             }
