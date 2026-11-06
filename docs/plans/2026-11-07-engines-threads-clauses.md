@@ -44,10 +44,11 @@ render is short, which is why the test uses a document long enough that it canno
 
 Config gains `tts.threads` and `stt.threads`, `0` meaning "decide":
 
-- **TTS default 4.** Synthesis is a small graph run many times, once per chunk. Four intra-op
-  threads saturate it on a laptop core; more threads spend their time in the barrier. Measured
-  on this machine at 4, 8, and "all cores" in the bench, and the number in MODELS.md is the
-  measurement, not the guess.
+- **TTS default: every core, up to 8.** The first draft said 4 and the measurement disagreed:
+  a 16.1 s Piper render on four cores took 4.10 s at one thread, 3.12 s at two, 2.90 s at
+  three and 2.87 s at four. The curve flattens at three but never turns, so the ceiling is
+  about a large host rather than about this one. Above 8 the graph spends more time at the
+  barrier than in the kernels, and the process may be transcribing at the same time.
 - **STT default: half the cores, clamped 1..8.** A transducer decodes one long sequence, so it
   benefits from threads in a way synthesis does not. This is what the server already does; it
   becomes the documented default rather than an accident in a helper.
@@ -106,6 +107,25 @@ not into the catalog as a voice that cannot speak.
 
 One table: engine, voice, licence, download, real time factor, memory, quality where a
 measurement exists. A row with no measurement says so; a row that was never run is not a row.
+
+## Review of this plan, before any of it was written
+
+Three things the review changed:
+
+1. **The thread default was a guess.** "4 is right for synthesis" came from the shape of the
+   work, not from a stopwatch. Measured, it is 2 on this machine for 91 % of the gain and the
+   curve is flat after 3. The plan now carries the numbers and the default follows them.
+2. **Phase 0 was one lock, not a redesign.** The draft talked about separating the engines'
+   executors; reading the code showed both routes already run on `spawn_blocking` and hold
+   separate slots. The only shared mutable state was the user dictionary, held for the length
+   of a render. A trait or a worker pool would have been a large change for a defect with a
+   four-line cause.
+3. **Clause splitting needed a floor.** Without it, a sentence of short phrases becomes several
+   synthesis calls and the voice pauses where the text did not. `CLAUSE_FLOOR` is in the plan
+   because the first version of the splitter did not have it.
+
+What the review could not settle: whether Supertonic and BlueTTS are expressible in Rust over
+`ort` at all. That is Phase 3 and 4, and it depends on their graphs, which are being read now.
 
 ## Order and gates
 
