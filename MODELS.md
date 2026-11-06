@@ -119,6 +119,33 @@ load is subtracted — measured on four cores at eight flow-matching steps. Five
 SDK default and costs about 40 % less; eight is what this engine ships, and the constant is in
 `arioso-tts-supertonic` for anyone who wants to argue with it.
 
+**int8, measured and not shipped.** The four graphs quantize to a quarter of their size —
+dynamic, per-channel, `QInt8`: 398,075,273 bytes become 101,566,556, with the 256 MB vector
+estimator at 26 % and the vocoder at 25 %. Memory follows, 500 MB down to 209 MB resident. What
+does not follow is speed. On the same four cores the same 10.7 s render took 21.3 s against
+15.3 s, because this CPU has AVX2 and no VNNI: the int8 kernels are not faster than the float
+ones, and the quantize and dequantize steps around every convolution are new work.
+
+The audio moved further than the size saving is worth. Against the float render of the same
+text with the same seed, the int8 render's spectrogram correlates 0.54 — below the 0.75 the
+same audio scores against itself shifted by 100 ms, which is the control for how much two
+valid renders may differ. A listener would not call that the same voice.
+
+| variant | bytes | resident | wall, 10.7 s of audio | spectrogram correlation |
+| --- | --- | --- | --- | --- |
+| float, 8 steps, shipped | 398,075,273 | 500 MB | 15.3 s | 1.00 |
+| float, 5 steps | 398,075,273 | 502 MB | 12.6 s | 0.94 |
+| int8 dynamic, 8 steps | 101,566,556 | 209 MB | 21.8 s | 0.54 |
+
+Five steps is the model's own SDK default and the cheaper lever: a quarter less time for a
+change the same measurement calls modest. It is not the shipped default because eight is what
+the reference implementation chose and the reason to pick this engine over Piper is quality,
+not speed. The constant is `STEPS` in `arioso-tts-supertonic` for anyone who wants the trade.
+
+int8 is worth revisiting on a host with VNNI or AMX, where the same graphs would run the
+kernels the quantization is for. Nothing here has measured that, and this table is a
+measurement of this machine rather than of the format.
+
 **Why BlueTTS is not in the binary.** Its acoustic path is expressible in Rust — six ONNX
 graphs, standard operators, batch fixed at one, and a driver reproducing the Python package's
 waveform bit for bit — but text to phonemes is not. Latin scripts go through espeak-ng, which

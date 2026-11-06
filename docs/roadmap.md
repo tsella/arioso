@@ -19,6 +19,17 @@ where one exists, the measurement that decided that.
   comparison: `MODELS.md`, `docs/plans/2026-11-02-tts-engine-comparison.md`, and
   `docs/plans/2026-11-07-engines-threads-clauses.md`.
 
+- **Supertonic int8, on a host that has the kernels for it.** Dynamic per-channel `QInt8`
+  takes the four graphs from 398 MB to 102 MB and the resident set from 500 MB to 209 MB, and
+  on this machine it is 40 % slower with the audio drifting to 0.54 spectrogram correlation
+  against the float render. The reason is the CPU: AVX2 and no VNNI, so the int8 kernels are
+  not faster and the quantize steps are extra work. A host with VNNI or AMX would answer the
+  question the format is for, and nothing here has measured one. Table: `MODELS.md`.
+
+- **A step count for Supertonic as a setting.** Five steps is the model's own default, costs a
+  quarter less time and scores 0.94 against eight. It is a constant today because one engine's
+  quality dial is not yet a product decision; it becomes a setting when a user asks for one.
+
 ## Speech
 
 Diarization ships as a whole-file route. What it does not do:
