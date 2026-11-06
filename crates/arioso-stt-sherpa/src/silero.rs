@@ -95,23 +95,41 @@ impl Silero {
 
 impl Gate for Silero {
     fn speech(&mut self, frame: &[f32]) -> bool {
+        // The segmenter cuts at exactly the model's window, so the common path needs no
+        // buffer: a copy into `pending` and a copy back out, per frame, at thirty-one frames
+        // a second, for audio that is already the right shape.
+        if self.pending.is_empty() && frame.len() == FRAME_SAMPLES {
+            self.last = classify(&mut self.detector, frame);
+            return self.last;
+        }
         self.pending.extend_from_slice(frame);
         while self.pending.len() >= FRAME_SAMPLES {
-            let rest = self.pending.split_off(FRAME_SAMPLES);
-            self.detector.accept_waveform(&self.pending);
-            self.last = self.detector.detected();
-            // Sherpa queues the audio of every finished segment, and this gate never reads
-            // it: the boundary it was kept for is already decided here. Left in place the
-            // queue holds each utterance for the life of the stream, so a long call grows
-            // by the length of everything said on it.
-            self.detector.clear();
-            self.pending = rest;
+            self.last = classify(&mut self.detector, &self.pending[..FRAME_SAMPLES]);
+            // `drain` keeps the allocation. `split_off` returned the tail as a new `Vec` and
+            // assigning it dropped the buffer, so the next frame allocated again: thirty-one
+            // allocations a second, for a window that never changes size.
+            self.pending.drain(..FRAME_SAMPLES);
         }
         // A frame shorter than the model's window is answered with the state the last whole
         // window produced: the segmenter cuts per frame, and a partial window cannot be
         // classified without inventing the samples it is missing.
         self.last
     }
+}
+
+/// Run one window through the model.
+///
+/// A free function rather than a method, so the window can borrow `pending` while the detector
+/// is borrowed mutably: two fields of one struct, which the compiler allows when they are
+/// named separately and not when a `&mut self` covers both.
+fn classify(detector: &mut VoiceActivityDetector, window: &[f32]) -> bool {
+    detector.accept_waveform(window);
+    let answer = detector.detected();
+    // Sherpa queues the audio of every finished segment, and this gate never reads it: the
+    // boundary it was kept for is already decided here. Left in place the queue holds each
+    // utterance for the life of the stream, so a long call grows by everything said on it.
+    detector.clear();
+    answer
 }
 
 #[cfg(test)]
@@ -155,6 +173,53 @@ mod tests {
             .iter()
             .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32_768.0)
             .collect()
+    }
+
+    #[test]
+    #[ignore = "needs ARIOSO_TEST_SILERO: a real model and a recording"]
+    fn a_frame_the_right_size_never_touches_the_buffer() {
+        // The segmenter hands the gate one window at a time, so the buffer would be a copy of
+        // audio that is already the right shape. It must stay empty and unallocated: a `Vec`
+        // that grows to hold it, thirty-one times a second, is the cost this path avoids.
+        let (model, wav) = fixture();
+        let samples = read_wav(&wav);
+        let mut gate = Silero::load(&model, 0.5).expect("the model loads");
+        let mut spoken = 0;
+        for frame in samples.chunks_exact(FRAME_SAMPLES).take(200) {
+            if gate.speech(frame) {
+                spoken += 1;
+            }
+        }
+        // The struct is built with one window's capacity, and that is the whole point: the
+        // fast path must leave it exactly as it was found, not grow it.
+        assert!(gate.pending.is_empty(), "the buffer held audio after exact frames");
+        assert_eq!(
+            gate.pending.capacity(),
+            FRAME_SAMPLES,
+            "the buffer grew for frames that needed no buffering"
+        );
+        assert!(spoken > 0, "the recording has speech in its first frames");
+    }
+
+    #[test]
+    #[ignore = "needs ARIOSO_TEST_SILERO: a real model and a recording"]
+    fn a_buffer_keeps_its_capacity_across_odd_frames() {
+        // The buffered path still runs for frames that are not the model's size, and it must
+        // not reallocate every time. `split_off` did: it returned the tail as a new `Vec` and
+        // the assignment dropped the buffer, so the next frame allocated again.
+        let (model, wav) = fixture();
+        let samples = read_wav(&wav);
+        let mut gate = Silero::load(&model, 0.5).expect("the model loads");
+        let mut capacity = 0;
+        for frame in samples.chunks_exact(FRAME_SAMPLES + 7).take(50) {
+            let _ = gate.speech(frame);
+            capacity = capacity.max(gate.pending.capacity());
+        }
+        assert!(capacity >= FRAME_SAMPLES, "the buffer allocated: capacity {capacity}");
+        assert!(
+            capacity <= FRAME_SAMPLES * 4,
+            "the buffer grew without bound: capacity {capacity}"
+        );
     }
 
     #[test]
