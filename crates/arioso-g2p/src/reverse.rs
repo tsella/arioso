@@ -142,8 +142,14 @@ impl ReverseIndex {
     /// exact match covers a span does the phonetic comparison run.
     #[must_use]
     pub fn apply(&self, cmu: &CmuDict, text: &str) -> String {
+        // The dictionary is asked before the text is scanned: an index with nothing to match
+        // is the common case for a caller that corrects every transcript, and scanning the
+        // transcript to find that out allocates a word table nobody reads.
+        if self.forms.is_empty() {
+            return text.to_owned();
+        }
         let words = words(text);
-        if words.is_empty() || self.forms.is_empty() {
+        if words.is_empty() {
             return text.to_owned();
         }
 
@@ -200,6 +206,12 @@ impl ReverseIndex {
                     candidates.push((score, off_by, index, index + width, &form.term));
                 }
             }
+        }
+        // No candidate is the ordinary case: a transcript of ordinary English against a
+        // dictionary of names matches nothing. Sorting an empty list and marking a span table
+        // it will not use is work per transcript that buys nothing.
+        if candidates.is_empty() {
+            return text.to_owned();
         }
         candidates.sort_by(|a, b| {
             // Score, then the span whose word count matches the form, then the longer one.

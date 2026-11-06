@@ -109,6 +109,44 @@ const CORRECTION_USER: &str = r#"{"version":1,"entries":[
 ]}"#;
 
 #[test]
+fn a_transcript_with_nothing_to_correct_costs_almost_nothing() {
+    // The ordinary case: a dictionary of names, a transcript of ordinary English, no match.
+    // This used to allocate the word table, the span table and the taken flags before finding
+    // out that there was nothing to replace.
+    let parsed = CmuDict::parse(CORRECTION_DICT);
+    let user = UserDictionary::parse(CORRECTION_USER).unwrap();
+    let index = ReverseIndex::build(&user, &parsed);
+    let text = "I went to the shop yesterday";
+    let (out, stats) = measure_warm(|| index.apply(&parsed, text));
+    eprintln!("clean: {stats:?}");
+    assert_eq!(out, text);
+    // Almost all of this is pronouncing six words through the rules; the span table and the
+    // taken flags the old order built after the search are gone. The bound is the measurement
+    // with a little room, not a target.
+    assert!(
+        stats.allocations <= 24,
+        "a clean transcript costs {} allocations: {stats:?}",
+        stats.allocations
+    );
+}
+
+#[test]
+fn an_empty_dictionary_does_not_scan_the_transcript() {
+    let parsed = CmuDict::parse(CORRECTION_DICT);
+    let empty = UserDictionary::parse(r#"{"version":1,"entries":[]}"#).unwrap();
+    let index = ReverseIndex::build(&empty, &parsed);
+    assert!(index.is_empty());
+    let (out, stats) = measure_warm(|| index.apply(&parsed, "a long sentence that would need scanning"));
+    assert_eq!(out, "a long sentence that would need scanning");
+    // One allocation: the returned `String`. The word table the old order built first is gone.
+    assert!(
+        stats.allocations <= 2,
+        "an empty dictionary costs {} allocations: {stats:?}",
+        stats.allocations
+    );
+}
+
+#[test]
 fn a_correction_reuses_a_compiled_dictionary() {
     // The forms depend only on the dictionary, so they are pronounced and ordered once.
     // `correct` re-did both for every utterance, which is what this bound is about.
