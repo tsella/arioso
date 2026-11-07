@@ -157,7 +157,7 @@ pub struct AppState {
     /// A download outlives the request that started it, so the progress has to live
     /// somewhere other than the handler. It is a map rather than a channel because the
     /// catalog has to answer "what is happening" without a subscriber.
-    downloads: std::sync::Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
+    downloads: std::sync::Mutex<std::collections::BTreeMap<String, Reservation>>,
     /// Caps how many models are fetched at once. A catalog entry is hundreds of megabytes,
     /// and an unbounded fan-out saturates the link and the disk for everything else.
     download_slots: Arc<tokio::sync::Semaphore>,
@@ -244,6 +244,29 @@ fn stream_model_problem(config: &Config, manifest: &Manifest) -> Option<String> 
             "stt.stream_model {id} is not in the catalog; GET /v1/models lists what is"
         )),
     }
+}
+
+/// What holds a model's single-writer slot.
+///
+/// One slot per catalog id, because two writers into one set of `.part` files corrupt it. The
+/// slot says *who* holds it: a download in flight reports its progress, and a delete reports
+/// nothing, because a delete is not a download and a caller told otherwise waits for bytes
+/// that are never coming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reservation {
+    /// A fetch is running: bytes so far, and bytes expected.
+    Downloading { downloaded: u64, total: u64 },
+    /// A delete is removing the files. No download may start until it finishes.
+    Deleting,
+}
+
+/// Who holds a model's slot, as [`AppState::try_start_download`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// A download is in flight, at this progress.
+    Downloading(u64, u64),
+    /// A delete is removing the files.
+    Deleting,
 }
 
 impl AppState {
@@ -402,19 +425,49 @@ impl AppState {
     /// The check and the insert happen under one lock. Taken separately, two requests that
     /// both saw "not running" would both spawn a task, and the two tasks would write the
     /// same `.part` file at the same time.
-    fn try_start_download(&self, id: &str, total: u64) -> Option<(u64, u64)> {
+    fn try_start_download(&self, id: &str, total: u64) -> Result<(), Held> {
         match self.downloads.lock() {
             Ok(mut map) => {
-                if let Some(running) = map.get(id) {
-                    return Some(*running);
+                match map.get(id) {
+                    Some(Reservation::Downloading { downloaded, total }) => {
+                        return Err(Held::Downloading(*downloaded, *total));
+                    }
+                    Some(Reservation::Deleting) => return Err(Held::Deleting),
+                    None => {}
                 }
-                map.insert(id.to_owned(), (0, total));
-                None
+                map.insert(
+                    id.to_owned(),
+                    Reservation::Downloading {
+                        downloaded: 0,
+                        total,
+                    },
+                );
+                Ok(())
             }
-            // A poisoned lock means another task panicked holding it. Reporting the
-            // download as already running refuses this request instead of risking a second
-            // writer, which is the safe direction to fail in.
-            Err(_) => Some((0, total)),
+            // A poisoned lock means another task panicked holding it. Refusing this request
+            // is the safe direction to fail in: a second writer into one `.part` file is
+            // worse than a request the caller retries.
+            Err(_) => Err(Held::Downloading(0, total)),
+        }
+    }
+
+    /// Claim `id` for a delete, or report what holds it.
+    fn try_start_delete(&self, id: &str) -> Result<(), Held> {
+        match self.downloads.lock() {
+            Ok(mut map) => {
+                match map.get(id) {
+                    Some(Reservation::Downloading { downloaded, total }) => {
+                        return Err(Held::Downloading(*downloaded, *total));
+                    }
+                    // A second delete is a second set of unlinks over the same names. The
+                    // first one is already doing what the caller asked for.
+                    Some(Reservation::Deleting) => return Err(Held::Deleting),
+                    None => {}
+                }
+                map.insert(id.to_owned(), Reservation::Deleting);
+                Ok(())
+            }
+            Err(_) => Err(Held::Downloading(0, 0)),
         }
     }
 
@@ -423,11 +476,11 @@ impl AppState {
     /// Returns `Some(progress)` when a download was already running, and `None` when this
     /// call started one. The task waits for a slot, fetches through the configured mirror,
     /// and clears the catalog entry whether it worked or not.
-    pub(crate) fn begin_download(self: &Arc<Self>, spec: &ModelSpec) -> Option<(u64, u64)> {
+    pub(crate) fn begin_download(self: &Arc<Self>, spec: &ModelSpec) -> Option<Held> {
         let id = spec.id.clone();
         let total = spec.total_size();
-        if let Some(running) = self.try_start_download(&id, total) {
-            return Some(running);
+        if let Err(held) = self.try_start_download(&id, total) {
+            return Some(held);
         }
         // Announced before the task is spawned: a subscriber that connects while the
         // download waits for a slot still learns it is running.
@@ -507,8 +560,11 @@ impl AppState {
             return Ok(dir);
         }
         let total = spec.total_size();
-        if self.try_start_download(id, total).is_some() {
-            return Err(format!("{id} is already downloading"));
+        if let Err(held) = self.try_start_download(id, total) {
+            return Err(match held {
+                Held::Downloading(..) => format!("{id} is already downloading"),
+                Held::Deleting => format!("{id} is being removed"),
+            });
         }
         let started = std::time::Instant::now();
         let result = self.fetch_and_wait(&spec, &dir, total, &mut progress);
@@ -616,7 +672,18 @@ impl AppState {
     /// Record a download's progress, replacing what was there.
     fn note_download(&self, id: &str, downloaded: u64, total: u64) {
         if let Ok(mut map) = self.downloads.lock() {
-            map.insert(id.to_owned(), (downloaded, total));
+            // A download updates its own progress, and starts the record if the fetch began
+            // without claiming the slot. A slot held by a delete is not this task's to write:
+            // the delete removes the entry when it finishes.
+            match map.get(id) {
+                Some(Reservation::Deleting) => {}
+                Some(Reservation::Downloading { .. }) | None => {
+                    map.insert(
+                        id.to_owned(),
+                        Reservation::Downloading { downloaded, total },
+                    );
+                }
+            }
         }
         self.publish(ModelEvent {
             id: id.to_owned(),
@@ -692,7 +759,12 @@ impl AppState {
 
     /// What a download has reported so far, if one is running.
     fn download_progress(&self, id: &str) -> Option<(u64, u64)> {
-        self.downloads.lock().ok()?.get(id).copied()
+        match self.downloads.lock().ok()?.get(id)? {
+            Reservation::Downloading { downloaded, total } => Some((*downloaded, *total)),
+            // A delete is not a download: a poller that saw progress here would wait for
+            // bytes that are never coming.
+            Reservation::Deleting => None,
+        }
     }
 
     /// The accept loop's handle, when this process is serving.
@@ -3664,7 +3736,17 @@ async fn start_download(
     };
     let total = spec.total_size();
     let (downloaded, already) = match state.begin_download(&spec) {
-        Some(running) => (running.0, true),
+        // A delete holds the same slot a download does, and answering 202 would promise
+        // bytes that no task is fetching: the caller would poll a progress that never moves.
+        Some(Held::Deleting) => {
+            return ApiError::coded(
+                StatusCode::CONFLICT,
+                "delete_in_progress",
+                format!("{id} is being removed; download it once the delete finishes"),
+            )
+            .into_response();
+        }
+        Some(Held::Downloading(downloaded, _)) => (downloaded, true),
         None => (0, false),
     };
     if already {
@@ -3711,7 +3793,7 @@ async fn delete_model(
     // step. Apart, a request that lands between the check and the unlink starts writing
     // the `.part` file this is removing, and the delete reports a model gone while a
     // download keeps writing into it.
-    if state.try_start_download(&id, 0).is_some() {
+    if state.try_start_delete(&id).is_err() {
         return ApiError::coded(
             StatusCode::CONFLICT,
             "download_in_progress",
@@ -6036,6 +6118,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_without_an_accept_loop_is_refused() {
+        // An embedded router has no accept loop, so exiting here would kill the process that
+        // hosts it. The guard is the whole reason the route is not a plain `exit`.
+        let (state, _dir) = state();
+        for response in [
+            stop_server(State(Arc::clone(&state))).await,
+            abort_server(State(Arc::clone(&state))).await,
+        ] {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_patch_changes_nothing() {
+        // Validation runs against the prospective config and the write happens after it
+        // passes, so a refused patch leaves the running server on the config it had.
+        let (state, _dir) = state();
+        let before = state.config();
+        let (status, body) = patch(
+            Arc::clone(&state),
+            r#"{"tts":{"engine":"piper","voice":"af_heart"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let after = state.config();
+        assert_eq!(after.tts.engine, before.tts.engine);
+        assert_eq!(after.tts.voice, before.tts.voice);
+    }
+
+    #[tokio::test]
+    async fn a_download_asked_for_during_a_delete_is_refused_not_accepted() {
+        // Both hold the same single-writer slot, and the slot used to say only "busy". A
+        // download that landed on a delete was answered 202 with the delete's zero progress,
+        // and no task ever fetched a byte: the caller waited on a download that did not exist.
+        let (state, _dir) = state();
+        let id = "silero-vad";
+        assert!(
+            state.try_start_delete(id).is_ok(),
+            "the delete claims the slot"
+        );
+
+        let response = start_download(State(Arc::clone(&state)), AxumPath(id.to_string())).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "a delete is not a download"
+        );
+        // The delete's own reservation is untouched by the refused request.
+        assert_eq!(state.download_progress(id), None);
+    }
+
+    #[tokio::test]
+    async fn a_model_being_deleted_is_not_reported_as_downloading() {
+        let (state, _dir) = state();
+        let id = "silero-vad";
+        assert!(state.try_start_delete(id).is_ok());
+        let view = state
+            .models_view()
+            .into_iter()
+            .find(|model| model.id == id)
+            .expect("the catalog holds it");
+        assert_eq!(view.downloaded, None, "a delete reports no progress");
+        assert_ne!(view.state, "downloading", "a delete is not a download");
+    }
+
+    #[tokio::test]
+    async fn a_second_delete_of_the_same_model_is_refused() {
+        let (state, _dir) = state();
+        let id = "silero-vad";
+        assert!(state.try_start_delete(id).is_ok());
+        let response = delete_model(State(Arc::clone(&state)), AxumPath(id.to_string())).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn the_third_engine_is_listed_and_patchable() {
         // The list the server answers with and the list a patch is checked against are the
         // same list, and it is the config crate's: a copy here kept two engines after the
@@ -6716,21 +6873,25 @@ mod tests {
         let id = state.manifest.models.first().unwrap().id.clone();
         assert_eq!(
             state.try_start_download(&id, 100),
-            None,
+            Ok(()),
             "the first caller owns it"
         );
         let second = state.try_start_download(&id, 100);
-        assert_eq!(second, Some((0, 100)), "the second caller must be refused");
+        assert_eq!(
+            second,
+            Err(Held::Downloading(0, 100)),
+            "the second caller must be refused"
+        );
         state.note_download(&id, 40, 100);
         assert_eq!(
             state.try_start_download(&id, 100),
-            Some((40, 100)),
+            Err(Held::Downloading(40, 100)),
             "a third caller sees the progress, not a fresh start"
         );
         state.finish_download(&id, None);
         assert_eq!(
             state.try_start_download(&id, 100),
-            None,
+            Ok(()),
             "a finished download can be started again"
         );
     }
