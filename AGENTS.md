@@ -236,7 +236,9 @@ other services, no home paths, no personal data in the title, the body, or the d
    `docs/plans/` holds tasks with ticks, `EXAMPLES.md` holds measured transcripts,
    `MODELS.md` holds the measurements behind the model defaults,
    `docs/lessons.md` holds what a change taught, `docs/security.md` holds the threat
-   notes. A behaviour change that is not in the docs is not finished.
+   notes, `docs/state-machines.md` holds the states the server, the engines, the sockets
+   and the front end move between. A behaviour change that is not in the docs is not
+   finished.
 5. **Conventional commits, one logical change each.** `feat`, `fix`, `docs`, `chore`,
    `test`, `refactor`, `perf`. The message says why, not only what.
 6. **Warnings are errors.** The workspace denies warnings; there is no `#[allow]` without
@@ -279,7 +281,9 @@ other services, no home paths, no personal data in the title, the body, or the d
 `PRD.md` for what the product promises and in what order. `docs/plans/` for the task
 list, ticked as work lands. `examples.md` for how the API behaves in a real call, with
 transcripts. `docs/lessons.md` for the traps. `docs/security.md` for the exposure
-decisions and the fuzz results. `openapi.json` when `server.docs` is on.
+decisions and the fuzz results. `docs/state-machines.md` for the states and the
+transitions that are reachable but wrong, with the test that pins each one.
+`openapi.json` when `server.docs` is on.
 
 If this file and the code disagree, the code is right and this file is a bug: fix it in
 the same commit.
